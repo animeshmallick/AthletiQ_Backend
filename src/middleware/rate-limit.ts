@@ -1,7 +1,11 @@
 import { rateLimit } from 'express-rate-limit';
 import { isTest } from '../config/env.js';
 
-const handler = (_req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) => {
+/** 429 response shared by the limiters (exported for tests). */
+export const rateLimitHandler = (
+  _req: unknown,
+  res: { status: (n: number) => { json: (b: unknown) => void } },
+) => {
   res.status(429).json({
     error: {
       code: 'RATE_LIMITED',
@@ -17,7 +21,7 @@ export const apiLimiter = rateLimit({
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   skip: () => isTest,
-  handler,
+  handler: rateLimitHandler,
 });
 
 /** Tight limit for credential endpoints (per IP); per-account lockout is enforced separately. */
@@ -27,5 +31,5 @@ export const authLimiter = rateLimit({
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   skip: () => isTest,
-  handler,
+  handler: rateLimitHandler,
 });
