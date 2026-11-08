@@ -12,6 +12,7 @@ import { currentUser, requireAdmin, requireCoach } from '../../middleware/auth.j
 import { isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { assertNotCancelled, cancellationsIn } from './cancellations.js';
+import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
 
 export const coachSessionsRouter = Router();
 
@@ -142,6 +143,16 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
     .onConflictDoNothing()
     .returning();
   if (!session) throw AppError.conflict('You have already checked in for this session');
+  if (!within) {
+    notifyInBackground(() =>
+      notifyAdmins({
+        title: 'Check-in flagged',
+        body: `${user.name} checked in ${distance} m from ${location.name} (${batch.name})`,
+        link: '/coach-sessions',
+        tag: `flag-${session.id}`,
+      }),
+    );
+  }
 
   ok(res, {
     session: present(session),

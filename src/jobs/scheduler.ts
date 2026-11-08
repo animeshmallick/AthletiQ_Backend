@@ -3,6 +3,7 @@ import { APP_TIMEZONE } from '../config/constants.js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { runInvoiceJob } from './invoice-job.js';
+import { sendSessionReminders } from './session-reminders.js';
 
 const tasks: ScheduledTask[] = [];
 
@@ -26,6 +27,22 @@ export function startScheduler(): void {
       { timezone: APP_TIMEZONE, name: 'invoice-generation', noOverlap: true },
     ),
   );
+
+  if (cron.validate(env.REMINDER_CRON)) {
+    tasks.push(
+      cron.schedule(
+        env.REMINDER_CRON,
+        () => {
+          sendSessionReminders().catch((err: unknown) =>
+            logger.error({ err }, 'Session reminders failed'),
+          );
+        },
+        { timezone: APP_TIMEZONE, name: 'session-reminders', noOverlap: true },
+      ),
+    );
+  } else {
+    logger.warn({ cron: env.REMINDER_CRON }, 'Invalid REMINDER_CRON; session reminders disabled');
+  }
 
   // Catch up shortly after boot in case the server was down at midnight. Idempotent.
   setTimeout(() => {

@@ -42,6 +42,14 @@ const EnvSchema = z.object({
 
   SCHEDULER_ENABLED: flag(true),
   INVOICE_CRON: z.string().default('0 0 * * *'),
+
+  /** Firebase service-account JSON (raw or base64) for push notifications. Unset = push disabled. */
+  FCM_SERVICE_ACCOUNT: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v : undefined)),
+  /** When coaches get their "sessions today" push (IST). */
+  REMINDER_CRON: z.string().default('0 7 * * *'),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

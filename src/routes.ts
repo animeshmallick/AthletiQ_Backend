@@ -13,6 +13,7 @@ import { feePlansRouter } from './modules/fee-plans/fee-plans.routes.js';
 import { feedbackRouter } from './modules/feedback/feedback.routes.js';
 import { lessonsRouter } from './modules/lessons/lessons.routes.js';
 import { locationsRouter } from './modules/locations/locations.routes.js';
+import { pushRouter } from './modules/push/push.routes.js';
 import {
   publicRegistrationRouter,
   registrationsRouter,
@@ -45,6 +46,7 @@ export function apiRouter(): Router {
   api.use('/invoices', invoicesRouter);
   api.use('/finance', financeRouter);
   api.use('/settings', settingsRouter);
+  api.use('/me', pushRouter);
 
   // Admin only
   api.use('/registrations', requireAdmin, registrationsRouter);

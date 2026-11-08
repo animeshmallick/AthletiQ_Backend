@@ -205,6 +205,11 @@ APP_URL=https://www.edupilots.in
 SCHEDULER_ENABLED=true
 # 00:00 IST daily: issues each student's prepaid invoice on the day their month starts
 INVOICE_CRON=0 0 * * *
+# Push notifications (Android app). Firebase console → Project settings → Service accounts →
+# Generate new private key; paste the JSON base64-encoded on one line. Empty = push disabled.
+FCM_SERVICE_ACCOUNT=
+# Coaches get a "sessions today" push at this time (IST).
+REMINDER_CRON=0 7 * * *
 
 # Used once by the seed step (5.3), then delete these lines
 SEED_ADMIN_EMAIL=you@yourdomain.com

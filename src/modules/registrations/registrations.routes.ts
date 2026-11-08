@@ -36,6 +36,7 @@ import { hashPassword } from '../auth/password.js';
 import { billOnAcceptance } from '../billing/invoice-generator.js';
 import { getAcademySettings } from '../settings/settings.js';
 import { createStudent, getStudentDetail } from '../students/students.service.js';
+import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
 
 // ═══ Public (unauthenticated) ═══════════════════════════════════════════════
 
@@ -135,6 +136,14 @@ publicRegistrationRouter.post('/student', registrationLimiter, async (req, res) 
     })
     .returning({ id: registrationRequests.id });
 
+  notifyInBackground(() =>
+    notifyAdmins({
+      title: 'New registration',
+      body: `${body.fullName} wants to join as a student`,
+      link: '/registrations',
+      tag: 'registrations',
+    }),
+  );
   created(res, {
     id: row!.id,
     message:
@@ -192,6 +201,14 @@ publicRegistrationRouter.post('/coach', registrationLimiter, async (req, res) =>
     })
     .returning({ id: registrationRequests.id });
 
+  notifyInBackground(() =>
+    notifyAdmins({
+      title: 'New registration',
+      body: `${body.fullName} wants to join as a coach`,
+      link: '/registrations',
+      tag: 'registrations',
+    }),
+  );
   created(res, {
     id: row!.id,
     message:
