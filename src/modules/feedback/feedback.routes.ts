@@ -73,6 +73,7 @@ async function attendanceForWeek(
       .where(
         and(
           eq(makeupSessions.studentId, studentId),
+          eq(makeupSessions.status, 'approved'),
           gte(makeupSessions.date, weekStart),
           lte(makeupSessions.date, end),
         ),

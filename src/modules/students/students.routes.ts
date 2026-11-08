@@ -56,7 +56,8 @@ import {
   transferStudent,
 } from './students.service.js';
 import { noticeStudentJoined } from '../push/coach-notices.js';
-import { notifyInBackground } from '../push/push.service.js';
+import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
+import { assertNotCancelled } from '../attendance/cancellations.js';
 
 export const studentsRouter = Router();
 
@@ -457,7 +458,11 @@ const MakeupBody = z.object({
   reason: zOptionalText(500),
 });
 
-/** Admins, or the student's current coach, can book a one-off session in any active batch. */
+/**
+ * One-off session in another batch/day.
+ *  - Admins: any batch, approved immediately.
+ *  - Coaches (their own students): only in batches they coach, and it waits for an admin.
+ */
 studentsRouter.post('/:id/makeups', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(MakeupBody, req.body);
@@ -475,18 +480,54 @@ studentsRouter.post('/:id/makeups', async (req, res) => {
   }
   if (body.date < s.joiningDate)
     throw AppError.unprocessable('Makeup date is before the student joined');
+  const admin = user.role === 'admin';
+  if (!admin && batch.coachId !== user.id) {
+    throw AppError.forbidden(
+      'You can book makeups only in your own batches. Ask an admin to book another coach’s batch.',
+    );
+  }
+  await assertNotCancelled(batch.id, body.date);
 
+  // A previously rejected request for the same session can be asked for again.
+  await db
+    .delete(makeupSessions)
+    .where(
+      and(
+        eq(makeupSessions.studentId, id),
+        eq(makeupSessions.batchId, body.batchId),
+        eq(makeupSessions.date, body.date),
+        eq(makeupSessions.status, 'rejected'),
+      ),
+    );
   const [makeup] = await db
     .insert(makeupSessions)
-    .values({ studentId: id, ...body, missedDate: body.missedDate ?? null, createdById: user.id })
+    .values({
+      studentId: id,
+      ...body,
+      missedDate: body.missedDate ?? null,
+      createdById: user.id,
+      status: admin ? 'approved' : 'pending',
+      reviewedById: admin ? user.id : null,
+      reviewedAt: admin ? new Date() : null,
+    })
     .returning();
   await audit({
     ...auditCtx(req),
-    action: 'student.makeup_booked',
+    action: admin ? 'student.makeup_booked' : 'student.makeup_requested',
     entityType: 'student',
     entityId: id,
     metadata: body,
   });
+  if (!admin) {
+    notifyInBackground(() =>
+      notifyAdmins({
+        title: 'Makeup request',
+        body: `${s.fullName} → ${batch.name} on ${body.date} · requested by ${user.name}`,
+        link: '/makeups',
+        tag: 'makeups',
+      }),
+    );
+  }
   created(res, makeup);
 });
 

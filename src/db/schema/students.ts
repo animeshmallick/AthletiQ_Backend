@@ -4,13 +4,14 @@ import {
   date,
   index,
   integer,
+  pgEnum,
   pgTable,
   smallint,
   text,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { gender, id, studentStatus, timestamps } from './_shared.js';
+import { gender, id, studentStatus, timestamps, tz } from './_shared.js';
 import { batches, feePlans } from './academy.js';
 import { users } from './users.js';
 
@@ -107,6 +108,8 @@ export const enrollments = pgTable(
 );
 
 /** One-off reschedule: the student attends another batch's session on a specific date. */
+export const makeupStatus = pgEnum('makeup_status', ['pending', 'approved', 'rejected']);
+
 export const makeupSessions = pgTable(
   'makeup_sessions',
   {
@@ -122,9 +125,15 @@ export const makeupSessions = pgTable(
     missedDate: date({ mode: 'string' }),
     reason: text(),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
+    /** Coach requests wait for an admin; admin bookings are approved immediately. */
+    status: makeupStatus().notNull().default('approved'),
+    reviewedById: uuid().references(() => users.id, { onDelete: 'set null' }),
+    reviewedAt: tz(),
+    reviewNote: text(),
     ...timestamps,
   },
   (t) => [
+    index('makeup_status_idx').on(t.status),
     uniqueIndex('makeup_student_batch_date_uq').on(t.studentId, t.batchId, t.date),
     index('makeup_batch_date_idx').on(t.batchId, t.date),
   ],

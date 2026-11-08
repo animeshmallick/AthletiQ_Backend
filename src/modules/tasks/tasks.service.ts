@@ -5,7 +5,12 @@
 import { and, count, eq, isNull, lt } from 'drizzle-orm';
 import { APP_TIMEZONE } from '../../config/constants.js';
 import { db } from '../../db/client.js';
-import { coachSessions, invoices, registrationRequests } from '../../db/schema/index.js';
+import {
+  coachSessions,
+  invoices,
+  makeupSessions,
+  registrationRequests,
+} from '../../db/schema/index.js';
 import { todayInAppTz } from '../../lib/dates.js';
 import { dayOverview } from '../attendance/attendance.routes.js';
 import type { AuthUser } from '../auth/auth.types.js';
@@ -25,7 +30,8 @@ export interface Task {
     | 'feedback'
     | 'registrations'
     | 'flagged-check-ins'
-    | 'overdue-fees';
+    | 'overdue-fees'
+    | 'makeup-requests';
   severity: TaskSeverity;
   title: string;
   detail: string;
@@ -162,7 +168,7 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
       });
     }
   } else {
-    const [[regs], [flags], [overdue]] = await Promise.all([
+    const [[regs], [flags], [overdue], [makeups]] = await Promise.all([
       db
         .select({ n: count() })
         .from(registrationRequests)
@@ -175,7 +181,20 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
         .select({ n: count() })
         .from(invoices)
         .where(and(eq(invoices.status, 'due'), lt(invoices.dueDate, today))),
+      db.select({ n: count() }).from(makeupSessions).where(eq(makeupSessions.status, 'pending')),
     ]);
+    if (makeups!.n > 0) {
+      tasks.push({
+        id: 'makeup-requests',
+        kind: 'makeup-requests',
+        severity: 'warning',
+        title: `${makeups!.n} makeup request${makeups!.n === 1 ? '' : 's'} to review`,
+        detail: 'Coaches asked to add students to a session',
+        link: '/makeups',
+        screen: '/makeups',
+        count: makeups!.n,
+      });
+    }
     if (regs!.n > 0) {
       tasks.push({
         id: 'registrations',

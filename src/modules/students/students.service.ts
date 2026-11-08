@@ -229,11 +229,16 @@ export async function getStudentDetail(studentId: string) {
         batchId: batches.id,
         batchName: batches.name,
         startTime: batches.startTime,
+        status: makeupSessions.status,
       })
       .from(makeupSessions)
       .innerJoin(batches, eq(batches.id, makeupSessions.batchId))
       .where(
-        and(eq(makeupSessions.studentId, studentId), gt(makeupSessions.date, addDays(today, -1))),
+        and(
+          eq(makeupSessions.studentId, studentId),
+          gt(makeupSessions.date, addDays(today, -1)),
+          ne(makeupSessions.status, 'rejected'),
+        ),
       )
       .orderBy(asc(makeupSessions.date)),
     db

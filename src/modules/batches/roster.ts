@@ -52,7 +52,13 @@ export async function expectedRoster(batchId: string, date: IsoDate): Promise<Ro
       })
       .from(makeupSessions)
       .innerJoin(students, eq(students.id, makeupSessions.studentId))
-      .where(and(eq(makeupSessions.batchId, batchId), eq(makeupSessions.date, date)))
+      .where(
+        and(
+          eq(makeupSessions.batchId, batchId),
+          eq(makeupSessions.date, date),
+          eq(makeupSessions.status, 'approved'),
+        ),
+      )
       .orderBy(asc(students.fullName)),
   ]);
 

@@ -495,3 +495,47 @@ describe('calendar', () => {
       .expect(400);
   });
 });
+
+describe('admin check-out', () => {
+  it('lets an admin close a session a coach forgot to check out of', async () => {
+    setToday(MON, '04:00:00'); // 09:30 IST
+    const { coach, admin, otherCoach, batch } = await setup();
+    await (
+      await as(coach)
+    )
+      .post('/api/v1/coach-sessions/check-in', {
+        batchId: batch.id,
+        latitude: 12.9716,
+        longitude: 77.5946,
+      })
+      .expect(200);
+    const list = await (
+      await as(admin)
+    )
+      .get(`/api/v1/coach-sessions?from=${MON}&to=${MON}`)
+      .expect(200);
+    const id = list.body.data.sessions[0].id as string;
+
+    await (await as(otherCoach)).post(`/api/v1/coach-sessions/${id}/check-out`, {}).expect(403);
+    const adminApi = await as(admin);
+    await adminApi
+      .post(`/api/v1/coach-sessions/${id}/check-out`, { at: '2026-03-08T10:00:00Z' })
+      .expect(400); // before check-in
+    await adminApi
+      .post(`/api/v1/coach-sessions/${id}/check-out`, { at: '2026-03-09T09:00:00Z' })
+      .expect(400); // future
+    const res = await adminApi
+      .post(`/api/v1/coach-sessions/${id}/check-out`, {
+        at: '2026-03-09T04:00:30Z',
+        reason: 'Forgot',
+      })
+      .expect(200);
+    expect(res.body.data).toMatchObject({
+      checkOutAt: '2026-03-09T04:00:30.000Z',
+      checkOutLat: null,
+      note: expect.stringContaining('Checked out by'),
+    });
+    expect(res.body.data.note).toContain('Forgot');
+    await adminApi.post(`/api/v1/coach-sessions/${id}/check-out`, {}).expect(409);
+  });
+});

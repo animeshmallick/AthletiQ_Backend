@@ -369,39 +369,54 @@ describe('leaving the academy', () => {
 });
 
 describe('makeup sessions', () => {
-  it("lets the student's coach book and cancel one-off sessions", async () => {
+  it('lets coaches request makeups in their own batches (admins book any batch)', async () => {
     setToday('2026-03-01');
     const { admin, coach, otherCoach, batch, otherBatch, plan } = await makeAcademy();
     const s = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10' },
+      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10', trainingDays: [1, 3, 5] },
       admin.id,
     );
     const api = await as(coach);
 
+    // Coach: own batch only, and it waits for an admin.
     const booked = await api
       .post(`/api/v1/students/${s.id}/makeups`, {
-        batchId: otherBatch.id,
+        batchId: batch.id,
         date: '2026-03-10',
         missedDate: '2026-03-09',
         reason: 'School trip',
       })
       .expect(201);
+    expect(booked.body.data.status).toBe('pending');
+    const other = await api
+      .post(`/api/v1/students/${s.id}/makeups`, { batchId: otherBatch.id, date: '2026-03-11' })
+      .expect(403);
+    expect(other.body.error.message).toMatch(/only in your own batches/);
     await api
-      .post(`/api/v1/students/${s.id}/makeups`, { batchId: otherBatch.id, date: '2026-03-10' })
+      .post(`/api/v1/students/${s.id}/makeups`, { batchId: batch.id, date: '2026-03-10' })
       .expect(409);
     await api
-      .post(`/api/v1/students/${s.id}/makeups`, { batchId: otherBatch.id, date: '2026-03-15' })
+      .post(`/api/v1/students/${s.id}/makeups`, { batchId: batch.id, date: '2026-03-15' })
       .expect(422); // Sunday
     await api
-      .post(`/api/v1/students/${s.id}/makeups`, { batchId: otherBatch.id, date: '2026-01-05' })
+      .post(`/api/v1/students/${s.id}/makeups`, { batchId: batch.id, date: '2026-01-05' })
       .expect(422); // before joining
     await api
       .post(`/api/v1/students/${s.id}/makeups`, { batchId: UNKNOWN, date: '2026-03-11' })
       .expect(422);
 
+    // Admin: any batch, approved straight away.
+    const adminBooked = await (
+      await as(admin)
+    )
+      .post(`/api/v1/students/${s.id}/makeups`, { batchId: otherBatch.id, date: '2026-03-12' })
+      .expect(201);
+    expect(adminBooked.body.data.status).toBe('approved');
+
     const detail = await api.get(`/api/v1/students/${s.id}`).expect(200);
     expect(detail.body.data.upcomingMakeups).toEqual([
-      expect.objectContaining({ date: '2026-03-10', batchId: otherBatch.id }),
+      expect.objectContaining({ date: '2026-03-10', batchId: batch.id, status: 'pending' }),
+      expect.objectContaining({ date: '2026-03-12', batchId: otherBatch.id, status: 'approved' }),
     ]);
 
     await (
@@ -411,5 +426,87 @@ describe('makeup sessions', () => {
       .expect(404);
     await api.delete(`/api/v1/students/${s.id}/makeups/${booked.body.data.id}`).expect(204);
     await api.delete(`/api/v1/students/${s.id}/makeups/${booked.body.data.id}`).expect(404);
+  });
+
+  it('keeps pending makeups out of rosters until an admin approves or rejects them', async () => {
+    setToday('2026-03-01');
+    const { admin, coach, otherCoach, batch, otherBatch, plan } = await makeAcademy();
+    // A student of the other coach…
+    const visitor = await makeStudent(
+      {
+        batchId: otherBatch.id,
+        feePlanId: plan.id,
+        joiningDate: '2026-01-10',
+        fullName: 'Visitor',
+      },
+      admin.id,
+    );
+    // …and one of this coach, who requests a makeup on a non-training day.
+    const own = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10', trainingDays: [1, 3, 5] },
+      admin.id,
+    );
+    const coachApi = await as(coach);
+    const req1 = await coachApi
+      .post(`/api/v1/students/${own.id}/makeups`, { batchId: batch.id, date: '2026-03-10' })
+      .expect(201);
+    const req2 = await coachApi
+      .post(`/api/v1/students/${own.id}/makeups`, { batchId: batch.id, date: '2026-03-17' })
+      .expect(201);
+    await coachApi.get('/api/v1/makeups').expect(403); // admin only
+
+    const roster = () =>
+      coachApi.get(`/api/v1/attendance/session?batchId=${batch.id}&date=2026-03-10`).expect(200);
+    expect((await roster()).body.data.students).toEqual([]);
+
+    const adminApi = await as(admin);
+    const list = await adminApi.get('/api/v1/makeups').expect(200);
+    expect(list.body.data.map((m: { id: string }) => m.id)).toEqual([
+      req1.body.data.id,
+      req2.body.data.id,
+    ]);
+    expect(list.body.data[0]).toMatchObject({
+      status: 'pending',
+      student: { id: own.id },
+      batch: { id: batch.id },
+      requestedBy: { id: coach.id },
+      otherCoach: false,
+    });
+    const tasks = await adminApi.get('/api/v1/me/tasks').expect(200);
+    expect(tasks.body.data.counts['/makeups']).toBe(2);
+
+    await adminApi.post(`/api/v1/makeups/${req1.body.data.id}/approve`).expect(200);
+    await adminApi.post(`/api/v1/makeups/${req1.body.data.id}/approve`).expect(409);
+    expect((await roster()).body.data.students).toEqual([
+      expect.objectContaining({ studentId: own.id, isMakeup: true }),
+    ]);
+    await adminApi.post(`/api/v1/makeups/${req2.body.data.id}/reject`, { reason: 'x' }).expect(400);
+    await adminApi
+      .post(`/api/v1/makeups/${req2.body.data.id}/reject`, { reason: 'Batch is full that day' })
+      .expect(200);
+    const rejected = await adminApi.get('/api/v1/makeups?status=rejected').expect(200);
+    expect(rejected.body.data[0]).toMatchObject({ reviewNote: 'Batch is full that day' });
+    // A rejected request can be asked for again.
+    await coachApi
+      .post(`/api/v1/students/${own.id}/makeups`, { batchId: batch.id, date: '2026-03-17' })
+      .expect(201);
+
+    // Admin booking a student into another coach's batch is flagged in the list.
+    await adminApi
+      .post(`/api/v1/students/${visitor.id}/makeups`, { batchId: batch.id, date: '2026-03-11' })
+      .expect(201);
+    const all = await adminApi.get('/api/v1/makeups?status=approved').expect(200);
+    expect(
+      all.body.data.find((m: { student: { id: string } }) => m.student.id === visitor.id),
+    ).toMatchObject({
+      otherCoach: true,
+      homeCoach: { id: otherCoach.id },
+    });
+
+    // Past sessions can't be approved.
+    setToday('2026-03-20');
+    const laterApi = await as(admin); // fresh sign-in after the clock jump
+    const late = (await laterApi.get('/api/v1/makeups').expect(200)).body.data[0];
+    await laterApi.post(`/api/v1/makeups/${late.id}/approve`).expect(422);
   });
 });

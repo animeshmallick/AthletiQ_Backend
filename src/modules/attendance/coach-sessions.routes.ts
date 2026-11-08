@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -12,7 +12,7 @@ import { currentUser, requireAdmin, requireCoach } from '../../middleware/auth.j
 import { isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { assertNotCancelled, cancellationsIn } from './cancellations.js';
-import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
+import { notifyAdmins, notifyInBackground, notifyUsers } from '../push/push.service.js';
 
 export const coachSessionsRouter = Router();
 
@@ -288,4 +288,54 @@ coachSessionsRouter.post('/:id/review', requireAdmin, async (req, res) => {
     metadata: { note },
   });
   ok(res, present(s));
+});
+
+/**
+ * Admin: close a session a coach forgot to check out of (no GPS reading). The time defaults to now
+ * and can be set earlier (e.g. the batch end time), never before the check-in or in the future.
+ */
+coachSessionsRouter.post('/:id/check-out', requireAdmin, async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const body = parse(
+    z.object({ at: z.iso.datetime({ offset: true }).optional(), reason: zOptionalText(300) }),
+    req.body,
+  );
+  const admin = currentUser(req);
+  const existing = await db.query.coachSessions.findFirst({ where: eq(coachSessions.id, id) });
+  if (!existing) throw AppError.notFound('Coach session');
+  if (existing.checkOutAt) throw AppError.conflict('This coach has already checked out');
+  const at = body.at ? new Date(body.at) : new Date();
+  if (at <= existing.checkInAt) throw AppError.badRequest('Check-out must be after the check-in');
+  if (at.getTime() > Date.now() + 60_000)
+    throw AppError.badRequest('Check-out cannot be in the future');
+
+  const note = [
+    existing.note,
+    `Checked out by ${admin.name}${body.reason ? `: ${body.reason}` : ''}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const [saved] = await db
+    .update(coachSessions)
+    .set({ checkOutAt: at, note })
+    .where(and(eq(coachSessions.id, id), isNull(coachSessions.checkOutAt)))
+    .returning();
+  if (!saved) throw AppError.conflict('This coach has already checked out');
+  await audit({
+    ...auditCtx(req),
+    action: 'coach_session.checked_out_by_admin',
+    entityType: 'coach_session',
+    entityId: id,
+    metadata: { at: at.toISOString(), reason: body.reason },
+  });
+  const batch = await db.query.batches.findFirst({ where: eq(batches.id, existing.batchId) });
+  notifyInBackground(() =>
+    notifyUsers([existing.coachId], {
+      title: 'You were checked out',
+      body: `${batch?.name ?? 'Your session'} · by ${admin.name}${body.reason ? ` (${body.reason})` : ''}`,
+      link: '/coach-sessions',
+      tag: `checkout-${id}`,
+    }),
+  );
+  ok(res, present(saved));
 });
