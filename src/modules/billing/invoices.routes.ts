@@ -26,6 +26,8 @@ import {
   invoiceSortSql,
   toPdfData,
 } from './invoices.service.js';
+import { activeAdminIds, notifyInBackground, notifyUsers } from '../push/push.service.js';
+import { formatInr } from '../../lib/money.js';
 
 export const invoicesRouter = Router();
 
@@ -190,7 +192,17 @@ invoicesRouter.post('/:id/payments', async (req, res) => {
     );
   });
 
-  ok(res, await getInvoiceForUser(user, id));
+  const paid = await getInvoiceForUser(user, id);
+  notifyInBackground(async () => {
+    const admins = (await activeAdminIds()).filter((a) => a !== user.id);
+    await notifyUsers(admins, {
+      title: `Fee received · ${formatInr(paid.totalAmount)}`,
+      body: `${paid.student.fullName} · ${body.mode.toUpperCase()}${user.role === 'coach' ? ` · recorded by ${user.name}` : ''}`,
+      link: `/invoices?status=paid&invoice=${id}`,
+      tag: `paid-${id}`,
+    });
+  });
+  ok(res, paid);
 });
 
 const ReversalBody = z.object({

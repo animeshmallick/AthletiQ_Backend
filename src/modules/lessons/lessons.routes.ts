@@ -198,11 +198,18 @@ lessonsRouter.get('/plans', async (req, res) => {
 lessonsRouter.get('/plans/day', async (req, res) => {
   const q = parse(z.object({ batchId: zId, date: zIsoDate }), req.query);
   const batch = await assertBatchAccess(currentUser(req), q.batchId);
-  const plan = await loadPlan(q.batchId, q.date);
+  const [plan, cancelled, blocked] = await Promise.all([
+    loadPlan(q.batchId, q.date),
+    getCancellation(q.batchId, q.date),
+    planBlockedReason(batch, q.date),
+  ]);
   ok(res, {
     batch: { id: batch.id, name: batch.name },
     date: q.date,
     isSessionDay: batch.weekdays.includes(isoWeekday(q.date)),
+    cancelled: cancelled?.reason ?? null,
+    /** Why the plan can't be edited on this day (not a session day / cancelled), else null. */
+    lockedReason: blocked,
     plan,
   });
 });

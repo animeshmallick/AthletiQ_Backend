@@ -22,6 +22,13 @@
       "when": 1794146733142,
       "tag": "0002_push_devices",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794159080052,
+      "tag": "0003_notification_log",
+      "breakpoints": true
     }
   ]
 }

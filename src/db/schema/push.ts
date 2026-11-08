@@ -22,3 +22,12 @@ export const deviceTokens = pgTable(
   },
   (t) => [index('device_tokens_user_idx').on(t.userId)],
 );
+
+/**
+ * Every scheduled/one-off alert is recorded under a unique key (e.g. "nocheckin:<batch>:<date>")
+ * before it is sent, so nobody gets the same alert twice — even across restarts or servers.
+ */
+export const notificationLog = pgTable('notification_log', {
+  key: text().primaryKey(),
+  sentAt: tz().notNull().defaultNow(),
+});

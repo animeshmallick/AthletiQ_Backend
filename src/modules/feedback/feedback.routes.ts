@@ -28,6 +28,7 @@ import { assertStudentAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { cancellationsIn } from '../attendance/cancellations.js';
 import { answersSchema, CURRENT_WEEKLY_TEMPLATE, getTemplate } from './templates/index.js';
+import type { AuthUser } from '../auth/auth.types.js';
 
 export const feedbackRouter = Router();
 
@@ -129,14 +130,15 @@ const WeekQuery = z.object({
   batchId: zId.optional(),
 });
 
-feedbackRouter.get('/week', async (req, res) => {
-  const user = currentUser(req);
-  const q = parse(WeekQuery, req.query);
-  // Default to the most recent completed week (feedback is written at week end).
-  const weekStart = q.weekStart ?? startOfIsoWeek(addDays(todayInAppTz(), -7));
-  if (weekStart > todayInAppTz())
-    throw AppError.badRequest('Feedback cannot be written for a future week');
+/** The most recent completed week (feedback is written once a week is over). */
+export const lastCompletedWeek = () => startOfIsoWeek(addDays(todayInAppTz(), -7));
 
+/** Students due a weekly report for a week, with their report status (coach scope or all). */
+export async function weekBoard(
+  user: AuthUser,
+  weekStart: IsoDate,
+  q: { coachId?: string; batchId?: string } = {},
+) {
   const filters: SQL[] = [overlapsWeek(weekStart)!, lte(students.joiningDate, weekEnd(weekStart))];
   if (!isAdmin(user)) filters.push(eq(batches.coachId, user.id));
   else if (q.coachId) filters.push(eq(batches.coachId, q.coachId));
@@ -193,7 +195,7 @@ feedbackRouter.get('/week', async (req, res) => {
     })
     .sort((a, b) => a.batchName.localeCompare(b.batchName) || a.fullName.localeCompare(b.fullName));
 
-  ok(res, {
+  return {
     weekStart,
     weekEnd: weekEnd(weekStart),
     students: items,
@@ -203,7 +205,16 @@ feedbackRouter.get('/week', async (req, res) => {
       draft: items.filter((i) => i.status === 'draft').length,
       pending: items.filter((i) => i.status === 'pending').length,
     },
-  });
+  };
+}
+
+feedbackRouter.get('/week', async (req, res) => {
+  const user = currentUser(req);
+  const q = parse(WeekQuery, req.query);
+  const weekStart = q.weekStart ?? lastCompletedWeek();
+  if (weekStart > todayInAppTz())
+    throw AppError.badRequest('Feedback cannot be written for a future week');
+  ok(res, await weekBoard(user, weekStart, q));
 });
 
 // ─── Single report ───────────────────────────────────────────────────────────

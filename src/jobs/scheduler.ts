@@ -3,6 +3,7 @@ import { APP_TIMEZONE } from '../config/constants.js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { runInvoiceJob } from './invoice-job.js';
+import { runSafely, runSessionAlerts, sendAdminDigest, sendFeedbackReminders } from './alerts.js';
 import { sendSessionReminders } from './session-reminders.js';
 
 const tasks: ScheduledTask[] = [];
@@ -43,6 +44,29 @@ export function startScheduler(): void {
   } else {
     logger.warn({ cron: env.REMINDER_CRON }, 'Invalid REMINDER_CRON; session reminders disabled');
   }
+
+  // Live session alerts (reminders, missed check-ins, wrap-ups); de-duplicated per session.
+  tasks.push(
+    cron.schedule('* * * * *', () => runSafely('Session alerts', () => runSessionAlerts()), {
+      timezone: APP_TIMEZONE,
+      name: 'session-alerts',
+      noOverlap: true,
+    }),
+    cron.schedule('0 20 * * *', () => runSafely('Admin digest', () => sendAdminDigest()), {
+      timezone: APP_TIMEZONE,
+      name: 'admin-digest',
+      noOverlap: true,
+    }),
+    cron.schedule(
+      '0 10 * * 1',
+      () => runSafely('Feedback reminders', () => sendFeedbackReminders()),
+      {
+        timezone: APP_TIMEZONE,
+        name: 'feedback-reminders',
+        noOverlap: true,
+      },
+    ),
+  );
 
   // Catch up shortly after boot in case the server was down at midnight. Idempotent.
   setTimeout(() => {

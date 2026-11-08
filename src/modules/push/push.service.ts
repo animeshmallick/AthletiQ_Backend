@@ -1,7 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { env } from '../../config/env.js';
 import { db } from '../../db/client.js';
-import { deviceTokens, users } from '../../db/schema/index.js';
+import { deviceTokens, notificationLog, users } from '../../db/schema/index.js';
 import { logger } from '../../lib/logger.js';
 import { createFcmSender, parseServiceAccount, type PushMessage, type PushSender } from './fcm.js';
 
@@ -82,6 +82,30 @@ export async function notifyUsers(userIds: string[], message: PushMessage) {
   );
   if (dead.length) await db.delete(deviceTokens).where(inArray(deviceTokens.token, dead));
   return { sent, removed: dead.length };
+}
+
+export async function activeAdminIds(): Promise<string[]> {
+  const rows = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.role, 'admin'), eq(users.status, 'active')));
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Sends an alert only the first time its key is seen (e.g. "nocheckin:<batch>:<date>").
+ * The key is claimed before sending, so concurrent runs or restarts never double-notify.
+ */
+export async function notifyOnce(key: string, userIds: string[], message: PushMessage) {
+  if (!getSender() || userIds.length === 0) return false;
+  const claimed = await db
+    .insert(notificationLog)
+    .values({ key })
+    .onConflictDoNothing()
+    .returning({ key: notificationLog.key });
+  if (!claimed.length) return false;
+  await notifyUsers(userIds, message);
+  return true;
 }
 
 export async function notifyAdmins(message: PushMessage) {
