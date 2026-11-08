@@ -11,6 +11,7 @@ import { parse, zId, zIdParam, zIsoDate, zOptionalText } from '../../lib/validat
 import { currentUser, requireAdmin, requireCoach } from '../../middleware/auth.js';
 import { isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import { assertNotCancelled, cancellationsIn } from './cancellations.js';
 
 export const coachSessionsRouter = Router();
 
@@ -81,6 +82,11 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
       .where(and(eq(coachSessions.coachId, user.id), eq(coachSessions.date, today))),
   ]);
 
+  const cancelled = await cancellationsIn(
+    todaysBatches.map((b) => b.batch.id),
+    today,
+    today,
+  );
   ok(res, {
     date: today,
     sessions: todaysBatches.map(({ batch, location }) => {
@@ -101,6 +107,7 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
           radiusMeters: location.radiusMeters,
         },
         session: s ? present(s) : null,
+        cancelled: cancelled.get(`${batch.id}:${today}`) ?? null,
       };
     }),
   });
@@ -114,6 +121,7 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
   if (!batch.isActive) throw AppError.unprocessable('This batch is inactive');
   if (!batch.weekdays.includes(isoWeekday(today)))
     throw AppError.unprocessable(`${batch.name} is not scheduled today`);
+  await assertNotCancelled(batch.id, today);
 
   const { distance, within } = evaluate(location, body.latitude, body.longitude, body.accuracy);
   const [session] = await db

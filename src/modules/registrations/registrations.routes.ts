@@ -33,6 +33,7 @@ import { currentUser } from '../../middleware/auth.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { toPublicUser } from '../auth/auth.service.js';
 import { hashPassword } from '../auth/password.js';
+import { billOnAcceptance } from '../billing/invoice-generator.js';
 import { getAcademySettings } from '../settings/settings.js';
 import { createStudent, getStudentDetail } from '../students/students.service.js';
 
@@ -391,6 +392,7 @@ registrationsRouter.post('/:id/approve', async (req, res) => {
     return { type: 'coach' as const, user: toPublicUser(user!) };
   });
 
+  if (result.type === 'student') await billOnAcceptance(result.studentId);
   ok(
     res,
     result.type === 'student'

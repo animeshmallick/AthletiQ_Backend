@@ -1,4 +1,18 @@
-import { and, asc, count, desc, eq, gt, ilike, isNull, or, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  ilike,
+  inArray,
+  isNull,
+  lt,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -8,10 +22,12 @@ import {
   feePlans,
   invoices,
   makeupSessions,
+  studentAttendance,
   students,
   users,
+  weeklyFeedback,
 } from '../../db/schema/index.js';
-import { isoWeekday, todayInAppTz } from '../../lib/dates.js';
+import { isoWeekday, minDate, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok, pageMeta } from '../../lib/http.js';
 import {
@@ -29,9 +45,11 @@ import {
 } from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { assertStudentAccess, isAdmin, studentScope } from '../access/access.js';
+import { billOnAcceptance } from '../billing/invoice-generator.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import {
   assertActivePlan,
+  assertEnrollable,
   createStudent,
   effectiveMonthlyFee,
   getStudentDetail,
@@ -48,7 +66,9 @@ const ListQuery = zPagination.extend({
   batchId: zId.optional(),
   coachId: zId.optional(),
   feePlanId: zId.optional(),
-  sort: z.enum(['name', 'joiningDate', 'recent']).default('name'),
+  /** Only students with unpaid ("outstanding") or past-due ("overdue") invoices. */
+  dues: z.enum(['outstanding', 'overdue']).optional(),
+  sort: z.enum(['name', 'joiningDate', 'recent', 'dues']).default('name'),
 });
 
 studentsRouter.get('/', async (req, res) => {
@@ -73,8 +93,24 @@ studentsRouter.get('/', async (req, res) => {
       )!,
     );
   }
-  const where = filters.length ? and(...filters) : undefined;
   const today = todayInAppTz();
+  if (q.dues) {
+    filters.push(
+      inArray(
+        students.id,
+        db
+          .select({ id: invoices.studentId })
+          .from(invoices)
+          .where(
+            and(
+              eq(invoices.status, 'due'),
+              q.dues === 'overdue' ? lt(invoices.dueDate, today) : undefined,
+            ),
+          ),
+      ),
+    );
+  }
+  const where = filters.length ? and(...filters) : undefined;
 
   const outstanding = db
     .select({
@@ -91,11 +127,17 @@ studentsRouter.get('/', async (req, res) => {
     .as('outstanding');
 
   const order =
-    q.sort === 'joiningDate'
-      ? [desc(students.joiningDate)]
-      : q.sort === 'recent'
-        ? [desc(students.createdAt)]
-        : [asc(students.fullName)];
+    q.sort === 'dues'
+      ? [
+          desc(sql`coalesce(${outstanding.overdue}, 0)`),
+          desc(sql`coalesce(${outstanding.due}, 0)`),
+          asc(students.fullName),
+        ]
+      : q.sort === 'joiningDate'
+        ? [desc(students.joiningDate)]
+        : q.sort === 'recent'
+          ? [desc(students.createdAt)]
+          : [asc(students.fullName)];
 
   const [rows, [{ total } = { total: 0 }]] = await Promise.all([
     db
@@ -186,8 +228,9 @@ const CreateBody = z.object({
   batchId: zId,
   trainingDays: zTrainingDays,
   /**
-   * First date whose completed cycle may be invoiced. Defaults to today, so registering a student
-   * with a past joining date does not back-bill months that were settled outside the system.
+   * Acceptance date for prepaid billing: the first invoice is issued on this date and months that
+   * started earlier are not billed. Defaults to the earlier of today and the joining date; set it
+   * later when importing existing students whose current month was settled outside the system.
    */
   billingStartsOn: zIsoDate.optional(),
 });
@@ -211,6 +254,7 @@ studentsRouter.post('/', requireAdmin, async (req, res) => {
     return s;
   });
 
+  await billOnAcceptance(student.id);
   created(res, await getStudentDetail(student.id));
 });
 
@@ -220,21 +264,39 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(UpdateBody, req.body);
 
+  let rebill = false;
   await db.transaction(async (tx) => {
     const existing = await tx.query.students.findFirst({ where: eq(students.id, id) });
     if (!existing) throw AppError.notFound('Student');
     if (body.feePlanId && body.feePlanId !== existing.feePlanId)
       await assertActivePlan(body.feePlanId, tx);
 
+    let billing: Partial<typeof students.$inferInsert> = {};
     if (body.joiningDate && body.joiningDate !== existing.joiningDate) {
-      const [{ n } = { n: 0 }] = await tx
-        .select({ n: count() })
+      // The joining date anchors prepaid billing. It can be corrected until money has changed
+      // hands: unpaid invoices are cancelled and billing restarts from the corrected date.
+      const rows = await tx
+        .select({ status: invoices.status, cycle: invoices.cycleNumber })
         .from(invoices)
         .where(eq(invoices.studentId, id));
-      if (n > 0) {
+      if (rows.some((r) => r.status === 'paid' || r.status === 'refunded')) {
         throw AppError.unprocessable(
-          'Joining date cannot change after invoices have been generated (it anchors the billing cycle).',
+          'Joining date cannot change after a payment has been recorded (it anchors the billing cycle).',
         );
+      }
+      if (rows.length) {
+        await tx
+          .update(invoices)
+          .set({ status: 'cancelled', cancelledReason: 'Joining date corrected' })
+          .where(and(eq(invoices.studentId, id), eq(invoices.status, 'due')));
+        billing = {
+          billingAnchorDate: body.joiningDate,
+          cycleOffset: Math.max(...rows.map((r) => r.cycle)),
+          billingStartsOn: minDate(todayInAppTz(), body.joiningDate),
+        };
+        rebill = true;
+      } else {
+        billing = { billingStartsOn: minDate(todayInAppTz(), body.joiningDate) };
       }
       // Keep the initial enrollment aligned with the new joining date.
       const first = await tx.query.enrollments.findFirst({
@@ -251,7 +313,10 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
       }
     }
 
-    await tx.update(students).set(body).where(eq(students.id, id));
+    await tx
+      .update(students)
+      .set({ ...body, ...billing })
+      .where(eq(students.id, id));
     const feeChanged = ['feePlanId', 'customMonthlyFee', 'monthlyDiscount'].some((k) => k in body);
     await audit(
       {
@@ -274,6 +339,7 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
     );
   });
 
+  if (rebill) await billOnAcceptance(id);
   ok(res, await getStudentDetail(id));
 });
 
@@ -433,6 +499,119 @@ studentsRouter.delete('/:id/makeups/:makeupId', async (req, res) => {
     entityType: 'student',
     entityId: id,
     metadata: { date: deleted.date, batchId: deleted.batchId },
+  });
+  noContent(res);
+});
+
+// ─── Admin: rejoin after leaving ─────────────────────────────────────────────
+
+const RejoinBody = z.object({
+  rejoinDate: zIsoDate,
+  batchId: zId,
+  trainingDays: zTrainingDays,
+  feePlanId: zId.optional(),
+  customMonthlyFee: zPaise.nullable().optional(),
+  monthlyDiscount: zPaise.optional(),
+  reason: zOptionalText(500),
+});
+
+/**
+ * Re-activates a student who left. Billing restarts from the rejoin date (a fresh monthly anchor);
+ * earlier invoices are untouched and cycle numbers continue so they stay unique.
+ */
+studentsRouter.post('/:id/rejoin', requireAdmin, async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const body = parse(RejoinBody, req.body);
+  const actor = currentUser(req);
+
+  await db.transaction(async (tx) => {
+    const [s] = await tx.select().from(students).where(eq(students.id, id)).for('update');
+    if (!s) throw AppError.notFound('Student');
+    if (s.status !== 'left') throw AppError.unprocessable('Only students who have left can rejoin');
+    if (s.leftOn && body.rejoinDate <= s.leftOn) {
+      throw AppError.badRequest(`Rejoin date must be after the leaving date (${s.leftOn})`);
+    }
+    if (body.feePlanId && body.feePlanId !== s.feePlanId)
+      await assertActivePlan(body.feePlanId, tx);
+    await assertEnrollable(body.batchId, body.trainingDays, tx);
+
+    const [{ last } = { last: 0 }] = await tx
+      .select({ last: sql<number>`coalesce(max(${invoices.cycleNumber}), 0)::int` })
+      .from(invoices)
+      .where(eq(invoices.studentId, id));
+
+    await tx
+      .update(students)
+      .set({
+        status: 'active',
+        leftOn: null,
+        leftReason: null,
+        billingAnchorDate: body.rejoinDate,
+        cycleOffset: last,
+        // Prepaid: the first invoice of the new run is issued at rejoin.
+        billingStartsOn: minDate(todayInAppTz(), body.rejoinDate),
+        ...(body.feePlanId ? { feePlanId: body.feePlanId } : {}),
+        ...(body.customMonthlyFee !== undefined ? { customMonthlyFee: body.customMonthlyFee } : {}),
+        ...(body.monthlyDiscount !== undefined ? { monthlyDiscount: body.monthlyDiscount } : {}),
+      })
+      .where(eq(students.id, id));
+    await tx.insert(enrollments).values({
+      studentId: id,
+      batchId: body.batchId,
+      trainingDays: body.trainingDays,
+      effectiveFrom: body.rejoinDate,
+      reason: body.reason ?? 'Rejoined',
+      createdById: actor.id,
+    });
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'student.rejoined',
+        entityType: 'student',
+        entityId: id,
+        metadata: { rejoinDate: body.rejoinDate, batchId: body.batchId, previousLeftOn: s.leftOn },
+      },
+      tx,
+    );
+  });
+
+  await billOnAcceptance(id);
+  ok(res, await getStudentDetail(id));
+});
+
+// ─── Admin: delete a record created by mistake ───────────────────────────────
+
+/**
+ * Hard-deletes a student only when nothing depends on them yet (no invoices, attendance or
+ * feedback) — e.g. a duplicate entry. Otherwise the student must be marked as left.
+ */
+studentsRouter.delete('/:id', requireAdmin, async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  await db.transaction(async (tx) => {
+    const [s] = await tx.select().from(students).where(eq(students.id, id)).for('update');
+    if (!s) throw AppError.notFound('Student');
+    const [inv, att, fb] = await Promise.all([
+      tx.$count(invoices, eq(invoices.studentId, id)),
+      tx.$count(studentAttendance, eq(studentAttendance.studentId, id)),
+      tx.$count(weeklyFeedback, eq(weeklyFeedback.studentId, id)),
+    ]);
+    if (inv + att + fb > 0) {
+      throw AppError.unprocessable(
+        'This student already has invoices, attendance or feedback, so the record must be kept. Mark them as left instead.',
+        { invoices: inv, attendance: att, feedback: fb },
+      );
+    }
+    await tx.delete(students).where(eq(students.id, id));
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'student.deleted',
+        entityType: 'student',
+        entityId: id,
+        metadata: { code: s.code, fullName: s.fullName },
+      },
+      tx,
+    );
   });
   noContent(res);
 });

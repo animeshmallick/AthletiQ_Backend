@@ -48,6 +48,13 @@ export const students = pgTable(
      * that importing a student with a historic joining date does not back-bill old months.
      */
     billingStartsOn: date({ mode: 'string' }).notNull(),
+    /**
+     * Day the current billing cycles are anchored on. Null means the joining date. Set to the
+     * rejoin date when a student who left comes back, so billing restarts from that day.
+     */
+    billingAnchorDate: date({ mode: 'string' }),
+    /** Cycles invoiced before the current anchor (keeps invoice cycle numbers unique after a rejoin). */
+    cycleOffset: integer().notNull().default(0),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
     ...timestamps,
   },

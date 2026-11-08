@@ -29,17 +29,17 @@ async function academyWithStudent(
 const allInvoices = () => db.select().from(invoices).orderBy(asc(invoices.cycleNumber));
 
 describe('invoice generation', () => {
-  it('generates completed cycles, snapshots pricing, and is idempotent', async () => {
+  it('bills in advance (first month at acceptance), snapshots pricing, and is idempotent', async () => {
     const { student, batch, coach } = await academyWithStudent({ monthlyDiscount: 20_000 });
 
-    const first = await generateDueInvoices('2026-03-15');
+    const first = await generateDueInvoices('2026-03-09');
     expect(first).toMatchObject({ invoicesCreated: 2, skippedExisting: 0, failures: [] });
 
     const rows = await allInvoices();
     expect(rows.map((r) => [r.number, r.periodStart, r.periodEnd, r.issueDate, r.dueDate])).toEqual(
       [
-        ['ATQ/2025-26/00001', '2026-01-10', '2026-02-09', '2026-02-10', '2026-02-17'],
-        ['ATQ/2025-26/00002', '2026-02-10', '2026-03-09', '2026-03-10', '2026-03-17'],
+        ['ATQ/2025-26/00001', '2026-01-10', '2026-02-09', '2026-01-10', '2026-01-17'],
+        ['ATQ/2025-26/00002', '2026-02-10', '2026-03-09', '2026-02-10', '2026-02-17'],
       ],
     );
     expect(rows[0]).toMatchObject({
@@ -52,7 +52,7 @@ describe('invoice generation', () => {
       status: 'due',
     });
 
-    expect((await generateDueInvoices('2026-03-15')).invoicesCreated).toBe(0);
+    expect((await generateDueInvoices('2026-03-09')).invoicesCreated).toBe(0);
 
     // New financial year restarts numbering.
     await generateDueInvoices('2026-04-10');
@@ -70,36 +70,37 @@ describe('invoice generation', () => {
       },
       a.admin.id,
     );
-    await generateDueInvoices('2026-03-15');
+    await generateDueInvoices('2026-03-09');
     const rows = await db.select().from(invoices).orderBy(asc(invoices.number));
     expect(rows.map((r) => [r.issueDate, r.studentId])).toEqual([
+      ['2026-01-05', early.id],
+      ['2026-01-10', a.student.id],
       ['2026-02-05', early.id],
       ['2026-02-10', a.student.id],
       ['2026-03-05', early.id],
-      ['2026-03-10', a.student.id],
     ]);
   });
 
   it('keeps old invoices unchanged when the fee changes later', async () => {
     const { admin, student } = await academyWithStudent();
-    await generateDueInvoices('2026-02-10');
+    await generateDueInvoices('2026-01-10');
     const pricier = await makePlan({ monthlyFee: 400_000 });
     await (
       await as(admin)
     )
       .patch(`/api/v1/students/${student.id}`, { feePlanId: pricier.id })
       .expect(200);
-    await generateDueInvoices('2026-03-10');
+    await generateDueInvoices('2026-02-10');
     expect((await allInvoices()).map((r) => r.totalAmount)).toEqual([250_000, 400_000]);
   });
 
   it('settles zero-amount cycles automatically', async () => {
     await academyWithStudent({ customMonthlyFee: 0 });
-    await generateDueInvoices('2026-02-10');
+    await generateDueInvoices('2026-01-10');
     expect((await allInvoices())[0]).toMatchObject({ totalAmount: 0, status: 'paid' });
   });
 
-  it('stops billing after a student leaves', async () => {
+  it('stops billing after a student leaves (the month in progress was prepaid)', async () => {
     const { admin, student } = await academyWithStudent();
     await (
       await as(admin)
@@ -107,7 +108,7 @@ describe('invoice generation', () => {
       .post(`/api/v1/students/${student.id}/leave`, { leftOn: '2026-03-20' })
       .expect(200);
     await generateDueInvoices('2026-06-30');
-    expect((await allInvoices()).map((r) => r.cycleNumber)).toEqual([1, 2]);
+    expect((await allInvoices()).map((r) => r.cycleNumber)).toEqual([1, 2, 3]);
   });
 
   it('snapshots the batch the student was in during the cycle', async () => {
@@ -133,7 +134,7 @@ describe('invoice generation', () => {
     spy.mockRestore();
     expect(stats.failures).toEqual([expect.objectContaining({ cycleNumber: 1, error: 'boom' })]);
     expect(stats.invoicesCreated).toBe(0); // later cycles wait for the next run to stay in order
-    expect((await generateDueInvoices('2026-03-15')).invoicesCreated).toBe(2);
+    expect((await generateDueInvoices('2026-03-15')).invoicesCreated).toBe(3);
   });
 
   it('treats a concurrent duplicate as already generated', async () => {
@@ -142,7 +143,7 @@ describe('invoice generation', () => {
       cause: { code: '23505', constraint: 'invoices_student_cycle_uq' },
     });
     const spy = jest.spyOn(db, 'transaction').mockRejectedValueOnce(dup);
-    const stats = await generateDueInvoices('2026-02-10');
+    const stats = await generateDueInvoices('2026-01-10');
     spy.mockRestore();
     expect(stats).toMatchObject({ invoicesCreated: 0, skippedExisting: 1 });
   });
@@ -156,7 +157,7 @@ describe('invoice job runner (admin)', () => {
     const res = await api.post('/api/v1/admin/jobs/invoices/run').expect(200);
     expect(res.body.data).toMatchObject({
       ran: true,
-      stats: { invoicesCreated: 2, runDate: '2026-03-15' },
+      stats: { invoicesCreated: 3, runDate: '2026-03-15' },
     });
     const runs = await api.get('/api/v1/admin/jobs/runs?jobName=invoice-generation').expect(200);
     expect(runs.body.data[0]).toMatchObject({ status: 'succeeded', trigger: 'manual' });
@@ -202,7 +203,7 @@ describe('invoices API', () => {
       },
       a.admin.id,
     );
-    await generateDueInvoices('2026-03-15');
+    await generateDueInvoices('2026-02-12');
     const [inv1, inv2] = await db
       .select()
       .from(invoices)
@@ -212,13 +213,13 @@ describe('invoices API', () => {
   }
 
   it('lists with status filters, search and coach scoping', async () => {
-    setToday('2026-03-15');
+    setToday('2026-02-15');
     const { admin, coach, student, other } = await billed();
     const api = await as(admin);
 
     const all = await api.get('/api/v1/invoices').expect(200);
     expect(all.body.meta).toMatchObject({ total: 4, totalAmount: 1_000_000 });
-    expect(all.body.data[0].issueDate).toBe('2026-03-12');
+    expect(all.body.data[0].issueDate).toBe('2026-02-12');
 
     const overdue = await api.get('/api/v1/invoices?status=overdue&sort=dueDateAsc').expect(200);
     expect(overdue.body.data.map((i: { displayStatus: string }) => i.displayStatus)).toEqual([
@@ -236,7 +237,7 @@ describe('invoices API', () => {
     expect(
       (
         await api
-          .get(`/api/v1/invoices?studentId=${other.id}&from=2026-03-01&to=2026-03-31`)
+          .get(`/api/v1/invoices?studentId=${other.id}&from=2026-02-01&to=2026-02-28`)
           .expect(200)
       ).body.meta.total,
     ).toBe(1);
@@ -252,17 +253,17 @@ describe('invoices API', () => {
   });
 
   it('marks paid (coach), reverts and refunds (admin only), with full history', async () => {
-    setToday('2026-03-15');
+    setToday('2026-02-15');
     const { admin, coach, otherCoach, inv1 } = await billed();
     const coachApi = await as(coach);
     const adminApi = await as(admin);
     const url = `/api/v1/invoices/${inv1.id}`;
 
     await (await as(otherCoach)).get(url).expect(404);
-    await coachApi.post(`${url}/payments`, { mode: 'upi', paidOn: '2026-03-20' }).expect(400);
+    await coachApi.post(`${url}/payments`, { mode: 'upi', paidOn: '2026-02-20' }).expect(400);
     await coachApi.post(`${url}/payments`, { mode: 'upi', paidOn: '2025-12-01' }).expect(400);
     const paid = await coachApi
-      .post(`${url}/payments`, { mode: 'upi', reference: 'UTR42', paidOn: '2026-03-14' })
+      .post(`${url}/payments`, { mode: 'upi', reference: 'UTR42', paidOn: '2026-02-14' })
       .expect(200);
     expect(paid.body.data).toMatchObject({
       status: 'paid',
@@ -276,7 +277,7 @@ describe('invoices API', () => {
       ],
     });
     const again = await coachApi
-      .post(`${url}/payments`, { mode: 'cash', paidOn: '2026-03-14' })
+      .post(`${url}/payments`, { mode: 'cash', paidOn: '2026-02-14' })
       .expect(409);
     expect(again.body.error.message).toBe('This invoice is already paid');
 
@@ -298,7 +299,7 @@ describe('invoices API', () => {
       .expect(409);
 
     const repaid = await coachApi
-      .post(`${url}/payments`, { mode: 'cash', paidOn: '2026-03-15' })
+      .post(`${url}/payments`, { mode: 'cash', paidOn: '2026-02-15' })
       .expect(200);
     const second = repaid.body.data.payments.find(
       (p: { status: string }) => p.status === 'completed',
@@ -312,13 +313,13 @@ describe('invoices API', () => {
       .post(`${url}/payments/6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c/refund`, { reason: 'nope' })
       .expect(404);
     const cannotPay = await coachApi
-      .post(`${url}/payments`, { mode: 'cash', paidOn: '2026-03-15' })
+      .post(`${url}/payments`, { mode: 'cash', paidOn: '2026-02-15' })
       .expect(409);
     expect(cannotPay.body.error.message).toBe('This invoice is refunded');
   });
 
   it('cancels unpaid invoices (admin only)', async () => {
-    setToday('2026-03-15');
+    setToday('2026-02-15');
     const { admin, coach, inv1, inv2 } = await billed();
     await (
       await as(coach)
@@ -346,7 +347,7 @@ describe('invoices API', () => {
   });
 
   it('renders PDFs and builds WhatsApp share links that open without login', async () => {
-    setToday('2026-03-15');
+    setToday('2026-02-15');
     const { admin, coach, inv1, inv2 } = await billed();
     await (
       await as(admin)
@@ -367,7 +368,7 @@ describe('invoices API', () => {
     const share = await api.post(`/api/v1/invoices/${inv1.id}/share`).expect(200);
     expect(share.body.data.whatsappUrl).toMatch(/^https:\/\/wa\.me\/919876543210\?text=/);
     expect(share.body.data.message).toMatch(/^Hi Parent,/);
-    expect(share.body.data.message).toContain('which was due on 17 Feb 2026');
+    expect(share.body.data.message).toContain('which was due on 17 Jan 2026');
     expect(share.body.data.message).toContain('Pay via UPI: smash@okicici');
     expect(share.body.data.message).toContain('– Smash Academy');
 
@@ -384,9 +385,9 @@ describe('invoices API', () => {
 
     // Upcoming (not overdue) wording, then receipt wording once paid.
     const upcoming = await api.post(`/api/v1/invoices/${inv2.id}/share`).expect(200);
-    expect(upcoming.body.data.message).toContain('due by 17 Mar 2026');
+    expect(upcoming.body.data.message).toContain('due by 17 Feb 2026');
     await api
-      .post(`/api/v1/invoices/${inv2.id}/payments`, { mode: 'cash', paidOn: '2026-03-15' })
+      .post(`/api/v1/invoices/${inv2.id}/payments`, { mode: 'cash', paidOn: '2026-02-15' })
       .expect(200);
     const receipt = await api.post(`/api/v1/invoices/${inv2.id}/share`).expect(200);
     expect(receipt.body.data.message).toContain('Thank you! We have received ₹2,500.00');
@@ -433,15 +434,16 @@ describe('finance insights', () => {
       .get('/api/v1/finance/summary?from=2026-01-01&to=2026-03-31')
       .expect(200);
     expect(summary.body.data.totals).toMatchObject({
-      billed: 1_000_000,
-      invoicesIssued: 4,
+      billed: 1_500_000,
+      invoicesIssued: 6,
       collected: 250_000,
       paymentsReceived: 1,
-      outstanding: 750_000,
-      overdue: 250_000,
-      overdueCount: 1,
+      outstanding: 1_250_000,
+      overdue: 750_000,
+      overdueCount: 3,
       due: 500_000,
-      collectionRate: 25,
+      dueCount: 2,
+      collectionRate: 16.7,
     });
     expect(summary.body.data.trend).toHaveLength(12);
     expect(summary.body.data.trend.at(-1)).toEqual({
@@ -451,7 +453,8 @@ describe('finance insights', () => {
     });
     expect(summary.body.data.byPaymentMode).toEqual([{ mode: 'upi', amount: 250_000, count: 1 }]);
     expect(summary.body.data.topOverdue).toEqual([
-      expect.objectContaining({ fullName: expect.any(String), overdue: 250_000, invoices: 1 }),
+      expect.objectContaining({ overdue: 500_000, invoices: 2 }),
+      expect.objectContaining({ studentId: a.student.id, overdue: 250_000, invoices: 1 }),
     ]);
     expect(summary.body.data.byBatch).toHaveLength(2);
 
@@ -461,16 +464,16 @@ describe('finance insights', () => {
       .get('/api/v1/finance/summary?from=2026-01-01&to=2026-03-31')
       .expect(200);
     expect(coachView.body.data.totals).toMatchObject({
-      billed: 500_000,
+      billed: 750_000,
       collected: 250_000,
-      outstanding: 250_000,
+      outstanding: 500_000,
     });
     const filtered = await api
       .get(
         `/api/v1/finance/summary?from=2026-01-01&to=2026-03-31&coachId=${a.otherCoach.id}&batchId=${a.otherBatch.id}`,
       )
       .expect(200);
-    expect(filtered.body.data.totals.billed).toBe(500_000);
+    expect(filtered.body.data.totals.billed).toBe(750_000);
     const empty = await api.get('/api/v1/finance/summary').expect(200);
     expect(empty.body.data.range).toEqual({ from: '2026-03-01', to: '2026-03-15' });
 

@@ -35,7 +35,8 @@ describe('student registration (admin)', () => {
         effectiveFrom: '2026-03-10',
         effectiveTo: null,
       },
-      billing: { outstanding: 0, invoiceCount: 0 },
+      // Prepaid: the first month is invoiced as soon as the student is accepted.
+      billing: { outstanding: 225_000, invoiceCount: 1 },
     });
     const second = await api.post('/api/v1/students', { ...body, fullName: 'Second' }).expect(201);
     expect(second.body.data.code).toBe('ATQ-0002');
@@ -159,7 +160,7 @@ describe('updating students', () => {
     await api.patch(`/api/v1/students/${s.id}`, { address: '2 Park Street' }).expect(200);
   });
 
-  it('allows correcting the joining date only before billing starts', async () => {
+  it('allows correcting the joining date until a payment is recorded, then rebills', async () => {
     const { admin, batch, plan } = await makeAcademy();
     const s = await makeStudent(
       { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10' },
@@ -172,7 +173,7 @@ describe('updating students', () => {
     expect(res.body.data.currentEnrollment.effectiveFrom).toBe('2026-01-12');
 
     await db.insert(invoices).values({
-      number: 'ATQ/2025-26/00001',
+      number: 'LEGACY-0001',
       studentId: s.id,
       cycleNumber: 1,
       periodStart: '2026-01-12',
@@ -183,10 +184,28 @@ describe('updating students', () => {
       baseAmount: 1,
       totalAmount: 1,
     });
-    const blocked = await api
-      .patch(`/api/v1/students/${s.id}`, { joiningDate: '2026-01-15' })
+    // Unpaid invoice → correction cancels it and restarts billing from the corrected date.
+    setToday('2026-01-20');
+    await api.patch(`/api/v1/students/${s.id}`, { joiningDate: '2026-01-15' }).expect(200);
+    const after = await db
+      .select()
+      .from(invoices)
+      .where(eq(invoices.studentId, s.id))
+      .orderBy(invoices.cycleNumber);
+    expect(after.map((i) => [i.cycleNumber, i.status, i.periodStart, i.cancelledReason])).toEqual([
+      [1, 'cancelled', '2026-01-12', 'Joining date corrected'],
+      [2, 'due', '2026-01-15', null],
+    ]);
+
+    // Once money has changed hands the anchor is locked.
+    const paidApi = await as(admin);
+    await paidApi
+      .post(`/api/v1/invoices/${after[1]!.id}/payments`, { mode: 'cash', paidOn: '2026-01-20' })
+      .expect(200);
+    const blocked = await paidApi
+      .patch(`/api/v1/students/${s.id}`, { joiningDate: '2026-01-16' })
       .expect(422);
-    expect(blocked.body.error.message).toMatch(/anchors the billing cycle/);
+    expect(blocked.body.error.message).toMatch(/after a payment has been recorded/);
   });
 
   it('rejects joining-date changes that conflict with enrollment history', async () => {

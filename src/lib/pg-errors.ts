@@ -26,6 +26,7 @@ const UNIQUE_MESSAGES: Record<string, string> = {
   makeup_student_batch_date_uq: 'This student already has a makeup in this batch on that date',
   enrollments_one_open_per_student_uq: 'Student already has an active batch enrollment',
   payments_one_completed_per_invoice_uq: 'This invoice already has a recorded payment',
+  session_cancellations_batch_date_uq: 'This session is already cancelled',
 };
 
 /** Maps Postgres constraint violations to client errors; returns undefined for anything else. */

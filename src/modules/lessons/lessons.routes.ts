@@ -9,6 +9,7 @@ import { created, noContent, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate, zName, zOptionalText } from '../../lib/validation.js';
 import { currentUser, requireCoach } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
+import { cancellationsIn } from '../attendance/cancellations.js';
 
 export const lessonsRouter = Router();
 
@@ -177,6 +178,7 @@ lessonsRouter.get('/plans', async (req, res) => {
     .groupBy(lessonPlans.id);
 
   const byDate = new Map(plans.map((p) => [p.date, p]));
+  const cancelled = await cancellationsIn([q.batchId], q.from, q.to);
   ok(res, {
     batch: { id: batch.id, name: batch.name, weekdays: batch.weekdays },
     days: eachDay(q.from, q.to).map((date) => {
@@ -184,6 +186,7 @@ lessonsRouter.get('/plans', async (req, res) => {
       return {
         date,
         isSessionDay: batch.weekdays.includes(isoWeekday(date)),
+        cancelled: cancelled.get(`${q.batchId}:${date}`) ?? null,
         planId: p?.id ?? null,
         filledCells: p?.filled ?? 0,
         totalCells: p?.gridSize ?? 0,

@@ -1,16 +1,19 @@
 /**
- * Billing-cycle rules (pure functions, unit-tested).
+ * Billing-cycle rules — PREPAID (pure functions, unit-tested).
  *
  *  - A student's cycles are anchored on the joining date's day-of-month.
  *    Joined 10 Mar → cycle 1 = 10 Mar–09 Apr, cycle 2 = 10 Apr–09 May, …
  *  - Short months clamp to their last day but keep the anchor:
  *    Joined 31 Jan → cycles start 31 Jan, 28/29 Feb, 31 Mar, 30 Apr, …
- *  - A cycle is invoiced when it completes, i.e. on the start day of the next cycle
- *    (the "issue date"). Billing never pauses.
- *  - Cycles that ended before `billingStartsOn` are not auto-billed (lets admins import existing
- *    students without back-billing settled months).
- *  - When a student leaves, only cycles that fully completed on or before the leaving date are
- *    billed.
+ *  - Fees are paid in advance. The FIRST invoice is issued when the student is accepted
+ *    (`billingStartsOn`, normally the acceptance day — even if training starts later); every
+ *    following invoice is issued on the day its month starts. Billing never pauses.
+ *  - Cycles that started before `billingStartsOn` are never billed (lets admins import existing
+ *    students without back-billing months settled outside the system).
+ *  - When a student leaves, no cycle starting after the leaving date is billed. The month in
+ *    progress was already paid in advance (adjust/refund it from the invoice if needed).
+ *  - If they rejoin, cycles restart from the rejoin date (billingAnchorDate) and continue the
+ *    cycle numbering (cycleOffset); the first new invoice is issued at rejoin.
  */
 import { addDays, addMonthsClamped, dateParts, type IsoDate } from '../../lib/dates.js';
 
@@ -18,49 +21,88 @@ export interface Cycle {
   cycleNumber: number;
   periodStart: IsoDate;
   periodEnd: IsoDate;
-  /** Date the cycle completes and its invoice is generated. */
+  /** Date the invoice for this cycle is generated (in advance of / at the start of the period). */
   issueDate: IsoDate;
 }
 
-export function cycleFor(joiningDate: IsoDate, cycleNumber: number): Cycle {
+/** Cycle `n` (1-based) of an anchor, issued on its own start date. */
+export function cycleFor(anchorDate: IsoDate, cycleNumber: number): Cycle {
   if (cycleNumber < 1) throw new RangeError('cycleNumber is 1-based');
-  const anchor = dateParts(joiningDate).day;
-  const periodStart = addMonthsClamped(joiningDate, cycleNumber - 1, anchor);
-  const issueDate = addMonthsClamped(joiningDate, cycleNumber, anchor);
-  return { cycleNumber, periodStart, periodEnd: addDays(issueDate, -1), issueDate };
+  const anchor = dateParts(anchorDate).day;
+  const periodStart = addMonthsClamped(anchorDate, cycleNumber - 1, anchor);
+  const nextStart = addMonthsClamped(anchorDate, cycleNumber, anchor);
+  return { cycleNumber, periodStart, periodEnd: addDays(nextStart, -1), issueDate: periodStart };
 }
 
 export interface BillableStudent {
   joiningDate: IsoDate;
+  /** Anchor for the current billing run (rejoin date); null/undefined means the joining date. */
+  billingAnchorDate?: IsoDate | null;
+  /** Cycles invoiced before the current anchor (0 unless the student rejoined). */
+  cycleOffset?: number;
+  /** Acceptance date: the first invoice is issued here; earlier-starting cycles are not billed. */
   billingStartsOn: IsoDate;
   leftOn: IsoDate | null;
-  /** Highest cycle already invoiced (0 if none). */
+  /** Highest cycle number already invoiced (0 if none). */
   lastInvoicedCycle: number;
 }
 
 /** Safety valve: never generate more than this many invoices for one student in one run. */
 export const MAX_CYCLES_PER_RUN = 36;
 
-/** Cycles that have completed by `today` and still need an invoice. */
+function anchorOf(student: BillableStudent): IsoDate {
+  return student.billingAnchorDate ?? student.joiningDate;
+}
+
+/**
+ * Cycle `k` (1-based) of the current anchor, numbered globally as `offset + k` so invoice cycle
+ * numbers stay unique across a leave → rejoin. The first billable cycle is issued on
+ * `billingStartsOn` (acceptance) instead of waiting for its start date.
+ */
+function billedCycle(student: BillableStudent, k: number): Cycle | null {
+  const base = cycleFor(anchorOf(student), k);
+  if (base.periodStart < student.billingStartsOn) return null; // settled outside the system
+  const isFirstBillable =
+    k === 1 || cycleFor(anchorOf(student), k - 1).periodStart < student.billingStartsOn;
+  return {
+    ...base,
+    cycleNumber: (student.cycleOffset ?? 0) + k,
+    issueDate:
+      isFirstBillable && student.billingStartsOn < base.periodStart
+        ? student.billingStartsOn
+        : base.periodStart,
+  };
+}
+
+function firstLocalCycle(student: BillableStudent): number {
+  return Math.max(student.lastInvoicedCycle - (student.cycleOffset ?? 0), 0) + 1;
+}
+
+/** Cycles whose invoice is due to be issued by `today` and has not been generated yet. */
 export function cyclesDue(student: BillableStudent, today: IsoDate): Cycle[] {
   const due: Cycle[] = [];
-  for (let n = student.lastInvoicedCycle + 1; due.length < MAX_CYCLES_PER_RUN; n++) {
-    const cycle = cycleFor(student.joiningDate, n);
+  for (
+    let k = firstLocalCycle(student), guard = 0;
+    due.length < MAX_CYCLES_PER_RUN && guard < 1200;
+    k++, guard++
+  ) {
+    const start = cycleFor(anchorOf(student), k).periodStart;
+    if (student.leftOn && start > student.leftOn) break;
+    const cycle = billedCycle(student, k);
+    if (!cycle) continue;
     if (cycle.issueDate > today) break;
-    if (student.leftOn && cycle.periodEnd > student.leftOn) break;
-    if (cycle.periodEnd < student.billingStartsOn) continue;
     due.push(cycle);
   }
   return due;
 }
 
-/** The next cycle that will be invoiced in the future (for projections). */
+/** The next invoice that will be issued after `today` (for projections). */
 export function nextUpcomingCycle(student: BillableStudent, today: IsoDate): Cycle | null {
-  let n = Math.max(student.lastInvoicedCycle + 1, 1);
-  for (let guard = 0; guard < 1200; guard++, n++) {
-    const cycle = cycleFor(student.joiningDate, n);
-    if (student.leftOn && cycle.periodEnd > student.leftOn) return null;
-    if (cycle.issueDate > today && cycle.periodEnd >= student.billingStartsOn) return cycle;
+  for (let k = firstLocalCycle(student), guard = 0; guard < 1200; k++, guard++) {
+    const start = cycleFor(anchorOf(student), k).periodStart;
+    if (student.leftOn && start > student.leftOn) return null;
+    const cycle = billedCycle(student, k);
+    if (cycle && cycle.issueDate > today) return cycle;
   }
   return null;
 }

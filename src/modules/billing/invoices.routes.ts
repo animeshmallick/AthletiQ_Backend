@@ -271,3 +271,50 @@ invoicesRouter.post('/:id/cancel', requireAdmin, async (req, res) => {
   });
   ok(res, await getInvoiceForUser(currentUser(req), id));
 });
+
+const AdjustBody = z.object({
+  /** New discount for this invoice only (paise). The student's regular fee is unchanged. */
+  discountAmount: z.number().int().min(0),
+  reason: z.string().trim().min(3, 'Please give a reason').max(500),
+});
+
+/** Admin only: one-off concession on an unpaid invoice (e.g. missed sessions, hardship). */
+invoicesRouter.post('/:id/adjust', requireAdmin, async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const { discountAmount, reason } = parse(AdjustBody, req.body);
+  await db.transaction(async (tx) => {
+    const [inv] = await tx.select().from(invoices).where(eq(invoices.id, id)).for('update');
+    if (!inv) throw AppError.notFound('Invoice');
+    if (inv.status !== 'due') throw AppError.conflict('Only unpaid invoices can be adjusted');
+    if (discountAmount > inv.baseAmount) {
+      throw new AppError('VALIDATION_ERROR', 'Discount cannot exceed the invoice amount', {
+        fields: [{ path: 'discountAmount', message: 'Cannot exceed the invoice amount' }],
+      });
+    }
+    const totalAmount = inv.baseAmount - discountAmount;
+    await tx
+      .update(invoices)
+      .set({
+        discountAmount,
+        totalAmount,
+        // A fully waived invoice is settled, consistent with zero-fee cycles.
+        ...(totalAmount === 0 ? { status: 'paid' as const, paidAt: new Date() } : {}),
+      })
+      .where(eq(invoices.id, id));
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'invoice.adjusted',
+        entityType: 'invoice',
+        entityId: id,
+        metadata: {
+          before: { discountAmount: inv.discountAmount, totalAmount: inv.totalAmount },
+          after: { discountAmount, totalAmount },
+          reason,
+        },
+      },
+      tx,
+    );
+  });
+  ok(res, await getInvoiceForUser(currentUser(req), id));
+});

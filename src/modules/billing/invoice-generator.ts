@@ -38,13 +38,16 @@ export interface GenerationStats {
 }
 
 /**
- * Generates every invoice whose cycle has completed by `today`. Idempotent and self-healing:
- * if the server was down for days, the next run catches up; re-running never duplicates
- * (unique student+cycle). Each invoice is its own transaction so one bad record cannot block
- * the rest.
+ * Generates every (prepaid) invoice due to be issued by `today`: the first one at acceptance, then
+ * one at the start of each month. Idempotent and self-healing: if the server was down for days,
+ * the next run catches up; re-running never duplicates (unique student+cycle). Each invoice is
+ * its own transaction so one bad record cannot block the rest.
+ *
+ * Pass `studentId` to bill a single student immediately (e.g. right after they are accepted).
  */
 export async function generateDueInvoices(
   today: IsoDate = todayInAppTz(),
+  opts: { studentId?: string } = {},
 ): Promise<GenerationStats> {
   const lastCycle = db
     .select({ studentId: invoices.studentId, last: max(invoices.cycleNumber).as('last') })
@@ -57,6 +60,8 @@ export async function generateDueInvoices(
       id: students.id,
       code: students.code,
       joiningDate: students.joiningDate,
+      billingAnchorDate: students.billingAnchorDate,
+      cycleOffset: students.cycleOffset,
       billingStartsOn: students.billingStartsOn,
       leftOn: students.leftOn,
       customMonthlyFee: students.customMonthlyFee,
@@ -67,7 +72,7 @@ export async function generateDueInvoices(
     .from(students)
     .innerJoin(feePlans, eq(feePlans.id, students.feePlanId))
     .leftJoin(lastCycle, eq(lastCycle.studentId, students.id))
-    .where(lte(students.joiningDate, addDays(today, -28)));
+    .where(opts.studentId ? eq(students.id, opts.studentId) : lte(students.billingStartsOn, today));
 
   const stats: GenerationStats = {
     runDate: today,
@@ -158,5 +163,19 @@ async function createCycleInvoice(
     // the sequence increment), so numbering stays gap-free.
     if (mapPgError(err)?.code === 'CONFLICT') return false;
     throw err;
+  }
+}
+
+/**
+ * Prepaid billing: issue a newly accepted (or rejoined) student's first invoice right away.
+ * Never throws — if it fails, the nightly job issues it on its next run.
+ */
+export async function billOnAcceptance(studentId: string): Promise<void> {
+  try {
+    const stats = await generateDueInvoices(todayInAppTz(), { studentId });
+    if (stats.failures.length)
+      logger.warn({ studentId, failures: stats.failures }, 'First invoice deferred to nightly run');
+  } catch (err) {
+    logger.error({ err, studentId }, 'First invoice deferred to nightly run');
   }
 }

@@ -69,14 +69,21 @@ tests/
 
 ### Billing
 
-- Cycle anchored on the joining day; invoice generated when the month **completes**
-  (joined 10 Mar → invoice on 10 Apr for 10 Mar–09 Apr). 29th–31st joiners clamp to month end.
-- Billing never pauses. On leaving, only fully completed cycles are billed.
+- **Prepaid.** The first invoice is generated the moment a student is accepted (admin registers
+  them, a registration is approved, or they rejoin) — even if training starts later. Every following
+  invoice is generated at the start of its month (joined 10 Mar → invoices on 10 Mar, 10 Apr, …).
+  Cycles are anchored on the joining day; 29th–31st joiners clamp to month end.
+- Billing never pauses. After leaving, no further months are billed (the month in progress was already
+  prepaid — cancel, adjust or refund it). Rejoining restarts billing from the rejoin date.
+- The joining date can be corrected until a payment is recorded: unpaid invoices are cancelled and
+  billing restarts from the corrected date.
 - Daily job at **00:00 IST** (`INVOICE_CRON`), plus a catch-up 15 s after boot. Idempotent
   (unique student + cycle), gap-free numbering per financial year (`ATQ/2026-27/00001`), guarded by a
   Postgres advisory lock so multiple EC2 instances never double-run it.
 - Price, plan, batch and coach are snapshotted on each invoice.
-- `billingStartsOn` (defaults to today) prevents back-billing when importing existing students.
+- `billingStartsOn` (defaults to the earlier of today and the joining date) is the acceptance date:
+  the first invoice is issued then, and months that started earlier are never billed — set it when
+  importing existing students whose current month was settled outside the system.
 
 ### Attendance
 
@@ -126,10 +133,14 @@ tests/
 
 ---
 
-## Deployment (EC2)
+## Deployment
 
-1. Build the image: `docker build -t athletiq-api .`
-2. Run migrations once per release: `docker run --env-file .env athletiq-api node dist/db/migrate.js`
-3. Start: `docker run -d --env-file .env -p 4000:4000 --restart unless-stopped athletiq-api`
-4. Behind an ALB/nginx set `TRUST_PROXY=1`, `COOKIE_SECURE=true`, and if the web app is on another
-   site, `COOKIE_CROSS_SITE=true`. Point health checks at `/ready`.
+Production runs on **EC2 with PM2** behind nginx (HTTPS), and the web app runs on **AWS Amplify**. The full
+step-by-step guide is in **[deploy.md](deploy.md)**.
+
+- `ecosystem.config.cjs`: PM2 cluster config (2 processes, graceful reloads, log files).
+- Deploys are **manual**: CI only runs checks, and the update steps are in deploy.md §9.
+- `npm run db:migrate:prod` / `db:seed:prod` / `jobs:invoices:prod`: production equivalents that run the
+  compiled code, so no dev dependencies are needed on the server.
+
+(A `Dockerfile` is kept for a possible future container setup; the current deployment doesn't use it.)

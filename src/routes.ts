@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAdmin, requireAuth } from './middleware/auth.js';
 import { adminRouter } from './modules/admin/admin.routes.js';
 import { attendanceRouter } from './modules/attendance/attendance.routes.js';
+import { cancellationsRouter } from './modules/attendance/cancellations.js';
 import { coachSessionsRouter } from './modules/attendance/coach-sessions.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { batchesRouter } from './modules/batches/batches.routes.js';
@@ -33,6 +34,7 @@ export function apiRouter(): Router {
   api.use(requireAuth);
   api.use('/users', usersRouter);
   api.use('/locations', locationsRouter);
+  api.use('/batches', cancellationsRouter);
   api.use('/batches', batchesRouter);
   api.use('/fee-plans', feePlansRouter);
   api.use('/students', studentsRouter);

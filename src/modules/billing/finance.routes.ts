@@ -221,6 +221,8 @@ financeRouter.get('/projection', async (req, res) => {
       code: students.code,
       fullName: students.fullName,
       joiningDate: students.joiningDate,
+      billingAnchorDate: students.billingAnchorDate,
+      cycleOffset: students.cycleOffset,
       billingStartsOn: students.billingStartsOn,
       leftOn: students.leftOn,
       customMonthlyFee: students.customMonthlyFee,

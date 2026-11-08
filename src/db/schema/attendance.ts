@@ -15,6 +15,26 @@ import { batches, locations } from './academy.js';
 import { students } from './students.js';
 import { users } from './users.js';
 
+/**
+ * A batch session that did not happen (rain, holiday, tournament…). Cancelled sessions are not
+ * markable, do not count as absences and are excluded from weekly feedback attendance. Billing is
+ * unaffected (it never pauses).
+ */
+export const sessionCancellations = pgTable(
+  'session_cancellations',
+  {
+    id: id(),
+    batchId: uuid()
+      .notNull()
+      .references(() => batches.id, { onDelete: 'cascade' }),
+    date: date({ mode: 'string' }).notNull(),
+    reason: text().notNull(),
+    cancelledById: uuid().references(() => users.id, { onDelete: 'set null' }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('session_cancellations_batch_date_uq').on(t.batchId, t.date)],
+);
+
 /** Student attendance for one batch session (batch + date). */
 export const studentAttendance = pgTable(
   'student_attendance',

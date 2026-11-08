@@ -26,6 +26,7 @@ import { parse, zId, zIsoDate } from '../../lib/validation.js';
 import { currentUser, requireCoach } from '../../middleware/auth.js';
 import { assertStudentAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import { cancellationsIn } from '../attendance/cancellations.js';
 import { answersSchema, CURRENT_WEEKLY_TEMPLATE, getTemplate } from './templates/index.js';
 
 export const feedbackRouter = Router();
@@ -60,7 +61,7 @@ async function attendanceForWeek(
       .from(enrollments)
       .where(and(eq(enrollments.studentId, studentId), overlapsWeek(weekStart))),
     db
-      .select({ date: makeupSessions.date })
+      .select({ date: makeupSessions.date, batchId: makeupSessions.batchId })
       .from(makeupSessions)
       .where(
         and(
@@ -81,12 +82,19 @@ async function attendanceForWeek(
       ),
   ]);
 
-  let scheduled = makeups.length;
+  // Cancelled sessions (rain, holidays) don't count as scheduled.
+  const cancelled = await cancellationsIn(
+    [...new Set([...enrolls.map((e) => e.batchId), ...makeups.map((m) => m.batchId)])],
+    weekStart,
+    end,
+  );
+  let scheduled = makeups.filter((m) => !cancelled.has(`${m.batchId}:${m.date}`)).length;
   for (const day of eachDay(weekStart, end)) {
     const e = enrolls.find(
       (x) => x.effectiveFrom <= day && (x.effectiveTo === null || x.effectiveTo >= day),
     );
-    if (e?.trainingDays.includes(isoWeekday(day))) scheduled++;
+    if (e?.trainingDays.includes(isoWeekday(day)) && !cancelled.has(`${e.batchId}:${day}`))
+      scheduled++;
   }
   const count = (s: string) => marks.filter((m) => m.status === s).length;
   const summary = {

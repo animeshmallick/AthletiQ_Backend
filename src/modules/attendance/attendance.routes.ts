@@ -20,6 +20,7 @@ import { currentUser } from '../../middleware/auth.js';
 import { assertBatchAccess, assertStudentAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { expectedRoster } from '../batches/roster.js';
+import { assertNotCancelled, cancellationsIn, getCancellation } from './cancellations.js';
 
 export const attendanceRouter = Router();
 
@@ -62,6 +63,7 @@ attendanceRouter.get('/overview', async (req, res) => {
     .orderBy(asc(batches.startTime));
 
   const ids = sessionBatches.map((b) => b.id);
+  const cancelled = await cancellationsIn(ids, day, day);
   const [marks, checkIns, plans, rosters] = await Promise.all([
     ids.length
       ? db
@@ -97,6 +99,7 @@ attendanceRouter.get('/overview', async (req, res) => {
         present: batchMarks.filter((m) => m.status === 'present' || m.status === 'late').length,
         attendanceComplete: expected > 0 && batchMarks.length >= expected,
         hasLessonPlan: plans.some((p) => p.batchId === b.id),
+        cancelled: cancelled.get(`${b.id}:${day}`) ?? null,
         coachSession: cs
           ? {
               checkInAt: cs.checkInAt,
@@ -118,7 +121,7 @@ attendanceRouter.get('/session', async (req, res) => {
   const user = currentUser(req);
   const batch = await assertBatchAccess(user, batchId);
 
-  const [roster, marks] = await Promise.all([
+  const [roster, marks, cancellation] = await Promise.all([
     expectedRoster(batchId, date),
     db
       .select({
@@ -134,6 +137,7 @@ attendanceRouter.get('/session', async (req, res) => {
       .from(studentAttendance)
       .innerJoin(students, eq(students.id, studentAttendance.studentId))
       .where(and(eq(studentAttendance.batchId, batchId), eq(studentAttendance.date, date))),
+    getCancellation(batchId, date),
   ]);
 
   const byStudent = new Map(marks.map((m) => [m.studentId, m]));
@@ -166,7 +170,8 @@ attendanceRouter.get('/session', async (req, res) => {
     batch: { id: batch.id, name: batch.name, startTime: batch.startTime, endTime: batch.endTime },
     date,
     isScheduledDay: batch.weekdays.includes(isoWeekday(date)),
-    editable: canEdit(user.role, date).allowed,
+    cancelled: cancellation,
+    editable: !cancellation && canEdit(user.role, date).allowed,
     students: rows,
     summary: summarize(rows.map((r) => r.status)),
   });
@@ -200,6 +205,7 @@ attendanceRouter.put('/session', async (req, res) => {
   const user = currentUser(req);
   const batch = await assertBatchAccess(user, body.batchId);
 
+  await assertNotCancelled(body.batchId, body.date);
   const edit = canEdit(user.role, body.date);
   if (!edit.allowed) throw AppError.unprocessable(edit.reason!);
   if (!batch.weekdays.includes(isoWeekday(body.date))) {
@@ -352,9 +358,13 @@ attendanceRouter.get('/register', async (req, res) => {
     entry.marks[r.date] = r.status;
     byStudent.set(r.studentId, entry);
   }
+  const cancelledByKey = await cancellationsIn([q.batchId], q.from, q.to);
+  const cancelled: Record<string, string> = {};
+  for (const [key, reason] of cancelledByKey) cancelled[key.slice(key.indexOf(':') + 1)] = reason;
   ok(res, {
     batch: { id: batch.id, name: batch.name },
     dates: sessionDates,
+    cancelled,
     students: [...byStudent.values()].sort((a, b) => a.fullName.localeCompare(b.fullName)),
   });
 });
