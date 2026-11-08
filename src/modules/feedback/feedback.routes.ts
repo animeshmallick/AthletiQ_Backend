@@ -50,6 +50,12 @@ function overlapsWeek(weekStart: IsoDate) {
   );
 }
 
+/** Feedback opens once the week is over (the Monday after), never for the current or a future week. */
+function weekCompleted(weekStart: IsoDate): boolean {
+  return weekEnd(weekStart) < todayInAppTz();
+}
+const opensOn = (weekStart: IsoDate) => addDays(weekStart, 7);
+
 async function attendanceForWeek(
   studentId: string,
   weekStart: IsoDate,
@@ -227,7 +233,11 @@ feedbackRouter.get('/students/:studentId/weeks/:weekStart', async (req, res) => 
     template,
     feedback: fb ?? null,
     attendance,
-    editable: !fb || fb.status === 'draft' || todayInAppTz() <= addDays(weekStart, EDIT_GRACE_DAYS),
+    weekCompleted: weekCompleted(weekStart),
+    opensOn: opensOn(weekStart),
+    editable:
+      weekCompleted(weekStart) &&
+      (!fb || fb.status === 'draft' || todayInAppTz() <= addDays(weekStart, EDIT_GRACE_DAYS)),
   });
 });
 
@@ -242,8 +252,11 @@ feedbackRouter.put('/students/:studentId/weeks/:weekStart', requireCoach, async 
   const body = parse(SaveBody, req.body);
   const user = currentUser(req);
   await assertStudentAccess(user, studentId);
-  if (weekStart > todayInAppTz())
-    throw AppError.badRequest('Feedback cannot be written for a future week');
+  if (!weekCompleted(weekStart)) {
+    throw AppError.unprocessable(
+      `Feedback for this week opens on ${opensOn(weekStart)}, once the week is over.`,
+    );
+  }
 
   const existing = await db.query.weeklyFeedback.findFirst({
     where: and(eq(weeklyFeedback.studentId, studentId), eq(weeklyFeedback.weekStart, weekStart)),

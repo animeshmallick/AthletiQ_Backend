@@ -12,13 +12,21 @@ import {
   students,
   users,
 } from '../../db/schema/index.js';
-import { addDays, diffDays, eachDay, isoWeekday, todayInAppTz } from '../../lib/dates.js';
+import {
+  addDays,
+  diffDays,
+  eachDay,
+  isoWeekday,
+  todayInAppTz,
+  type IsoDate,
+} from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate, zOptionalText } from '../../lib/validation.js';
 import { currentUser } from '../../middleware/auth.js';
 import { assertBatchAccess, assertStudentAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import type { AuthUser } from '../auth/auth.types.js';
 import { expectedRoster } from '../batches/roster.js';
 import { assertNotCancelled, cancellationsIn, getCancellation } from './cancellations.js';
 
@@ -38,10 +46,8 @@ function summarize(statuses: (Status | null)[]) {
 
 // ─── Daily overview: every batch session for a date ──────────────────────────
 
-attendanceRouter.get('/overview', async (req, res) => {
-  const user = currentUser(req);
-  const { date } = parse(z.object({ date: zIsoDate.optional() }), req.query);
-  const day = date ?? todayInAppTz();
+/** Every batch session on one day for this user (all batches for admins, own for coaches). */
+export async function dayOverview(user: AuthUser, day: IsoDate) {
   const weekday = isoWeekday(day);
 
   const filters: SQL[] = [eq(batches.isActive, true), sql`${weekday} = any(${batches.weekdays})`];
@@ -86,7 +92,7 @@ attendanceRouter.get('/overview', async (req, res) => {
     Promise.all(ids.map((id) => expectedRoster(id, day))),
   ]);
 
-  ok(res, {
+  return {
     date: day,
     sessions: sessionBatches.map((b, i) => {
       const batchMarks = marks.filter((m) => m.batchId === b.id);
@@ -109,7 +115,29 @@ attendanceRouter.get('/overview', async (req, res) => {
           : null,
       };
     }),
+  };
+}
+
+attendanceRouter.get('/overview', async (req, res) => {
+  const { date } = parse(z.object({ date: zIsoDate.optional() }), req.query);
+  ok(res, await dayOverview(currentUser(req), date ?? todayInAppTz()));
+});
+
+// ─── Calendar: day overviews for a range (week view) ─────────────────────────
+
+const CalendarQuery = z
+  .object({ from: zIsoDate, to: zIsoDate })
+  .refine((q) => q.to >= q.from && diffDays(q.from, q.to) <= 41, {
+    message: 'Pick a range of up to 6 weeks',
   });
+
+attendanceRouter.get('/calendar', async (req, res) => {
+  const q = parse(CalendarQuery, req.query);
+  const user = currentUser(req);
+  const dates: IsoDate[] = [];
+  for (let d = q.from; d <= q.to; d = addDays(d, 1)) dates.push(d);
+  const days = await Promise.all(dates.map((d) => dayOverview(user, d)));
+  ok(res, { from: q.from, to: q.to, today: todayInAppTz(), days });
 });
 
 // ─── A single batch session ──────────────────────────────────────────────────
@@ -166,16 +194,40 @@ attendanceRouter.get('/session', async (req, res) => {
     });
   }
 
+  const needsCheckIn = user.role === 'coach' && !(await hasCheckedIn(user.id, batchId, date));
+  const edit = canEdit(user.role, date);
   ok(res, {
     batch: { id: batch.id, name: batch.name, startTime: batch.startTime, endTime: batch.endTime },
     date,
     isScheduledDay: batch.weekdays.includes(isoWeekday(date)),
     cancelled: cancellation,
-    editable: !cancellation && canEdit(user.role, date).allowed,
+    editable: !cancellation && edit.allowed && !needsCheckIn,
+    /** Coaches mark attendance only for sessions they checked in to. */
+    needsCheckIn,
+    lockedReason: cancellation
+      ? null
+      : !edit.allowed
+        ? edit.reason
+        : needsCheckIn
+          ? 'Check in to this session to mark attendance.'
+          : null,
     students: rows,
     summary: summarize(rows.map((r) => r.status)),
   });
 });
+
+/** Did this coach check in (GPS) for the batch's session on that date? */
+async function hasCheckedIn(coachId: string, batchId: string, date: IsoDate) {
+  const row = await db.query.coachSessions.findFirst({
+    columns: { id: true },
+    where: and(
+      eq(coachSessions.coachId, coachId),
+      eq(coachSessions.batchId, batchId),
+      eq(coachSessions.date, date),
+    ),
+  });
+  return !!row;
+}
 
 function canEdit(role: 'admin' | 'coach', date: string): { allowed: boolean; reason?: string } {
   const today = todayInAppTz();
@@ -210,6 +262,9 @@ attendanceRouter.put('/session', async (req, res) => {
   if (!edit.allowed) throw AppError.unprocessable(edit.reason!);
   if (!batch.weekdays.includes(isoWeekday(body.date))) {
     throw AppError.unprocessable(`${batch.name} does not run on this day`);
+  }
+  if (user.role === 'coach' && !(await hasCheckedIn(user.id, body.batchId, body.date))) {
+    throw AppError.unprocessable('Check in to this session before marking attendance.');
   }
 
   const roster = await expectedRoster(body.batchId, body.date);

@@ -7,6 +7,7 @@ import {
   makePlan,
   makeStudent,
   makeUser,
+  setToday,
 } from '../helpers/factories';
 
 describe('users (admin)', () => {
@@ -236,6 +237,48 @@ describe('batches', () => {
     expect(moved.body.data.coachId).toBe(otherCoach.id);
     const loc = await makeLocation();
     await api.patch(`/api/v1/batches/${batch.id}`, { locationId: loc.id }).expect(200);
+  });
+
+  it('can apply new batch days to every student in one step', async () => {
+    setToday('2026-03-09');
+    const { admin, batch, plan } = await makeAcademy();
+    const a = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, trainingDays: [1, 3, 5], joiningDate: '2026-02-01' },
+      admin.id,
+    );
+    const b = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, trainingDays: [2, 4], joiningDate: '2026-02-01' },
+      admin.id,
+    );
+    const api = await as(admin);
+
+    // Up to 6 days can be applied (students train at most 6 days a week).
+    await api
+      .patch(`/api/v1/batches/${batch.id}`, {
+        weekdays: [1, 2, 3, 4, 5, 6, 7],
+        applyDaysToStudents: true,
+      })
+      .expect(422);
+
+    const res = await api
+      .patch(`/api/v1/batches/${batch.id}`, { weekdays: [2, 4, 6], applyDaysToStudents: true })
+      .expect(200);
+    expect(res.body.data.weekdays).toEqual([2, 4, 6]);
+    for (const s of [a, b]) {
+      const detail = await api.get(`/api/v1/students/${s.id}`).expect(200);
+      expect(detail.body.data.currentEnrollment).toMatchObject({
+        batchId: batch.id,
+        trainingDays: [2, 4, 6],
+        effectiveFrom: '2026-03-09',
+      });
+    }
+    // History is kept: the previous enrollment ended the day before.
+    const hist = await api.get(`/api/v1/students/${a.id}`).expect(200);
+    expect(hist.body.data.enrollmentHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ trainingDays: [1, 3, 5], effectiveTo: '2026-03-08' }),
+      ]),
+    );
   });
 
   it('returns the expected roster including makeups', async () => {

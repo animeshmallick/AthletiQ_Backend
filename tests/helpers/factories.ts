@@ -3,7 +3,8 @@ import request from 'supertest';
 import type { Express } from 'express';
 import { createApp } from '../../src/app';
 import { db } from '../../src/db/client';
-import { batches, feePlans, locations, users } from '../../src/db/schema';
+import { eq } from 'drizzle-orm';
+import { batches, coachSessions, feePlans, locations, users } from '../../src/db/schema';
 import { hashPassword } from '../../src/modules/auth/password';
 import { signAccessToken } from '../../src/modules/auth/tokens';
 import {
@@ -166,4 +167,25 @@ export async function makeAcademy() {
   });
   const plan = await makePlan();
   return { admin, coach, otherCoach, location, batch, otherBatch, plan };
+}
+
+/** Records an on-site check-in so the coach may mark attendance for those sessions. */
+export async function checkIn(coachId: string, batchId: string, ...dates: string[]) {
+  const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
+  for (const date of dates) {
+    await db
+      .insert(coachSessions)
+      .values({
+        coachId,
+        batchId,
+        locationId: b!.locationId,
+        date,
+        checkInAt: new Date(`${date}T00:30:00Z`),
+        checkInLat: 0,
+        checkInLng: 0,
+        checkInDistanceM: 0,
+        checkInWithinFence: true,
+      })
+      .onConflictDoNothing();
+  }
 }

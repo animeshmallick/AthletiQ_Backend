@@ -3,13 +3,13 @@ import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { db, type DbOrTx } from '../../db/client.js';
 import { lessonEvents, lessonPlanCells, lessonPlans, lessonStages } from '../../db/schema/index.js';
-import { diffDays, eachDay, isoWeekday } from '../../lib/dates.js';
+import { diffDays, eachDay, isoWeekday, type IsoDate } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate, zName, zOptionalText } from '../../lib/validation.js';
 import { currentUser, requireCoach } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
-import { cancellationsIn } from '../attendance/cancellations.js';
+import { cancellationsIn, getCancellation } from '../attendance/cancellations.js';
 
 export const lessonsRouter = Router();
 
@@ -302,11 +302,26 @@ async function writePlan(
   if (cells.length) await tx.insert(lessonPlanCells).values(cells);
 }
 
+/** Why a plan can't be written for this batch on this date, or null if it can. */
+async function planBlockedReason(
+  batch: { id: string; name: string; weekdays: number[] },
+  date: IsoDate,
+): Promise<string | null> {
+  if (!batch.weekdays.includes(isoWeekday(date))) {
+    return `${batch.name} doesn't run on this day, so it can't have a lesson plan.`;
+  }
+  const cancelled = await getCancellation(batch.id, date);
+  if (cancelled) return `This session was cancelled (${cancelled.reason}).`;
+  return null;
+}
+
 /** Saves the whole grid for a day (create or replace). Only the batch's coach can edit. */
 lessonsRouter.put('/plans/day', requireCoach, async (req, res) => {
   const body = parse(SavePlanBody, req.body);
   const coachId = currentUser(req).id;
-  await assertBatchAccess(currentUser(req), body.batchId);
+  const batch = await assertBatchAccess(currentUser(req), body.batchId);
+  const blocked = await planBlockedReason(batch, body.date);
+  if (blocked) throw AppError.unprocessable(blocked);
 
   await db.transaction(async (tx) => {
     await assertOwnedLibrary(tx, coachId, body.stageIds, body.eventIds);
@@ -339,10 +354,19 @@ lessonsRouter.post('/plans/copy', requireCoach, async (req, res) => {
   const user = currentUser(req);
   await assertBatchAccess(user, body.batchId);
   const targetBatchId = body.toBatchId ?? body.batchId;
-  if (targetBatchId !== body.batchId) await assertBatchAccess(user, targetBatchId);
+  const targetBatch =
+    targetBatchId !== body.batchId
+      ? await assertBatchAccess(user, targetBatchId)
+      : await assertBatchAccess(user, body.batchId);
 
   const source = await loadPlan(body.batchId, body.fromDate);
   if (!source) throw AppError.notFound('Source plan');
+
+  // Days the target batch doesn't run (or cancelled) are skipped. Checked before the transaction.
+  const blocked = new Set<string>();
+  for (const date of new Set(body.toDates)) {
+    if (await planBlockedReason(targetBatch, date)) blocked.add(date);
+  }
 
   const result = await db.transaction(async (tx) => {
     const existing = await tx
@@ -355,7 +379,8 @@ lessonsRouter.post('/plans/copy', requireCoach, async (req, res) => {
     for (const date of [...new Set(body.toDates)]) {
       if (
         (date === body.fromDate && targetBatchId === body.batchId) ||
-        (existingDates.has(date) && !body.overwrite)
+        (existingDates.has(date) && !body.overwrite) ||
+        blocked.has(date)
       ) {
         skipped.push(date);
         continue;

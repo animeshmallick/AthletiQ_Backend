@@ -81,6 +81,11 @@ describe('daily lesson plans', () => {
         { eventId: e2, stageId: s1, content: '   ' },
       ],
     };
+    // Batches in the factory run Monday–Saturday: Sunday can't have a plan.
+    const sunday = await api
+      .put('/api/v1/lessons/plans/day', { ...plan, date: '2026-03-15' })
+      .expect(422);
+    expect(sunday.body.error.message).toMatch(/doesn't run on this day/);
     const saved = await api.put('/api/v1/lessons/plans/day', plan).expect(200);
     expect(saved.body.data).toMatchObject({
       stages: [
@@ -368,7 +373,22 @@ describe('weekly feedback', () => {
     const api = await as(coach);
     await api
       .put(`/api/v1/feedback/students/${student.id}/weeks/2026-03-23`, { answers: {} })
-      .expect(400);
+      .expect(422); // future week
+    // The current week (today is Mon 16 Mar) isn't over yet: read-only until it ends.
+    const current = await api
+      .get(`/api/v1/feedback/students/${student.id}/weeks/2026-03-16`)
+      .expect(200);
+    expect(current.body.data).toMatchObject({
+      weekCompleted: false,
+      opensOn: '2026-03-23',
+      editable: false,
+    });
+    const early = await api
+      .put(`/api/v1/feedback/students/${student.id}/weeks/2026-03-16`, { answers: {} })
+      .expect(422);
+    expect(early.body.error.message).toBe(
+      'Feedback for this week opens on 2026-03-23, once the week is over.',
+    );
     await api
       .put(`/api/v1/feedback/students/${student.id}/weeks/2026-01-05`, { answers: {} })
       .expect(422); // before joining
@@ -411,5 +431,47 @@ describe('weekly feedback', () => {
       .get(`/api/v1/feedback/students/${student.id}/weeks/2026-03-09`)
       .expect(200);
     expect(submittedView.body.data.feedback.status).toBe('submitted');
+  });
+});
+
+describe('lesson plans on non-session days', () => {
+  it('skips Sundays and cancelled sessions when copying', async () => {
+    setToday('2026-03-09');
+    const { coach, batch } = await makeAcademy();
+    const api = await as(coach);
+    const stage = await api.post('/api/v1/lessons/stages', { name: 'Warm-up' }).expect(201);
+    const event = await api.post('/api/v1/lessons/events', { name: 'Footwork' }).expect(201);
+    await api
+      .put('/api/v1/lessons/plans/day', {
+        batchId: batch.id,
+        date: '2026-03-09',
+        stageIds: [stage.body.data.id],
+        eventIds: [event.body.data.id],
+        cells: [{ eventId: event.body.data.id, stageId: stage.body.data.id, content: 'Drill' }],
+      })
+      .expect(200);
+    await api
+      .post(`/api/v1/batches/${batch.id}/cancellations`, { date: '2026-03-11', reason: 'Rain' })
+      .expect(201);
+    await api
+      .put('/api/v1/lessons/plans/day', {
+        batchId: batch.id,
+        date: '2026-03-11',
+        stageIds: [stage.body.data.id],
+        eventIds: [event.body.data.id],
+        cells: [],
+      })
+      .expect(422);
+    const copy = await api
+      .post('/api/v1/lessons/plans/copy', {
+        batchId: batch.id,
+        fromDate: '2026-03-09',
+        toDates: ['2026-03-10', '2026-03-11', '2026-03-15'],
+      })
+      .expect(200);
+    expect(copy.body.data).toEqual({
+      copied: ['2026-03-10'],
+      skipped: ['2026-03-11', '2026-03-15'],
+    });
   });
 });

@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { batches, enrollments, locations, users } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
+import { MAX_TRAINING_DAYS_PER_WEEK } from '../../config/constants.js';
 import { todayInAppTz } from '../../lib/dates.js';
 import { created, ok } from '../../lib/http.js';
 import {
@@ -20,6 +21,7 @@ import {
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import { transferStudent } from '../students/students.service.js';
 import { currentMembers, expectedRoster } from './roster.js';
 
 export const batchesRouter = Router();
@@ -152,7 +154,13 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
 
 batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const body = parse(BatchBody.partial(), req.body);
+  const { applyDaysToStudents, ...body } = parse(
+    BatchBody.partial().extend({
+      /** Also set every current student's training days to the batch's new days (from today). */
+      applyDaysToStudents: z.boolean().optional(),
+    }),
+    req.body,
+  );
   const existing = await assertBatchAccess(currentUser(req), id);
 
   const start = body.startTime ?? existing.startTime;
@@ -163,12 +171,18 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
     await assertLocation(body.locationId);
 
   const members = await currentMembers(id);
-  if (body.weekdays) {
+  const applyToStudents = !!(applyDaysToStudents && body.weekdays && members.length);
+  if (applyToStudents && body.weekdays!.length > MAX_TRAINING_DAYS_PER_WEEK) {
+    throw AppError.unprocessable(
+      `Students train at most ${MAX_TRAINING_DAYS_PER_WEEK} days a week. Pick ${MAX_TRAINING_DAYS_PER_WEEK} or fewer days to apply them to every student.`,
+    );
+  }
+  if (body.weekdays && !applyToStudents) {
     const allowed = new Set(body.weekdays);
     const conflicts = members.filter((m) => m.trainingDays.some((d) => !allowed.has(d)));
     if (conflicts.length) {
       throw AppError.unprocessable(
-        'Some students train on days this batch would no longer run. Update their training days first.',
+        'Some students train on days this batch would no longer run. Tick “Also update all students” or change their training days first.',
         {
           students: conflicts.map((c) => ({
             id: c.studentId,
@@ -183,7 +197,27 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
     throw AppError.unprocessable('Transfer all students out of this batch before deactivating it.');
   }
 
-  const [batch] = await db.update(batches).set(body).where(eq(batches.id, id)).returning();
+  const user = currentUser(req);
+  const batch = await db.transaction(async (tx) => {
+    const [updated] = await tx.update(batches).set(body).where(eq(batches.id, id)).returning();
+    if (applyToStudents) {
+      const today = todayInAppTz();
+      const days = [...body.weekdays!].sort((a, b) => a - b);
+      for (const m of members) {
+        if (m.trainingDays.join() === days.join()) continue;
+        await transferStudent(tx, {
+          studentId: m.studentId,
+          batchId: id,
+          trainingDays: days,
+          // A student joining in the future keeps their start date.
+          effectiveFrom: m.effectiveFrom > today ? m.effectiveFrom : today,
+          reason: 'Batch days changed',
+          actorId: user.id,
+        });
+      }
+    }
+    return updated!;
+  });
   await audit({
     ...auditCtx(req),
     action:
@@ -192,7 +226,11 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
         : 'batch.updated',
     entityType: 'batch',
     entityId: id,
-    metadata: { changes: body, previousCoachId: existing.coachId },
+    metadata: {
+      changes: body,
+      previousCoachId: existing.coachId,
+      appliedDaysToStudents: applyToStudents ? members.length : 0,
+    },
   });
   ok(res, batch);
 });

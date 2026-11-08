@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { as, makeAcademy, makeBatch, makeStudent, setToday } from '../helpers/factories';
+import { as, makeAcademy, makeBatch, makeStudent, setToday, checkIn } from '../helpers/factories';
 
 // 2026-03-09 is a Monday. Batches run Mon–Sat; students train Mon/Wed/Fri by default.
 const MON = '2026-03-09';
@@ -24,12 +24,33 @@ describe('student attendance', () => {
     const { coach, batch, s1, s2 } = await setup();
     const api = await as(coach);
 
+    // Not checked in yet: the sheet is read-only and saving is refused.
+    const locked = await api
+      .get(`/api/v1/attendance/session?batchId=${batch.id}&date=${MON}`)
+      .expect(200);
+    expect(locked.body.data).toMatchObject({
+      editable: false,
+      needsCheckIn: true,
+      lockedReason: 'Check in to this session to mark attendance.',
+    });
+    const refused = await api
+      .put('/api/v1/attendance/session', {
+        batchId: batch.id,
+        date: MON,
+        records: [{ studentId: s1.id, status: 'present' }],
+      })
+      .expect(422);
+    expect(refused.body.error.message).toMatch(/Check in/);
+    await checkIn(coach.id, batch.id, MON);
+
     const sheet = await api
       .get(`/api/v1/attendance/session?batchId=${batch.id}&date=${MON}`)
       .expect(200);
     expect(sheet.body.data).toMatchObject({
       isScheduledDay: true,
       editable: true,
+      needsCheckIn: false,
+      lockedReason: null,
       summary: { total: 2, unmarked: 2 },
     });
 
@@ -62,6 +83,7 @@ describe('student attendance', () => {
     setToday(TUE);
     const { coach, otherCoach, batch, s1, admin, location } = await setup();
     const api = await as(coach);
+    await checkIn(coach.id, batch.id, MON, TUE);
     const mark = (date: string, studentId = s1.id) => ({
       batchId: batch.id,
       date,
@@ -93,6 +115,7 @@ describe('student attendance', () => {
     setToday(MON);
     const { admin, coach, batch, otherBatch, s1 } = await setup();
     const api = await as(coach);
+    await checkIn(coach.id, batch.id, MON, TUE);
     await api
       .put('/api/v1/attendance/session', {
         batchId: batch.id,
@@ -138,6 +161,7 @@ describe('student attendance', () => {
       .post(`/api/v1/students/${visitor.id}/makeups`, { batchId: batch.id, date: TUE })
       .expect(201);
     const api = await as(coach);
+    await checkIn(coach.id, batch.id, MON, TUE);
     await api
       .put('/api/v1/attendance/session', {
         batchId: batch.id,
@@ -157,19 +181,22 @@ describe('student attendance', () => {
     setToday(MON);
     const { coach, admin, batch, s1, s2 } = await setup();
     const api = await as(coach);
-    await api.put('/api/v1/attendance/session', {
-      batchId: batch.id,
-      date: MON,
-      records: [
-        { studentId: s1.id, status: 'present' },
-        { studentId: s2.id, status: 'absent' },
-      ],
-    });
+    // Real GPS check-in first (attendance requires it), then mark.
     await api
       .post('/api/v1/coach-sessions/check-in', {
         batchId: batch.id,
         latitude: 12.9716,
         longitude: 77.5946,
+      })
+      .expect(200);
+    await api
+      .put('/api/v1/attendance/session', {
+        batchId: batch.id,
+        date: MON,
+        records: [
+          { studentId: s1.id, status: 'present' },
+          { studentId: s2.id, status: 'absent' },
+        ],
       })
       .expect(200);
 
@@ -429,5 +456,42 @@ describe('coach GPS check-in / check-out', () => {
       totalHours: 0,
     });
     await later.get('/api/v1/coach-sessions?from=2020-01-01&to=2026-03-11').expect(400);
+  });
+});
+
+describe('calendar', () => {
+  it('returns each day of a week with its sessions, for the user’s scope', async () => {
+    setToday(MON);
+    const { coach, admin, batch, otherBatch } = await setup();
+    const res = await (
+      await as(coach)
+    )
+      .get('/api/v1/attendance/calendar?from=2026-03-09&to=2026-03-15')
+      .expect(200);
+    expect(res.body.data.days).toHaveLength(7);
+    expect(res.body.data.today).toBe(MON);
+    const monday = res.body.data.days[0];
+    expect(monday.date).toBe(MON);
+    expect(monday.sessions.map((s: { batch: { id: string } }) => s.batch.id)).toEqual([batch.id]);
+    expect(res.body.data.days[6].sessions).toEqual([]); // Sunday
+    // Admins see every batch.
+    const all = await (
+      await as(admin)
+    )
+      .get('/api/v1/attendance/calendar?from=2026-03-09&to=2026-03-09')
+      .expect(200);
+    expect(
+      all.body.data.days[0].sessions.map((s: { batch: { id: string } }) => s.batch.id).sort(),
+    ).toEqual([batch.id, otherBatch.id].sort());
+    await (
+      await as(coach)
+    )
+      .get('/api/v1/attendance/calendar?from=2026-03-09&to=2026-05-30')
+      .expect(400);
+    await (
+      await as(coach)
+    )
+      .get('/api/v1/attendance/calendar?from=2026-03-10&to=2026-03-09')
+      .expect(400);
   });
 });

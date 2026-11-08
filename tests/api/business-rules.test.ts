@@ -3,7 +3,7 @@ import { asc, eq } from 'drizzle-orm';
 import { db } from '../../src/db/client';
 import { invoices } from '../../src/db/schema';
 import { generateDueInvoices } from '../../src/modules/billing/invoice-generator';
-import { as, makeAcademy, makeStudent, setToday } from '../helpers/factories';
+import { as, makeAcademy, makeStudent, setToday, checkIn } from '../helpers/factories';
 
 const MON = '2026-03-09';
 
@@ -69,6 +69,7 @@ describe('session cancellations (rain, holidays)', () => {
 
     await api.delete(`/api/v1/batches/${batch.id}/cancellations/${MON}`).expect(204);
     await api.delete(`/api/v1/batches/${batch.id}/cancellations/${MON}`).expect(404);
+    await checkIn(coach.id, batch.id, MON); // the session is back on: check in, then mark
     await api
       .put('/api/v1/attendance/session', {
         batchId: batch.id,
@@ -82,6 +83,7 @@ describe('session cancellations (rain, holidays)', () => {
     setToday(MON);
     const { coach, admin, otherCoach, batch, s } = await setup();
     const api = await as(coach);
+    await checkIn(coach.id, batch.id, MON);
     await api
       .put('/api/v1/attendance/session', {
         batchId: batch.id,
