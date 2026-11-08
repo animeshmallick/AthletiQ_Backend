@@ -23,6 +23,8 @@ import { assertBatchAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { transferStudent } from '../students/students.service.js';
 import { currentMembers, expectedRoster } from './roster.js';
+import { noticeBatchAssigned, noticeBatchChanged } from '../push/coach-notices.js';
+import { notifyInBackground } from '../push/push.service.js';
 
 export const batchesRouter = Router();
 
@@ -149,6 +151,7 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
     entityId: batch!.id,
     metadata: body,
   });
+  notifyInBackground(() => noticeBatchAssigned(batch!.id));
   created(res, batch);
 });
 
@@ -232,5 +235,10 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
       appliedDaysToStudents: applyToStudents ? members.length : 0,
     },
   });
+  notifyInBackground(() =>
+    body.coachId && body.coachId !== existing.coachId
+      ? noticeBatchAssigned(id, existing.coachId)
+      : noticeBatchChanged(existing, id, { studentsUpdated: applyToStudents }),
+  );
   ok(res, batch);
 });

@@ -180,3 +180,106 @@ describe('fee paid', () => {
     expect(s.id).toBeTruthy();
   });
 });
+
+describe('coach notices', () => {
+  async function settle(sent: unknown[], n: number) {
+    for (let i = 0; i < 100 && sent.length < n; i++) await new Promise((r) => setTimeout(r, 10));
+  }
+
+  it('tells coaches about new, changed and reassigned batches', async () => {
+    const sent = capture();
+    setToday(MON, at('12:00'));
+    const { admin, coach, otherCoach, location } = await makeAcademy();
+    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
+    await device(otherCoach.id, 'other-coach-token-xxxxxxxxxxxx');
+    const api = await as(admin);
+
+    const created = await api
+      .post('/api/v1/batches', {
+        name: 'Evening Juniors',
+        coachId: coach.id,
+        locationId: location.id,
+        weekdays: [5, 1, 3],
+        startTime: '17:00',
+        endTime: '18:30',
+      })
+      .expect(201);
+    await settle(sent, 1);
+    expect(sent[0]!.message).toMatchObject({
+      title: 'New batch assigned: Evening Juniors',
+      body: expect.stringContaining('Mon · Wed · Fri · 5:00 pm–6:30 pm'),
+    });
+
+    const id = created.body.data.id as string;
+    await api.patch(`/api/v1/batches/${id}`, { startTime: '17:30', endTime: '19:00' }).expect(200);
+    await settle(sent, 2);
+    expect(sent[1]!.message).toMatchObject({
+      title: 'Evening Juniors was updated',
+      body: 'now 5:30 pm–7:00 pm',
+    });
+
+    // No real change → no push.
+    await api.patch(`/api/v1/batches/${id}`, { startTime: '17:30' }).expect(200);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sent).toHaveLength(2);
+
+    await api.patch(`/api/v1/batches/${id}`, { coachId: otherCoach.id }).expect(200);
+    await settle(sent, 4);
+    const byToken = Object.fromEntries(sent.slice(2).map((s) => [s.userToken, s.message.title]));
+    expect(byToken).toEqual({
+      'other-coach-token-xxxxxxxxxxxx': 'New batch assigned: Evening Juniors',
+      'coach-device-token-xxxxxxxxxxxx': 'Evening Juniors moved to another coach',
+    });
+  });
+
+  it('tells the coach when a student joins or moves into their batch', async () => {
+    const sent = capture();
+    setToday('2026-03-05', at('12:00'));
+    const { admin, coach, otherCoach, batch, otherBatch, plan } = await makeAcademy();
+    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
+    await device(otherCoach.id, 'other-coach-token-xxxxxxxxxxxx');
+    const api = await as(admin);
+    const res = await api
+      .post('/api/v1/students', {
+        fullName: 'Diya Kapoor',
+        phone: '98765 43210',
+        joiningDate: '2026-03-10',
+        batchId: batch.id,
+        trainingDays: [1, 3, 5],
+        feePlanId: plan.id,
+      })
+      .expect(201);
+    await settle(sent, 1);
+    expect(sent[0]).toMatchObject({
+      userToken: 'coach-device-token-xxxxxxxxxxxx',
+      message: {
+        title: `New student in ${batch.name}`,
+        body: 'Diya Kapoor · Mon · Wed · Fri from 10 Mar',
+      },
+    });
+
+    // Changing only the days in the same batch is not a "new student".
+    await api
+      .post(`/api/v1/students/${res.body.data.id}/transfer`, {
+        batchId: batch.id,
+        trainingDays: [1, 3],
+        effectiveFrom: '2026-03-10',
+      })
+      .expect(200);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sent).toHaveLength(1);
+
+    await api
+      .post(`/api/v1/students/${res.body.data.id}/transfer`, {
+        batchId: otherBatch.id,
+        trainingDays: [2, 4],
+        effectiveFrom: '2026-03-12',
+      })
+      .expect(200);
+    await settle(sent, 2);
+    expect(sent[1]).toMatchObject({
+      userToken: 'other-coach-token-xxxxxxxxxxxx',
+      message: { title: `New student in ${otherBatch.name}` },
+    });
+  });
+});

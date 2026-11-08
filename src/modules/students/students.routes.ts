@@ -55,6 +55,8 @@ import {
   getStudentDetail,
   transferStudent,
 } from './students.service.js';
+import { noticeStudentJoined } from '../push/coach-notices.js';
+import { notifyInBackground } from '../push/push.service.js';
 
 export const studentsRouter = Router();
 
@@ -255,6 +257,7 @@ studentsRouter.post('/', requireAdmin, async (req, res) => {
   });
 
   await billOnAcceptance(student.id);
+  notifyInBackground(() => noticeStudentJoined(student.id));
   created(res, await getStudentDetail(student.id));
 });
 
@@ -357,7 +360,7 @@ studentsRouter.post('/:id/transfer', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(TransferBody, req.body);
 
-  await db.transaction(async (tx) => {
+  const moved = await db.transaction(async (tx) => {
     const s = await tx.query.students.findFirst({ where: eq(students.id, id) });
     if (!s) throw AppError.notFound('Student');
     if (s.status === 'left') throw AppError.unprocessable('Student has left the academy');
@@ -384,8 +387,10 @@ studentsRouter.post('/:id/transfer', requireAdmin, async (req, res) => {
       },
       tx,
     );
+    return previous.batchId !== current.batchId;
   });
 
+  if (moved) notifyInBackground(() => noticeStudentJoined(id));
   ok(res, await getStudentDetail(id));
 });
 
@@ -576,6 +581,7 @@ studentsRouter.post('/:id/rejoin', requireAdmin, async (req, res) => {
   });
 
   await billOnAcceptance(id);
+  notifyInBackground(() => noticeStudentJoined(id));
   ok(res, await getStudentDetail(id));
 });
 

@@ -37,6 +37,7 @@ import { billOnAcceptance } from '../billing/invoice-generator.js';
 import { getAcademySettings } from '../settings/settings.js';
 import { createStudent, getStudentDetail } from '../students/students.service.js';
 import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
+import { noticeStudentJoined } from '../push/coach-notices.js';
 
 // ═══ Public (unauthenticated) ═══════════════════════════════════════════════
 
@@ -409,7 +410,11 @@ registrationsRouter.post('/:id/approve', async (req, res) => {
     return { type: 'coach' as const, user: toPublicUser(user!) };
   });
 
-  if (result.type === 'student') await billOnAcceptance(result.studentId);
+  if (result.type === 'student') {
+    await billOnAcceptance(result.studentId);
+    const studentId = result.studentId;
+    notifyInBackground(() => noticeStudentJoined(studentId));
+  }
   ok(
     res,
     result.type === 'student'
