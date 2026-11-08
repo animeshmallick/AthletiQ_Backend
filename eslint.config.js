@@ -8,7 +8,7 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: { allowDefaultProject: ['*.js', '*.cjs'] },
+        projectService: { allowDefaultProject: ['*.js'] },
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -41,20 +41,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['*.js', '*.cjs'],
+    files: ['*.js'],
     ...tseslint.configs.disableTypeChecked,
-  },
-  {
-    // CommonJS config files (e.g. PM2's ecosystem.config.cjs).
-    files: ['*.cjs'],
-    languageOptions: {
-      sourceType: 'commonjs',
-      globals: {
-        module: 'writable',
-        require: 'readonly',
-        __dirname: 'readonly',
-        process: 'readonly',
-      },
-    },
   },
 );

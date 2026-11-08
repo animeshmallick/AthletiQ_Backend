@@ -54,3 +54,22 @@ jobs:
           name: coverage
           path: coverage/lcov-report
           retention-days: 7
+
+  docker:
+    # Proves the production image builds and boots, since deploys build it on the server.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --build-arg GIT_SHA=${GITHUB_SHA::7} -t athletiq-api:ci .
+      - name: Image starts and validates its config
+        run: |
+          # Without a real database the app must refuse to boot with a clear config error, not crash
+          # on a missing module. That proves the runtime image (dist + prod deps) is complete.
+          set +e
+          out=$(docker run --rm athletiq-api:ci 2>&1)
+          code=$?
+          echo "$out"
+          [ "$code" -ne 0 ] && echo "$out" | grep -q "Invalid environment configuration"

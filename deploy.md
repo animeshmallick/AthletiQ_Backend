@@ -8,10 +8,16 @@ Production layout:
         ├──────────────► AWS Amplify  ── app.example.com   (AthletiQ_Frontend, static React build)
         │
         └──────────────► EC2 (Ubuntu) ── api.example.com
-                           nginx :443  →  PM2 (2 × Node, cluster)  :4000  (AthletiQ_Backend)
-                                                    │
-                                                    └──► Neon Postgres (TLS)
+                           nginx :443 (HTTPS)  →  Docker container "athletiq-api"  127.0.0.1:4000
+                                                            │
+                                                            └──► Neon Postgres (TLS)
 ```
+
+- The **backend runs as a Docker container** built from this repo's `Dockerfile`. Docker restarts it
+  if it crashes or the server reboots, and rotates its logs, so no PM2 is needed.
+- **nginx** on the host terminates HTTPS with a free Let's Encrypt certificate and forwards to the
+  container. HTTPS is required: login cookies are `Secure` and phones only allow GPS on HTTPS.
+- **Deploys are manual.** Pushing to GitHub never changes the server; CI only runs checks.
 
 Replace `example.com` with your domain throughout. Commands are for **Ubuntu 24.04 LTS** on EC2.
 
@@ -50,9 +56,10 @@ You need:
 
 1. **Launch an instance** (EC2 → Instances → Launch):
    - AMI: **Ubuntu Server 24.04 LTS (64-bit x86)**
-   - Type: **t3.small** (2 vCPU, 2 GB RAM) is plenty to start; `t3.micro` works for a small academy.
+   - Type: **t3.small** (2 vCPU, 2 GB RAM). Building the image needs about 1.5 GB RAM, so avoid
+     `t3.micro` unless you add swap (see Troubleshooting).
    - Key pair: create or select one (you will SSH with it).
-   - Storage: 20 GB gp3.
+   - Storage: **30 GB gp3** (Docker images and build cache take space).
    - Region: **ap-south-1 (Mumbai)**.
 2. **Security group (inbound rules):**
 
@@ -62,7 +69,8 @@ You need:
    | 80   | `0.0.0.0/0` | HTTP (Let's Encrypt + redirect to HTTPS) |
    | 443  | `0.0.0.0/0` | HTTPS                                    |
 
-   Do **not** open port 4000. The API is only reachable through nginx.
+   Do **not** open port 4000. The container is bound to `127.0.0.1` and reachable only through
+   nginx.
 
 3. **Elastic IP:** EC2 → Elastic IPs → Allocate → Associate with the instance. This keeps the IP
    fixed across reboots.
@@ -77,25 +85,25 @@ ssh -i ~/path/to/key.pem ubuntu@api.example.com
 
 # System updates + basics
 sudo apt update && sudo apt -y upgrade
-sudo apt -y install git nginx curl ufw unattended-upgrades
+sudo apt -y install git nginx curl ufw unattended-upgrades openssl
 sudo dpkg-reconfigure -plow unattended-upgrades        # automatic security patches
-sudo timedatectl set-timezone Asia/Kolkata              # log timestamps in IST (app logic is IST regardless)
+sudo timedatectl set-timezone Asia/Kolkata              # host log times in IST (app logic is IST regardless)
 
 # Firewall (defence in depth on top of the security group)
 sudo ufw allow OpenSSH && sudo ufw allow 'Nginx Full' && sudo ufw --force enable
+```
 
-# Node.js via nvm (version from the repo's .nvmrc)
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-source ~/.bashrc
-nvm install 26 && nvm alias default 26
-node -v && npm -v
+> Docker publishes ports by editing iptables directly, bypassing `ufw`. That's why the run command
+> binds the container to `127.0.0.1` only. Never publish it as `-p 4000:4000`.
 
-# PM2 + log rotation
-npm install -g pm2
-pm2 install pm2-logrotate
-pm2 set pm2-logrotate:max_size 20M
-pm2 set pm2-logrotate:retain 14
-pm2 set pm2-logrotate:compress true
+### Install Docker
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker ubuntu
+newgrp docker                       # or log out and back in
+docker run --rm hello-world         # should print "Hello from Docker!"
+sudo systemctl enable docker        # start Docker (and the container) on boot
 ```
 
 ### Get the code
@@ -128,10 +136,13 @@ cd athletiq-api
 
 ## 4. Configure environment
 
-Create `~/apps/athletiq-api/.env`. It is **never committed**. Generate each secret with:
+Create `~/apps/athletiq-api/.env` with `nano .env`. This file is **never committed** and is passed
+to the container at runtime. It is **not** baked into the image.
+
+Generate each secret with:
 
 ```bash
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+openssl rand -base64 48 | tr -d '\n/+='; echo
 ```
 
 ```dotenv
@@ -165,7 +176,7 @@ SCHEDULER_ENABLED=true
 # 00:00 IST daily: issues each student's prepaid invoice on the day their month starts
 INVOICE_CRON=0 0 * * *
 
-# Used once by the seed script (step 5), then delete these lines
+# Used once by the seed step (5.3), then delete these lines
 SEED_ADMIN_EMAIL=you@yourdomain.com
 SEED_ADMIN_NAME=Your Name
 SEED_ADMIN_PASSWORD=<a strong temporary password>
@@ -175,43 +186,78 @@ SEED_ADMIN_PASSWORD=<a strong temporary password>
 chmod 600 .env
 ```
 
-The app validates `.env` at startup and refuses to start, listing what is wrong, if anything is
-missing or invalid.
+**Docker `.env` rules:** one `KEY=value` per line, **no quotes** around values (Docker passes them
+literally), no `export`, and comments only on their own lines. The app validates every variable at
+startup and refuses to start, naming the problem, if anything is missing or invalid.
 
 ---
 
 ## 5. First deploy
 
+All commands run in `~/apps/athletiq-api`. Images are tagged with the **git commit**, so you always
+know what is running and can roll back by tag.
+
+### 5.1 Build the image
+
 ```bash
 cd ~/apps/athletiq-api
-npm ci
-npm run build
-npm run db:migrate:prod          # creates/updates tables (uses DATABASE_URL_UNPOOLED)
-npm run db:seed:prod             # creates the first admin from SEED_ADMIN_*
-sed -i '/^SEED_ADMIN_/d' .env    # remove the temporary credentials
-npm prune --omit=dev
-
-mkdir -p logs
-pm2 start ecosystem.config.cjs
-pm2 save
-
-# Start PM2 on boot: run the command this prints (it starts with "sudo env PATH=...")
-pm2 startup
+TAG=$(git rev-parse --short HEAD)
+docker build --build-arg GIT_SHA=$TAG -t athletiq-api:$TAG -t athletiq-api:latest .
 ```
 
-Check it:
+The first build takes a few minutes; later builds reuse cached layers.
+
+### 5.2 Apply database migrations
 
 ```bash
-pm2 status                       # 2 × athletiq-api, status "online"
-curl -s http://127.0.0.1:4000/ready    # {"status":"ready","database":true}
-pm2 logs athletiq-api --lines 50
+docker run --rm --env-file .env athletiq-api:$TAG node dist/db/migrate.js
+# → "Migrations applied"
+```
+
+### 5.3 Create the first admin, then remove the temporary credentials
+
+```bash
+docker run --rm --env-file .env athletiq-api:$TAG node dist/db/seed.js
+# → "Admin created…"
+sed -i '/^SEED_ADMIN_/d' .env
+```
+
+### 5.4 Start the API container
+
+```bash
+docker run -d --name athletiq-api \
+  --env-file .env \
+  -p 127.0.0.1:4000:4000 \
+  --restart unless-stopped \
+  --init --stop-timeout 25 \
+  --memory 768m \
+  --log-opt max-size=20m --log-opt max-file=5 \
+  athletiq-api:$TAG
+```
+
+What the flags do:
+
+| Flag                       | Why                                                                    |
+| -------------------------- | ---------------------------------------------------------------------- |
+| `-p 127.0.0.1:4000:4000`   | Reachable only from the host (nginx), never directly from the internet |
+| `--restart unless-stopped` | Restarts after crashes and server reboots                              |
+| `--init --stop-timeout 25` | Proper signal handling; gives the API 25 s to finish requests on stop  |
+| `--memory 768m`            | Caps memory so a leak can't take the whole server down                 |
+| `--log-opt …`              | Rotates logs (5 × 20 MB)                                               |
+
+### 5.5 Check it
+
+```bash
+docker ps                                   # STATUS: "Up … (healthy)" after ~20 s
+curl -s http://127.0.0.1:4000/ready         # {"status":"ready","database":true}
+docker logs --tail 50 athletiq-api
 ```
 
 ---
 
 ## 6. nginx + HTTPS
 
-Create `/etc/nginx/sites-available/athletiq-api`:
+Create `/etc/nginx/sites-available/athletiq-api` with `sudo nano`:
 
 ```nginx
 server {
@@ -279,7 +325,8 @@ curl -s https://api.example.com/ready    # {"status":"ready","database":true}
 6. **Mapbox:** in the Mapbox dashboard, restrict the token's _URL restrictions_ to
    `https://app.example.com`.
 
-Every push to `mainline` now builds and deploys the frontend automatically.
+By default every push to `mainline` builds the frontend. To release it manually too, turn off _Auto
+build_ for the branch (App settings → Branch settings) and use **Redeploy this version** when ready.
 
 ---
 
@@ -299,61 +346,85 @@ Every push to `mainline` now builds and deploys the frontend automatically.
 
 ---
 
-## 9. Updating (manual deploy)
+## 9. Manual deploy (every update)
 
-The backend is **deployed manually**. Pushing to GitHub never changes the server: the GitHub Actions
-workflow only runs checks (format, lint, typecheck, tests, build). Deploy when you choose to,
-ideally after CI is green for the commit.
-
-**Backend** (SSH into the EC2 host):
+Deploy when you choose to, ideally after the GitHub Actions checks are green for the commit. SSH into
+the server, then:
 
 ```bash
 cd ~/apps/athletiq-api
 
-# 1. Get the new code
+# 1. Get the new code and confirm what you're deploying
 git fetch --prune origin
 git checkout mainline
 git pull --ff-only origin mainline
-git log --oneline -1                      # confirm the commit you are deploying
+TAG=$(git rev-parse --short HEAD)
+git log --oneline -1
 
-# 2. Install and build (dev dependencies are needed to compile TypeScript)
-npm ci
-npm run build
+# 2. Build the new image (the running container keeps serving meanwhile)
+docker build --build-arg GIT_SHA=$TAG -t athletiq-api:$TAG -t athletiq-api:latest .
 
 # 3. Apply database migrations (safe to run when there are none)
-npm run db:migrate:prod
+docker run --rm --env-file .env athletiq-api:$TAG node dist/db/migrate.js
 
-# 4. Drop dev dependencies again
-npm prune --omit=dev
+# 4. Replace the running container (a few seconds of downtime)
+docker stop athletiq-api && docker rm athletiq-api
+docker run -d --name athletiq-api \
+  --env-file .env \
+  -p 127.0.0.1:4000:4000 \
+  --restart unless-stopped \
+  --init --stop-timeout 25 \
+  --memory 768m \
+  --log-opt max-size=20m --log-opt max-file=5 \
+  athletiq-api:$TAG
 
-# 5. Reload with no downtime (PM2 restarts one process at a time)
-pm2 reload ecosystem.config.cjs --update-env
-pm2 save
-
-# 6. Verify
-pm2 status
-curl -s http://127.0.0.1:4000/ready        # {"status":"ready","database":true}
-pm2 logs athletiq-api --lines 50
+# 5. Verify
+sleep 5
+curl -s http://127.0.0.1:4000/ready         # {"status":"ready","database":true}
+docker ps --filter name=athletiq-api        # "(healthy)" after ~20 s
+docker logs --tail 50 athletiq-api
 ```
 
-If you changed only `.env`, steps 5–6 are enough.
+Step 4 causes a few seconds of downtime, so prefer deploying outside training hours.
 
-**Frontend:** push or merge to `mainline` and Amplify deploys it automatically. Each build is listed
-under the branch, and you can **redeploy a previous build** in one click. To make frontend releases
-manual too, turn off _Auto build_ for the branch in Amplify (App settings → Branch settings) and use
-**Redeploy this version** when ready.
-
-**Rolling back the backend:**
+**Only changed `.env`?** Recreate the container (step 4) with the current tag; a plain
+`docker restart` does **not** re-read `.env`:
 
 ```bash
-cd ~/apps/athletiq-api
-git checkout <previous-commit-sha>
-npm ci && npm run build && npm prune --omit=dev
-pm2 reload ecosystem.config.cjs --update-env
+TAG=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' athletiq-api)
+# …then the two commands from step 4
+```
+
+**See which version is running:**
+
+```bash
+docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' athletiq-api
+```
+
+### Rolling back
+
+Every build stays on the server under its commit tag:
+
+```bash
+docker images athletiq-api                  # pick the previous tag, e.g. f770048
+TAG=f770048
+docker stop athletiq-api && docker rm athletiq-api
+# …then the "docker run -d …" command from step 4
 ```
 
 Migrations only move forward. If a release changed the database, either fix forward or restore a
 Neon branch to a point in time.
+
+### Cleaning up old images
+
+Keep the last few tags for rollback, and remove older ones:
+
+```bash
+docker images athletiq-api                  # list tags
+docker rmi athletiq-api:<old-tag>           # remove one
+docker image prune -f && docker builder prune -f --filter until=168h   # dangling layers, week-old cache
+df -h /                                     # check free disk space
+```
 
 ---
 
@@ -361,37 +432,43 @@ Neon branch to a point in time.
 
 | Task                | How                                                                                          |
 | ------------------- | -------------------------------------------------------------------------------------------- |
-| Status / restarts   | `pm2 status`, `pm2 reload athletiq-api`                                                      |
-| Live logs           | `pm2 logs athletiq-api` (JSON lines; rotated daily / 20 MB, 14 kept)                         |
-| Resource usage      | `pm2 monit`                                                                                  |
+| Status              | `docker ps` (look for `(healthy)`)                                                           |
+| Live logs           | `docker logs -f athletiq-api` (JSON lines; rotated 5 × 20 MB)                                |
+| Resource usage      | `docker stats athletiq-api`                                                                  |
+| Restart (same env)  | `docker restart athletiq-api`                                                                |
+| Shell inside        | `docker exec -it athletiq-api sh`                                                            |
 | Billing job history | Web app → **Settings → Automatic billing** (or `GET /api/v1/admin/jobs/runs`)                |
-| Run billing now     | Settings → **Run now**, or `npm run jobs:invoices:prod` on the server                        |
+| Run billing now     | Settings → **Run now**, or `docker exec athletiq-api node dist/jobs/run-invoice-job.js`      |
 | Who changed what    | Web app → **Audit log**                                                                      |
 | Uptime checks       | Point a monitor (e.g. UptimeRobot, Route 53 health check) at `https://api.example.com/ready` |
 | Database backups    | Neon point-in-time restore; create a branch before risky changes                             |
-| OS patches          | Automatic (unattended-upgrades); `sudo reboot` occasionally — PM2 restarts on boot           |
+| OS patches          | Automatic (unattended-upgrades). After `sudo reboot`, Docker restarts the container itself   |
 
-**Billing job:** it runs at 00:00 IST in every PM2 process, but a Postgres advisory lock lets only one
-of them do the work. It also catches up 15 seconds after each start, so a server that was down at
-midnight bills the missed days on boot. Students are billed instantly when they are accepted, whatever
-the job's schedule.
+**Billing job:** it runs inside the container at 00:00 IST, guarded by a Postgres advisory lock. It
+also catches up 15 seconds after each start, so a server that was down at midnight bills the missed
+days on boot. Students are billed instantly when they are accepted, whatever the job's schedule.
 
-**Scaling:** increase the process count with `PM2_INSTANCES=4 pm2 reload ecosystem.config.cjs
---update-env`, or move to a larger instance. Keep `DB_POOL_MAX × instances` within your Neon plan's
-connection limit.
+**Scaling:** one container on a t3.small handles a typical academy comfortably. If you outgrow it,
+move to a bigger instance type first; running more containers behind nginx also works because the
+billing lock keeps the job single-run.
 
 ---
 
 ## 11. Troubleshooting
 
-| Symptom                                              | Likely cause / fix                                                                                               |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| App won't start, "Invalid environment configuration" | Read `pm2 logs`; it names the bad variable in `.env`.                                                            |
-| Browser shows CORS errors                            | `CORS_ORIGINS` must exactly match the web app origin (scheme + host, no trailing slash). Reload PM2.             |
-| Signed out on every page refresh                     | `COOKIE_SECURE=true` needs HTTPS. Using `*.amplifyapp.com`? Set `COOKIE_CROSS_SITE=true` or use a custom domain. |
-| nginx 502 Bad Gateway                                | API not running or not on `PORT`: `pm2 status`, `curl 127.0.0.1:4000/health`.                                    |
-| `/ready` says `"database": false`                    | Neon URL/password wrong, or the project is suspended. Check `DATABASE_URL`.                                      |
-| Migrations fail                                      | They need the **direct** URL; check `DATABASE_URL_UNPOOLED`.                                                     |
-| Rate-limit errors for every user                     | `TRUST_PROXY` isn't `1` behind nginx, so all requests appear to come from one IP.                                |
-| Deep links 404 on the web app                        | Add the Amplify SPA rewrite (step 7.3).                                                                          |
-| Maps don't load                                      | `VITE_MAPBOX_TOKEN` missing, or the token's URL restrictions don't include your domain; redeploy after fixing.   |
+| Symptom                                                  | Likely cause / fix                                                                                                                                                                |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Container keeps restarting                               | `docker logs athletiq-api`. "Invalid environment configuration" names the bad `.env` variable.                                                                                    |
+| Value in `.env` "looks right" but is rejected            | Remove quotes around it; Docker passes `"…"` literally. Recreate the container after editing.                                                                                     |
+| `docker build` killed / "JavaScript heap out of memory"  | Instance too small. Add swap: `sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile` (add it to `/etc/fstab` to keep it). |
+| `permission denied … docker.sock`                        | Run `newgrp docker` or log out/in after `usermod -aG docker ubuntu`.                                                                                                              |
+| `Conflict. The container name "/athletiq-api" is in use` | Old container still exists: `docker stop athletiq-api && docker rm athletiq-api`.                                                                                                 |
+| nginx 502 Bad Gateway                                    | Container down or unhealthy: `docker ps -a`, `curl 127.0.0.1:4000/health`.                                                                                                        |
+| Browser shows CORS errors                                | `CORS_ORIGINS` must exactly match the web app origin (scheme + host, no trailing slash). Recreate the container.                                                                  |
+| Signed out on every page refresh                         | `COOKIE_SECURE=true` needs HTTPS. Using `*.amplifyapp.com`? Set `COOKIE_CROSS_SITE=true` or use a custom domain.                                                                  |
+| `/ready` says `"database": false`                        | Neon URL/password wrong, or the project is suspended. Check `DATABASE_URL`.                                                                                                       |
+| Migrations fail                                          | They need the **direct** URL; check `DATABASE_URL_UNPOOLED`.                                                                                                                      |
+| Rate-limit errors for every user                         | `TRUST_PROXY` isn't `1` behind nginx, so all requests appear to come from one IP.                                                                                                 |
+| Disk full                                                | Clean old images/cache (section 9 → Cleaning up).                                                                                                                                 |
+| Deep links 404 on the web app                            | Add the Amplify SPA rewrite (step 7.3).                                                                                                                                           |
+| Maps don't load                                          | `VITE_MAPBOX_TOKEN` missing, or the token's URL restrictions don't include your domain; redeploy after fixing.                                                                    |

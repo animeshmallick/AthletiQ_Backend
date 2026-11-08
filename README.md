@@ -135,12 +135,10 @@ tests/
 
 ## Deployment
 
-Production runs on **EC2 with PM2** behind nginx (HTTPS), and the web app runs on **AWS Amplify**. The full
-step-by-step guide is in **[deploy.md](deploy.md)**.
+The API runs on **EC2 as a Docker container** (built from `Dockerfile`) behind nginx (HTTPS), and the web
+app runs on **AWS Amplify**. The full step-by-step guide is in **[deploy.md](deploy.md)**.
 
-- `ecosystem.config.cjs`: PM2 cluster config (2 processes, graceful reloads, log files).
-- Deploys are **manual**: CI only runs checks, and the update steps are in deploy.md §9.
-- `npm run db:migrate:prod` / `db:seed:prod` / `jobs:invoices:prod`: production equivalents that run the
-  compiled code, so no dev dependencies are needed on the server.
-
-(A `Dockerfile` is kept for a possible future container setup; the current deployment doesn't use it.)
+- Deploys are **manual**: CI only runs checks. Each release is built on the server, tagged with its git
+  commit, and swapped in (deploy.md §9). Rolling back is just running the previous tag.
+- One-off tasks use the same image, for example
+  `docker run --rm --env-file .env athletiq-api:<tag> node dist/db/migrate.js`.

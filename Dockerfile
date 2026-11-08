@@ -11,6 +11,11 @@ RUN npm run build && npm prune --omit=dev
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 FROM node:26-bookworm-slim AS runtime
+# Commit the image was built from: docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) …
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.title="athletiq-api" \
+      org.opencontainers.image.source="https://github.com/animeshmallick/AthletiQ_Backend" \
+      org.opencontainers.image.revision=$GIT_SHA
 ENV NODE_ENV=production \
     PORT=4000
 WORKDIR /app
@@ -26,5 +31,7 @@ EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Run migrations as a separate step on deploy: docker run … node dist/db/migrate.js
+# One-off tasks use the same image (see deploy.md):
+#   migrations: docker run --rm --env-file .env athletiq-api:<tag> node dist/db/migrate.js
+#   first admin: docker run --rm --env-file .env athletiq-api:<tag> node dist/db/seed.js
 CMD ["node", "dist/server.js"]
