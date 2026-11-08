@@ -190,3 +190,20 @@ describe('triggers', () => {
     expect(clock('23:45:00')).toBe('11:45 pm');
   });
 });
+
+describe('push status', () => {
+  it('reports a broken service-account key instead of failing /ready', async () => {
+    const { pushStatus } = await import('../../src/modules/push/push.service');
+    setPushSender(undefined); // re-read config
+    const { env } = await import('../../src/config/env');
+    const original = env.FCM_SERVICE_ACCOUNT;
+    (env as { FCM_SERVICE_ACCOUNT?: string }).FCM_SERVICE_ACCOUNT = 'not-json';
+    expect(pushStatus()).toBe('misconfigured');
+    // Notifying must not throw (e.g. inside the public registration handler).
+    expect(() => notifyInBackground(async () => undefined)).not.toThrow();
+    await expect(notifyAdmins({ title: 'x', body: 'y' })).resolves.toEqual({ sent: 0, removed: 0 });
+    (env as { FCM_SERVICE_ACCOUNT?: string }).FCM_SERVICE_ACCOUNT = original;
+    setPushSender(undefined);
+    expect(pushStatus()).toBe('disabled');
+  });
+});

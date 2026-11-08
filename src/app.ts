@@ -8,6 +8,7 @@ import { pinoHttp } from 'pino-http';
 import { env } from './config/env.js';
 import { checkDatabase } from './db/client.js';
 import { buildInfo } from './lib/build-info.js';
+import { pushStatus } from './modules/push/push.service.js';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { apiLimiter } from './middleware/rate-limit.js';
@@ -80,7 +81,12 @@ export function createApp(): Express {
     res
       .status(dbOk ? 200 : 503)
       .set('Cache-Control', 'no-store')
-      .json({ status: dbOk ? 'ready' : 'degraded', database: dbOk, ...buildInfo() });
+      .json({
+        status: dbOk ? 'ready' : 'degraded',
+        database: dbOk,
+        push: pushStatus(),
+        ...buildInfo(),
+      });
   });
 
   app.use('/api/v1', apiLimiter, apiRouter());

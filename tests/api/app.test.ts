@@ -9,6 +9,7 @@ describe('app shell', () => {
     expect(ready.body).toMatchObject({
       status: 'ready',
       database: true,
+      push: 'disabled',
       version: { commit: null },
       deployment: { rollback: false },
       server: { uptimeSeconds: expect.any(Number) },

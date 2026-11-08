@@ -298,6 +298,7 @@ Create `/etc/nginx/conf.d/athletiq-api.conf` with `sudo nano`:
 server {
     listen 80;
     server_name api.edupilots.in;
+    server_tokens off;            # don't advertise the nginx version
 
     client_max_body_size 2m;
 

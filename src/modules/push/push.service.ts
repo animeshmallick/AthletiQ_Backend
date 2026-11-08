@@ -8,13 +8,24 @@ import { createFcmSender, parseServiceAccount, type PushMessage, type PushSender
 export type DevicePlatform = (typeof deviceTokens.$inferInsert)['platform'];
 
 let sender: PushSender | null | undefined;
+let misconfigured = false;
 
-/** Push is enabled only when FCM_SERVICE_ACCOUNT is configured; otherwise every send is a no-op. */
+/**
+ * Push is enabled only when FCM_SERVICE_ACCOUNT is configured; otherwise every send is a no-op.
+ * A malformed key disables push (logged once) instead of breaking the requests that notify.
+ */
 function getSender(): PushSender | null {
   if (sender === undefined) {
-    const sa = parseServiceAccount(env.FCM_SERVICE_ACCOUNT);
-    sender = sa ? createFcmSender(sa) : null;
-    logger.info({ enabled: !!sender }, 'Push notifications');
+    try {
+      const sa = parseServiceAccount(env.FCM_SERVICE_ACCOUNT);
+      sender = sa ? createFcmSender(sa) : null;
+      misconfigured = false;
+      logger.info({ enabled: !!sender }, 'Push notifications');
+    } catch (err) {
+      sender = null;
+      misconfigured = true;
+      logger.error({ err }, 'FCM_SERVICE_ACCOUNT is invalid; push notifications are disabled');
+    }
   }
   return sender;
 }
@@ -25,6 +36,12 @@ export function setPushSender(fn: PushSender | null | undefined): void {
 }
 
 export const pushEnabled = () => getSender() !== null;
+
+/** For /ready: is FCM configured, and does the key parse? (Never throws.) */
+export function pushStatus(): 'enabled' | 'disabled' | 'misconfigured' {
+  if (pushEnabled()) return 'enabled';
+  return misconfigured ? 'misconfigured' : 'disabled';
+}
 
 export async function registerDevice(userId: string, token: string, platform: DevicePlatform) {
   await db
