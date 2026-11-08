@@ -23,7 +23,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   } else if (isBodyParserError(err)) {
     appError =
       err.type === 'entity.too.large'
-        ? AppError.badRequest('Request body is too large')
+        ? new AppError('PAYLOAD_TOO_LARGE', 'Request body is too large')
         : AppError.badRequest('Malformed request body');
   } else {
     appError =

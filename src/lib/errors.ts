@@ -6,6 +6,7 @@ export type ErrorCode =
   | 'NOT_FOUND'
   | 'CONFLICT'
   | 'UNPROCESSABLE'
+  | 'PAYLOAD_TOO_LARGE'
   | 'RATE_LIMITED'
   | 'INTERNAL';
 
@@ -17,6 +18,7 @@ const STATUS: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
   CONFLICT: 409,
   UNPROCESSABLE: 422,
+  PAYLOAD_TOO_LARGE: 413,
   RATE_LIMITED: 429,
   INTERNAL: 500,
 };

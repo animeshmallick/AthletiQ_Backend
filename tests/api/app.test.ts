@@ -25,6 +25,23 @@ describe('app shell', () => {
     expect(replaced.headers['x-request-id']).not.toBe('bad id!');
   });
 
+  it('rejects oversized and malformed bodies with clear errors', async () => {
+    const big = await request(getApp())
+      .post('/api/v1/auth/login')
+      .set('Content-Type', 'application/json')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send(JSON.stringify({ email: 'x@example.com', password: 'a'.repeat(2_000_000) }))
+      .expect(413);
+    expect(big.body.error).toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    const bad = await request(getApp())
+      .post('/api/v1/auth/login')
+      .set('Content-Type', 'application/json')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send('{"email":')
+      .expect(400);
+    expect(bad.body.error.message).toBe('Malformed request body');
+  });
+
   it('returns a JSON 404 for unknown routes', async () => {
     const res = await request(getApp()).get('/nope').expect(404);
     expect(res.body.error).toMatchObject({

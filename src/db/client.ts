@@ -16,6 +16,9 @@ export const pool = new pg.Pool({
   max: env.DB_POOL_MAX,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
+  // A stuck query must not hold a request (and a pooled connection) forever. Client-side, so it
+  // also works through Neon's PgBouncer pooler, which ignores server-side statement_timeout.
+  query_timeout: 20_000,
   ssl: env.DATABASE_URL.includes('sslmode=disable') ? false : { rejectUnauthorized: isProd },
 });
 
