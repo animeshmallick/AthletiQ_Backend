@@ -49,6 +49,7 @@ describe('createFcmSender', () => {
       notification: { title: 'T', body: 'B' },
       data: { link: '/x' },
       android: { priority: 'high', notification: { tag: 'g', channel_id: 'default' } },
+      webpush: { headers: { Urgency: 'high', TTL: '86400' } },
     });
     const second = JSON.parse((f.mock.calls[2]![1] as RequestInit).body as string);
     expect(second.message.data.link).toBe('/');

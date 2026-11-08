@@ -84,6 +84,8 @@ export function createFcmSender(sa: ServiceAccount, fetchFn: FetchFn = fetch): P
               priority: 'high',
               notification: { channel_id: 'default', tag: message.tag, color: '#4f46e5' },
             },
+            // Browsers / iPhone Home Screen app: deliver promptly, drop after a day.
+            webpush: { headers: { Urgency: 'high', TTL: '86400' } },
           },
         }),
       },
