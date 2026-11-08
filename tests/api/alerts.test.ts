@@ -202,7 +202,7 @@ describe('fee paid', () => {
     expect(sent).toHaveLength(1); // not the admin who recorded it
     expect(sent[0]!.userToken).toBe('other-admin-token-xxxxxxxxxxxx');
     expect(sent[0]!.message.title).toMatch(/^Fee received · ₹/);
-    expect(sent[0]!.message.body).toBe('Asha K · UPI');
+    expect(sent[0]!.message.body).toBe('Asha K · UPI · received by Admin User');
     expect(s.id).toBeTruthy();
   });
 });

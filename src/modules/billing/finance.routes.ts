@@ -61,106 +61,139 @@ financeRouter.get('/summary', async (req, res) => {
 
   const trendStart = startOfMonth(addMonthsClamped(today, -11));
 
-  const [billed, collected, outstanding, byMode, trendBilled, trendCollected, byBatch, defaulters] =
-    await Promise.all([
-      db
-        .select({
-          amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
-          count: sql<number>`count(*)::int`,
-          discounts: sql<number>`coalesce(sum(${invoices.discountAmount}), 0)::int`,
-        })
-        .from(invoices)
-        .where(
-          and(
-            ...scope,
-            ne(invoices.status, 'cancelled'),
-            gte(invoices.issueDate, from),
-            lte(invoices.issueDate, to),
-          ),
+  const [
+    billed,
+    collected,
+    outstanding,
+    byMode,
+    trendBilled,
+    trendCollected,
+    byBatch,
+    defaulters,
+    receivers,
+  ] = await Promise.all([
+    db
+      .select({
+        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        count: sql<number>`count(*)::int`,
+        discounts: sql<number>`coalesce(sum(${invoices.discountAmount}), 0)::int`,
+      })
+      .from(invoices)
+      .where(
+        and(
+          ...scope,
+          ne(invoices.status, 'cancelled'),
+          gte(invoices.issueDate, from),
+          lte(invoices.issueDate, to),
         ),
-      db
-        .select({
-          amount: sql<number>`coalesce(sum(${payments.amount}) filter (where ${payments.status} = 'completed'), 0)::int`,
-          count: sql<number>`(count(*) filter (where ${payments.status} = 'completed'))::int`,
-          refunded: sql<number>`coalesce(sum(${payments.amount}) filter (where ${payments.status} = 'refunded'), 0)::int`,
-        })
-        .from(payments)
-        .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
-        .where(and(...scope, gte(payments.paidOn, from), lte(payments.paidOn, to))),
-      db
-        .select({
-          due: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.dueDate} >= ${today}), 0)::int`,
-          dueCount: sql<number>`(count(*) filter (where ${invoices.dueDate} >= ${today}))::int`,
-          overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.dueDate} < ${today}), 0)::int`,
-          overdueCount: sql<number>`(count(*) filter (where ${invoices.dueDate} < ${today}))::int`,
-        })
-        .from(invoices)
-        .where(and(...scope, eq(invoices.status, 'due'))),
-      db
-        .select({
-          mode: payments.mode,
-          amount: sql<number>`sum(${payments.amount})::int`,
-          count: sql<number>`count(*)::int`,
-        })
-        .from(payments)
-        .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
-        .where(
-          and(
-            ...scope,
-            eq(payments.status, 'completed'),
-            gte(payments.paidOn, from),
-            lte(payments.paidOn, to),
-          ),
-        )
-        .groupBy(payments.mode),
-      db
-        .select({
-          month: sql<string>`to_char(${invoices.issueDate}, 'YYYY-MM')`,
-          amount: sql<number>`sum(${invoices.totalAmount})::int`,
-        })
-        .from(invoices)
-        .where(and(...scope, ne(invoices.status, 'cancelled'), gte(invoices.issueDate, trendStart)))
-        .groupBy(sql`1`),
-      db
-        .select({
-          month: sql<string>`to_char(${payments.paidOn}, 'YYYY-MM')`,
-          amount: sql<number>`sum(${payments.amount})::int`,
-        })
-        .from(payments)
-        .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
-        .where(and(...scope, eq(payments.status, 'completed'), gte(payments.paidOn, trendStart)))
-        .groupBy(sql`1`),
-      db
-        .select({
-          batchId: invoices.batchId,
-          batchName: invoices.batchName,
-          coachId: invoices.coachId,
-          coachName: users.name,
-          billed: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} between ${from} and ${to} and ${invoices.status} <> 'cancelled'), 0)::int`,
-          outstanding: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due'), 0)::int`,
-          overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due' and ${invoices.dueDate} < ${today}), 0)::int`,
-        })
-        .from(invoices)
-        .leftJoin(users, eq(users.id, invoices.coachId))
-        .where(and(...scope))
-        .groupBy(invoices.batchId, invoices.batchName, invoices.coachId, users.name),
-      db
-        .select({
-          studentId: students.id,
-          code: students.code,
-          fullName: students.fullName,
-          phone: students.phone,
-          overdue: sql<number>`sum(${invoices.totalAmount})::int`,
-          invoices: sql<number>`count(*)::int`,
-          oldestDueDate: sql<string>`min(${invoices.dueDate})`,
-        })
-        .from(invoices)
-        .innerJoin(students, eq(students.id, invoices.studentId))
-        .where(and(...scope, eq(invoices.status, 'due'), lt(invoices.dueDate, today)))
-        .groupBy(students.id)
-        .orderBy(desc(sql`sum(${invoices.totalAmount})`))
-        .limit(10),
-    ]);
+      ),
+    db
+      .select({
+        amount: sql<number>`coalesce(sum(${payments.amount}) filter (where ${payments.status} = 'completed'), 0)::int`,
+        count: sql<number>`(count(*) filter (where ${payments.status} = 'completed'))::int`,
+        refunded: sql<number>`coalesce(sum(${payments.amount}) filter (where ${payments.status} = 'refunded'), 0)::int`,
+      })
+      .from(payments)
+      .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
+      .where(and(...scope, gte(payments.paidOn, from), lte(payments.paidOn, to))),
+    db
+      .select({
+        due: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.dueDate} >= ${today}), 0)::int`,
+        dueCount: sql<number>`(count(*) filter (where ${invoices.dueDate} >= ${today}))::int`,
+        overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.dueDate} < ${today}), 0)::int`,
+        overdueCount: sql<number>`(count(*) filter (where ${invoices.dueDate} < ${today}))::int`,
+      })
+      .from(invoices)
+      .where(and(...scope, eq(invoices.status, 'due'))),
+    db
+      .select({
+        mode: payments.mode,
+        amount: sql<number>`sum(${payments.amount})::int`,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(payments)
+      .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
+      .where(
+        and(
+          ...scope,
+          eq(payments.status, 'completed'),
+          gte(payments.paidOn, from),
+          lte(payments.paidOn, to),
+        ),
+      )
+      .groupBy(payments.mode),
+    db
+      .select({
+        month: sql<string>`to_char(${invoices.issueDate}, 'YYYY-MM')`,
+        amount: sql<number>`sum(${invoices.totalAmount})::int`,
+      })
+      .from(invoices)
+      .where(and(...scope, ne(invoices.status, 'cancelled'), gte(invoices.issueDate, trendStart)))
+      .groupBy(sql`1`),
+    db
+      .select({
+        month: sql<string>`to_char(${payments.paidOn}, 'YYYY-MM')`,
+        amount: sql<number>`sum(${payments.amount})::int`,
+      })
+      .from(payments)
+      .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
+      .where(and(...scope, eq(payments.status, 'completed'), gte(payments.paidOn, trendStart)))
+      .groupBy(sql`1`),
+    db
+      .select({
+        batchId: invoices.batchId,
+        batchName: invoices.batchName,
+        coachId: invoices.coachId,
+        coachName: users.name,
+        billed: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} between ${from} and ${to} and ${invoices.status} <> 'cancelled'), 0)::int`,
+        outstanding: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due'), 0)::int`,
+        overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due' and ${invoices.dueDate} < ${today}), 0)::int`,
+      })
+      .from(invoices)
+      .leftJoin(users, eq(users.id, invoices.coachId))
+      .where(and(...scope))
+      .groupBy(invoices.batchId, invoices.batchName, invoices.coachId, users.name),
+    db
+      .select({
+        studentId: students.id,
+        code: students.code,
+        fullName: students.fullName,
+        phone: students.phone,
+        overdue: sql<number>`sum(${invoices.totalAmount})::int`,
+        invoices: sql<number>`count(*)::int`,
+        oldestDueDate: sql<string>`min(${invoices.dueDate})`,
+      })
+      .from(invoices)
+      .innerJoin(students, eq(students.id, invoices.studentId))
+      .where(and(...scope, eq(invoices.status, 'due'), lt(invoices.dueDate, today)))
+      .groupBy(students.id)
+      .orderBy(desc(sql`sum(${invoices.totalAmount})`))
+      .limit(10),
+    // Who received the money: the person who marked the invoice paid. Coaches see only
+    // what they received themselves.
+    db
+      .select({
+        userId: payments.recordedById,
+        name: users.name,
+        role: users.role,
+        amount: sql<number>`sum(${payments.amount})::int`,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(payments)
+      .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
+      .innerJoin(users, eq(users.id, payments.recordedById))
+      .where(
+        and(
+          ...scope,
+          ...(isAdmin(user) ? [] : [eq(payments.recordedById, user.id)]),
+          eq(payments.status, 'completed'),
+          gte(payments.paidOn, from),
+          lte(payments.paidOn, to),
+        ),
+      )
+      .groupBy(payments.recordedById, users.name, users.role)
+      .orderBy(desc(sql`sum(${payments.amount})`)),
+  ]);
 
   const months: string[] = [];
   for (let i = 0; i < 12; i++) months.push(addMonthsClamped(trendStart, i).slice(0, 7));
@@ -188,6 +221,7 @@ financeRouter.get('/summary', async (req, res) => {
       collected: collectedMap.get(m) ?? 0,
     })),
     byPaymentMode: byMode,
+    byReceiver: receivers,
     byBatch: byBatch
       .filter((r) => r.billed > 0 || r.outstanding > 0)
       .sort((x, y) => y.outstanding - x.outstanding),

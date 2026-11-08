@@ -197,7 +197,7 @@ invoicesRouter.post('/:id/payments', async (req, res) => {
     const admins = (await activeAdminIds()).filter((a) => a !== user.id);
     await notifyUsers(admins, {
       title: `Fee received · ${formatInr(paid.totalAmount)}`,
-      body: `${paid.student.fullName} · ${body.mode.toUpperCase()}${user.role === 'coach' ? ` · recorded by ${user.name}` : ''}`,
+      body: `${paid.student.fullName} · ${body.mode.toUpperCase()} · received by ${user.name}`,
       link: `/invoices?status=paid&invoice=${id}`,
       tag: `paid-${id}`,
     });

@@ -457,6 +457,9 @@ describe('finance insights', () => {
       expect.objectContaining({ studentId: a.student.id, overdue: 250_000, invoices: 1 }),
     ]);
     expect(summary.body.data.byBatch).toHaveLength(2);
+    expect(summary.body.data.byReceiver).toEqual([
+      { userId: a.coach.id, name: a.coach.name, role: 'coach', amount: 250_000, count: 1 },
+    ]);
 
     const coachView = await (
       await as(a.coach)
@@ -468,6 +471,13 @@ describe('finance insights', () => {
       collected: 250_000,
       outstanding: 500_000,
     });
+    expect(coachView.body.data.byReceiver).toHaveLength(1);
+    const otherView = await (
+      await as(a.otherCoach)
+    )
+      .get('/api/v1/finance/summary?from=2026-01-01&to=2026-03-31')
+      .expect(200);
+    expect(otherView.body.data.byReceiver).toEqual([]);
     const filtered = await api
       .get(
         `/api/v1/finance/summary?from=2026-01-01&to=2026-03-31&coachId=${a.otherCoach.id}&batchId=${a.otherBatch.id}`,
