@@ -53,7 +53,10 @@ describe('student registration (admin)', () => {
       feePlanId: plan.id,
     };
 
-    await api.post('/api/v1/students', { ...base, trainingDays: [1, 2] }).expect(400);
+    await api.post('/api/v1/students', { ...base, trainingDays: [] }).expect(400);
+    await api
+      .post('/api/v1/students', { ...base, trainingDays: [1, 2, 3, 4, 5, 6, 7] })
+      .expect(400);
     const sunday = await api
       .post('/api/v1/students', { ...base, trainingDays: [1, 3, 7] })
       .expect(400);

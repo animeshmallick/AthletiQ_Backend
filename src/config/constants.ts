@@ -2,8 +2,8 @@
 export const APP_TIMEZONE = 'Asia/Kolkata';
 
 /** Students train a fixed set of weekdays per week within these bounds. */
-export const MIN_TRAINING_DAYS_PER_WEEK = 3;
-export const MAX_TRAINING_DAYS_PER_WEEK = 5;
+export const MIN_TRAINING_DAYS_PER_WEEK = 1;
+export const MAX_TRAINING_DAYS_PER_WEEK = 6;
 
 /** Invoices are payable within this many days of issue; afterwards they are reported as overdue. */
 export const INVOICE_DUE_DAYS = 7;

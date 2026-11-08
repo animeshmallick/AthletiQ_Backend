@@ -1,5 +1,6 @@
 import { describe, expect, it } from '@jest/globals';
 import { z } from 'zod';
+import { MAX_TRAINING_DAYS_PER_WEEK, MIN_TRAINING_DAYS_PER_WEEK } from '../../src/config/constants';
 import { AppError } from '../../src/lib/errors';
 import {
   parse,
@@ -62,11 +63,17 @@ describe('field schemas', () => {
     expect(zWeekdays.safeParse([8]).success).toBe(false);
   });
 
-  it('enforces 3–5 training days per week', () => {
-    expect(zTrainingDays.parse([1, 3, 5])).toEqual([1, 3, 5]);
-    expect(zTrainingDays.safeParse([1, 2]).success).toBe(false);
-    expect(zTrainingDays.safeParse([1, 2, 3, 4, 5, 6]).success).toBe(false);
-    expect(zTrainingDays.safeParse([1, 1, 2]).success).toBe(false); // dedupes to 2 days
+  it(`enforces ${MIN_TRAINING_DAYS_PER_WEEK}–${MAX_TRAINING_DAYS_PER_WEEK} training days per week`, () => {
+    const days = (n: number) => [1, 2, 3, 4, 5, 6, 7].slice(0, n);
+    expect(zTrainingDays.parse([5, 1, 3])).toEqual([1, 3, 5]);
+    expect(zTrainingDays.safeParse(days(MIN_TRAINING_DAYS_PER_WEEK)).success).toBe(true);
+    expect(zTrainingDays.safeParse(days(MAX_TRAINING_DAYS_PER_WEEK)).success).toBe(true);
+    expect(zTrainingDays.safeParse([]).success).toBe(false);
+    if (MAX_TRAINING_DAYS_PER_WEEK < 7) {
+      expect(zTrainingDays.safeParse(days(MAX_TRAINING_DAYS_PER_WEEK + 1)).success).toBe(false);
+    }
+    // Duplicates are collapsed before counting.
+    expect(zTrainingDays.parse([2, 2, 2])).toEqual([2]);
   });
 
   it('requires reasonably strong passwords', () => {
