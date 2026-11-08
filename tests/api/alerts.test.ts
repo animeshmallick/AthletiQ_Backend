@@ -1,11 +1,35 @@
 import { afterEach, describe, expect, it } from '@jest/globals';
 import { db } from '../../src/db/client';
+import { eq } from 'drizzle-orm';
 import { deviceTokens, invoices } from '../../src/db/schema';
-import { runSessionAlerts, sendAdminDigest, sendFeedbackReminders } from '../../src/jobs/alerts';
+import {
+  runSessionAlerts,
+  sendAdminDigest,
+  sendFeedbackReminders,
+  sendOverdueNotices,
+  sendWeeklyFeesSummary,
+} from '../../src/jobs/alerts';
 import type { PushMessage, PushSender } from '../../src/modules/push/fcm';
+import {
+  noticeBatchAssigned,
+  noticeBatchChanged,
+  noticeMakeupBooked,
+  noticeSessionCancelled,
+  noticeStudentJoined,
+  noticeStudentLeft,
+  noticeStudentMovedOut,
+} from '../../src/modules/push/coach-notices';
 import { setPushSender } from '../../src/modules/push/push.service';
 import { istMinutes, tasksFor } from '../../src/modules/tasks/tasks.service';
-import { as, checkIn, makeAcademy, makeStudent, makeUser, setToday } from '../helpers/factories';
+import {
+  as,
+  checkIn,
+  makeAcademy,
+  makeBatch,
+  makeStudent,
+  makeUser,
+  setToday,
+} from '../helpers/factories';
 import { billOnAcceptance } from '../../src/modules/billing/invoice-generator';
 
 const MON = '2026-03-09';
@@ -128,6 +152,8 @@ describe('session alerts', () => {
     expect(await runSessionAlerts(new Date())).toEqual({ sent: 0 });
     expect(await sendAdminDigest(new Date())).toEqual({ sent: false });
     expect(await sendFeedbackReminders()).toEqual({ coaches: 0 });
+    expect(await sendOverdueNotices(new Date())).toEqual({ coaches: 0 });
+    expect(await sendWeeklyFeesSummary(new Date())).toEqual({ sent: false });
   });
 
   it('sends admins one evening digest and coaches one weekly feedback nudge', async () => {
@@ -276,10 +302,220 @@ describe('coach notices', () => {
         effectiveFrom: '2026-03-12',
       })
       .expect(200);
-    await settle(sent, 2);
-    expect(sent[1]).toMatchObject({
-      userToken: 'other-coach-token-xxxxxxxxxxxx',
-      message: { title: `New student in ${otherBatch.name}` },
+    await settle(sent, 3);
+    const byToken = Object.fromEntries(sent.slice(1).map((m) => [m.userToken, m.message]));
+    expect(byToken['other-coach-token-xxxxxxxxxxxx']).toMatchObject({
+      title: `New student in ${otherBatch.name}`,
     });
+    // The coach they left hears about it too.
+    expect(byToken['coach-device-token-xxxxxxxxxxxx']).toMatchObject({
+      title: `Diya Kapoor moved out of ${batch.name}`,
+      body: `Now in ${otherBatch.name} from 12 Mar`,
+    });
+  });
+
+  it('tells the coach when a student leaves the academy', async () => {
+    const sent = capture();
+    setToday(MON, at('12:00'));
+    const { admin, coach, batch, plan } = await makeAcademy();
+    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
+    const s = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, fullName: 'Kabir Das' },
+      admin.id,
+    );
+    await (
+      await as(admin)
+    )
+      .post(`/api/v1/students/${s.id}/leave`, { leftOn: '2026-03-14', reason: 'Moving city' })
+      .expect(200);
+    await settle(sent, 1);
+    expect(sent[0]!.message).toMatchObject({
+      title: 'Kabir Das left the academy',
+      body: `${batch.name} · last day 14 Mar`,
+    });
+  });
+
+  it('tells the coach when someone else cancels or restores their session', async () => {
+    const sent = capture();
+    setToday(MON, at('12:00'));
+    const { admin, coach, batch } = await makeAcademy();
+    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
+    const api = await as(admin);
+    await api
+      .post(`/api/v1/batches/${batch.id}/cancellations`, {
+        date: '2026-03-11',
+        reason: 'Ground under repair',
+      })
+      .expect(201);
+    await settle(sent, 1);
+    expect(sent[0]!.message).toMatchObject({
+      title: `${batch.name} on 11 Mar is cancelled`,
+      body: 'Reason: Ground under repair',
+      link: '/calendar?date=2026-03-11&view=day',
+    });
+    await api.delete(`/api/v1/batches/${batch.id}/cancellations/2026-03-11`).expect(204);
+    await settle(sent, 2);
+    expect(sent[1]!.message.title).toBe(`${batch.name} on 11 Mar is back on`);
+
+    // The coach's own cancellation needs no push to themselves.
+    await (
+      await as(coach)
+    )
+      .post(`/api/v1/batches/${batch.id}/cancellations`, {
+        date: '2026-03-12',
+        reason: 'Unwell today',
+      })
+      .expect(201);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sent).toHaveLength(2);
+  });
+
+  it('tells the coach when an admin books a makeup into their batch', async () => {
+    const sent = capture();
+    setToday(MON, at('12:00'));
+    const { admin, otherCoach, batch, otherBatch, plan } = await makeAcademy();
+    await device(otherCoach.id, 'other-coach-token-xxxxxxxxxxxx');
+    const s = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, fullName: 'Meera N' },
+      admin.id,
+    );
+    await (
+      await as(admin)
+    )
+      .post(`/api/v1/students/${s.id}/makeups`, { batchId: otherBatch.id, date: '2026-03-12' })
+      .expect(201);
+    await settle(sent, 1);
+    expect(sent[0]!.message).toMatchObject({
+      title: `Makeup student in ${otherBatch.name}`,
+      body: 'Meera N joins on 12 Mar',
+    });
+  });
+
+  it('tells admins about coach makeup requests and the coach about the decision', async () => {
+    const sent = capture();
+    setToday(MON, at('12:00'));
+    const { admin, coach, batch, plan } = await makeAcademy();
+    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
+    await device(admin.id, 'admin-device-token-xxxxxxxxxxxx');
+    const s = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, fullName: 'Ojas P' },
+      admin.id,
+    );
+    const coachApi = await as(coach);
+    const r1 = await coachApi
+      .post(`/api/v1/students/${s.id}/makeups`, { batchId: batch.id, date: '2026-03-10' })
+      .expect(201);
+    const r2 = await coachApi
+      .post(`/api/v1/students/${s.id}/makeups`, { batchId: batch.id, date: '2026-03-17' })
+      .expect(201);
+    await settle(sent, 2);
+    expect(sent[0]!.message.title).toBe('Makeup request');
+    const adminApi = await as(admin);
+    await adminApi.post(`/api/v1/makeups/${r1.body.data.id}/approve`).expect(200);
+    await settle(sent, 3);
+    expect(sent[2]!.message).toMatchObject({
+      title: 'Makeup approved',
+      body: expect.stringContaining('Ojas P'),
+    });
+    await adminApi
+      .post(`/api/v1/makeups/${r2.body.data.id}/reject`, { reason: 'Batch is full that day' })
+      .expect(200);
+    await settle(sent, 4);
+    expect(sent[3]!.message.title).toBe('Makeup not approved');
+  });
+
+  it('stays quiet when there is nobody (or nothing new) to tell', async () => {
+    const sent = capture();
+    setToday(MON, at('12:00'));
+    const { admin, coach, batch, plan, location } = await makeAcademy();
+    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
+    const gone = '00000000-0000-4000-8000-000000000000';
+    await noticeBatchAssigned(gone);
+    await noticeBatchChanged(batch, gone);
+    await noticeStudentJoined(gone);
+    await noticeStudentLeft(gone, gone, MON);
+    await noticeStudentMovedOut(gone, gone, batch.id, MON);
+    await noticeSessionCancelled(gone, MON, admin.id, null);
+    await noticeMakeupBooked(gone, gone, MON, admin.id);
+    // Same coach on both batches: the "joined" notice is enough.
+    const second = await makeBatch(coach.id, location.id);
+    const s = await makeStudent({ batchId: batch.id, feePlanId: plan.id }, admin.id);
+    await noticeStudentMovedOut(s.id, batch.id, second.id, MON);
+    // Coach's own makeup / cancellation.
+    await noticeMakeupBooked(s.id, batch.id, MON, coach.id);
+    await noticeSessionCancelled(batch.id, MON, coach.id, null);
+    // A student with no name on record still reads well, and no reason is spelled out.
+    await noticeSessionCancelled(batch.id, '2026-03-11', admin.id, null);
+    await noticeStudentLeft(gone, batch.id, MON);
+    expect(sent.map((m) => m.message.body)).toEqual([
+      'Reason: not given',
+      `${batch.name} · last day 9 Mar`,
+    ]);
+    expect(sent[1]!.message.title).toBe('A student left the academy');
+  });
+
+  it('tells coaches once about fees over a week overdue, and admins about last week', async () => {
+    const sent = capture();
+    setToday(MON, at('10:00'));
+    const { admin, coach, batch, plan } = await makeAcademy();
+    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
+    await device(admin.id, 'admin-device-token-xxxxxxxxxxxx');
+    const a = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-02-01', fullName: 'Late Lata' },
+      admin.id,
+    );
+    const b = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-02-01', fullName: 'Recent Ravi' },
+      admin.id,
+    );
+    await billOnAcceptance(a.id);
+    await billOnAcceptance(b.id);
+    await db.update(invoices).set({ dueDate: '2026-03-01' }).where(eq(invoices.studentId, a.id));
+    await db.update(invoices).set({ dueDate: '2026-03-06' }).where(eq(invoices.studentId, b.id));
+
+    expect(await sendOverdueNotices(new Date())).toEqual({ coaches: 1 });
+    expect(sent[0]!.message).toMatchObject({
+      title: "Late Lata's fees are over a week overdue",
+      link: `/students/${a.id}`,
+    });
+    expect(await sendOverdueNotices(new Date())).toEqual({ coaches: 0 });
+
+    // Three days later Ravi crosses a week too, and only Ravi is reported.
+    setToday('2026-03-13', at('10:00'));
+    await db.update(invoices).set({ dueDate: '2026-03-01' }).where(eq(invoices.studentId, b.id));
+    expect(await sendOverdueNotices(new Date())).toEqual({ coaches: 1 });
+    expect(sent.at(-1)!.message.title).toBe("Recent Ravi's fees are over a week overdue");
+
+    setToday('2026-03-16', at('09:00'));
+    expect(await sendWeeklyFeesSummary(new Date())).toEqual({ sent: true });
+    expect(await sendWeeklyFeesSummary(new Date())).toEqual({ sent: false });
+    const summary = sent.find((m) => m.message.tag === 'fees-week')!;
+    expect(summary.userToken).toBe('admin-device-token-xxxxxxxxxxxx');
+    expect(summary.message.title).toMatch(/^Last week: ₹0(\.00)? collected$/);
+    expect(summary.message.body).toMatch(
+      /^0 payments · .* billed \(0 invoices\) · .* overdue across \d+ invoices$/,
+    );
+  });
+
+  it('groups several overdue students into one push per coach', async () => {
+    const sent = capture();
+    setToday(MON, at('10:00'));
+    const { admin, coach, batch, plan } = await makeAcademy();
+    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
+    for (const name of ['Anu', 'Bela', 'Chirag', 'Dev', 'Esha']) {
+      const s = await makeStudent(
+        { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-02-01', fullName: name },
+        admin.id,
+      );
+      await billOnAcceptance(s.id);
+    }
+    await db.update(invoices).set({ dueDate: '2026-02-20' });
+    expect(await sendOverdueNotices(new Date())).toEqual({ coaches: 1 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.message).toMatchObject({
+      title: "5 students' fees are over a week overdue",
+      link: '/invoices?status=overdue',
+    });
+    expect(sent[0]!.message.body).toMatch(/and 1 more$/);
   });
 });

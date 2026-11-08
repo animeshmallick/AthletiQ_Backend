@@ -114,3 +114,80 @@ export async function noticeStudentJoined(studentId: string) {
     tag: `student-${studentId}`,
   });
 }
+
+async function studentName(studentId: string) {
+  const s = await db.query.students.findFirst({ where: eq(students.id, studentId) });
+  return s?.fullName ?? 'A student';
+}
+
+/** A student left the academy → the coach of the batch they were in. */
+export async function noticeStudentLeft(studentId: string, batchId: string, leftOn: string) {
+  const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
+  if (!b) return;
+  await notifyUsers([b.coachId], {
+    title: `${await studentName(studentId)} left the academy`,
+    body: `${b.name} · last day ${shortDate(leftOn)}`,
+    link: `/students/${studentId}`,
+    tag: `student-${studentId}`,
+  });
+}
+
+/** A student moved to another batch → the coach of the batch they moved out of. */
+export async function noticeStudentMovedOut(
+  studentId: string,
+  fromBatchId: string,
+  toBatchId: string,
+  from: string,
+) {
+  const [a, b] = await Promise.all([
+    db.query.batches.findFirst({ where: eq(batches.id, fromBatchId) }),
+    db.query.batches.findFirst({ where: eq(batches.id, toBatchId) }),
+  ]);
+  if (!a || !b || a.coachId === b.coachId) return; // same coach also gets the "joined" notice
+  await notifyUsers([a.coachId], {
+    title: `${await studentName(studentId)} moved out of ${a.name}`,
+    body: `Now in ${b.name} from ${shortDate(from)}`,
+    link: `/batches/${a.id}`,
+    tag: `student-${studentId}`,
+  });
+}
+
+/** Someone other than the coach cancelled (or restored) one of their sessions. */
+export async function noticeSessionCancelled(
+  batchId: string,
+  date: string,
+  byUserId: string,
+  reason: string | null,
+  restored = false,
+) {
+  const row = await batchWithLocation(batchId);
+  if (!row || row.batch.coachId === byUserId) return;
+  const { batch: b } = row;
+  await notifyUsers([b.coachId], {
+    title: restored
+      ? `${b.name} on ${shortDate(date)} is back on`
+      : `${b.name} on ${shortDate(date)} is cancelled`,
+    body: restored
+      ? `The session is running again · ${clockLabel(b.startTime)}–${clockLabel(b.endTime)}`
+      : `Reason: ${reason ?? 'not given'}`,
+    link: `/calendar?date=${date}&view=day`,
+    tag: `session-${b.id}-${date}`,
+  });
+}
+
+/** An admin booked a makeup student into a coach's batch (coach requests notify on approval). */
+export async function noticeMakeupBooked(
+  studentId: string,
+  batchId: string,
+  date: string,
+  byUserId: string,
+) {
+  const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
+  if (!b || b.coachId === byUserId) return;
+  await notifyUsers([b.coachId], {
+    title: `Makeup student in ${b.name}`,
+    body: `${await studentName(studentId)} joins on ${shortDate(date)}`,
+    link: `/attendance?batch=${b.id}&date=${date}`,
+    tag: `makeup-${studentId}-${date}`,
+  });
+}

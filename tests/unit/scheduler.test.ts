@@ -10,6 +10,14 @@ function loadScheduler(env: Record<string, string>) {
   const validate = jest.fn((expr: string) => expr !== 'bad cron');
   const runInvoiceJob = jest.fn(async (_trigger: string) => ({ ran: true }));
   const scheduled: (() => void)[] = [];
+  const alerts = {
+    reminders: jest.fn(async () => ({})),
+    session: jest.fn(async () => ({})),
+    digest: jest.fn(async () => ({})),
+    feedback: jest.fn(async () => ({})),
+    overdue: jest.fn(async () => ({})),
+    fees: jest.fn(async () => ({})),
+  };
   let mod!: Scheduler;
 
   const previous = { ...process.env };
@@ -17,11 +25,22 @@ function loadScheduler(env: Record<string, string>) {
   jest.isolateModules(() => {
     jest.doMock('node-cron', () => ({ __esModule: true, default: { schedule, validate } }));
     jest.doMock('../../src/jobs/invoice-job', () => ({ runInvoiceJob }));
+    jest.doMock('../../src/jobs/session-reminders', () => ({
+      sendSessionReminders: alerts.reminders,
+    }));
+    jest.doMock('../../src/jobs/alerts', () => ({
+      runSafely: (_name: string, job: () => Promise<unknown>) => void job(),
+      runSessionAlerts: alerts.session,
+      sendAdminDigest: alerts.digest,
+      sendFeedbackReminders: alerts.feedback,
+      sendOverdueNotices: alerts.overdue,
+      sendWeeklyFeesSummary: alerts.fees,
+    }));
 
     mod = require('../../src/jobs/scheduler') as Scheduler;
   });
   process.env = previous;
-  return { mod, schedule, runInvoiceJob, scheduled };
+  return { mod, schedule, runInvoiceJob, scheduled, alerts };
 }
 
 describe('scheduler', () => {
@@ -65,6 +84,15 @@ describe('scheduler', () => {
     jest.advanceTimersByTime(15_000);
     await Promise.resolve();
     expect(runInvoiceJob).toHaveBeenCalledTimes(2);
+    mod.stopScheduler();
+  });
+
+  it('runs every scheduled alert job', () => {
+    jest.useFakeTimers();
+    const { mod, scheduled, alerts } = loadScheduler({ SCHEDULER_ENABLED: 'true' });
+    mod.startScheduler();
+    for (const fn of scheduled) fn();
+    for (const job of Object.values(alerts)) expect(job).toHaveBeenCalled();
     mod.stopScheduler();
   });
 

@@ -5,16 +5,29 @@
  *  - admins get one evening digest instead of a stream of small updates,
  *  - coaches get one weekly feedback nudge, only if reports are still open.
  */
-import { and, count, eq, lt, sql } from 'drizzle-orm';
+import { and, count, eq, gte, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { invoices, payments, users } from '../db/schema/index.js';
-import { todayInAppTz } from '../lib/dates.js';
+import {
+  batches,
+  enrollments,
+  invoices,
+  notificationLog,
+  payments,
+  students,
+  users,
+} from '../db/schema/index.js';
+import { addDays, startOfIsoWeek, todayInAppTz } from '../lib/dates.js';
 import { logger } from '../lib/logger.js';
 import { formatInr } from '../lib/money.js';
 import { dayOverview } from '../modules/attendance/attendance.routes.js';
 import type { AuthUser } from '../modules/auth/auth.types.js';
 import { lastCompletedWeek, weekBoard } from '../modules/feedback/feedback.routes.js';
-import { activeAdminIds, notifyOnce, pushEnabled } from '../modules/push/push.service.js';
+import {
+  activeAdminIds,
+  notifyOnce,
+  notifyUsers,
+  pushEnabled,
+} from '../modules/push/push.service.js';
 import { clockLabel, istMinutes, toMinutes } from '../modules/tasks/tasks.service.js';
 
 /** Reads everything (admin scope) without being a real user. */
@@ -163,6 +176,118 @@ export async function sendFeedbackReminders() {
       nudged++;
   }
   return { coaches: nudged };
+}
+
+/**
+ * 10 am daily: tell each coach about their students whose fees just passed 7 days overdue.
+ * Every invoice is reported once (claimed in notification_log), grouped into one push per coach.
+ */
+export async function sendOverdueNotices(now: Date = new Date()) {
+  if (!pushEnabled()) return { coaches: 0 };
+  const cutoff = addDays(todayInAppTz(now), -7);
+  const rows = await db
+    .select({
+      invoiceId: invoices.id,
+      studentId: students.id,
+      fullName: students.fullName,
+      coachId: batches.coachId,
+    })
+    .from(invoices)
+    .innerJoin(students, eq(students.id, invoices.studentId))
+    .innerJoin(
+      enrollments,
+      and(eq(enrollments.studentId, students.id), isNull(enrollments.effectiveTo)),
+    )
+    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    .where(
+      and(eq(invoices.status, 'due'), lte(invoices.dueDate, cutoff), eq(students.status, 'active')),
+    );
+  if (!rows.length) return { coaches: 0 };
+  const claimed = new Set(
+    (
+      await db
+        .insert(notificationLog)
+        .values(rows.map((r) => ({ key: `overdue7:${r.invoiceId}` })))
+        .onConflictDoNothing()
+        .returning({ key: notificationLog.key })
+    ).map((r) => r.key.slice('overdue7:'.length)),
+  );
+  const byCoach = new Map<string, Map<string, string>>();
+  for (const r of rows) {
+    if (!claimed.has(r.invoiceId)) continue;
+    const names = byCoach.get(r.coachId) ?? new Map<string, string>();
+    names.set(r.studentId, r.fullName);
+    byCoach.set(r.coachId, names);
+  }
+  for (const [coachId, names] of byCoach) {
+    const list = [...names.values()];
+    const [first] = [...names.keys()];
+    await notifyUsers([coachId], {
+      title:
+        list.length === 1
+          ? `${list[0]}'s fees are over a week overdue`
+          : `${list.length} students' fees are over a week overdue`,
+      body:
+        list.length === 1
+          ? 'A gentle word with the parents at the next session may help.'
+          : `${list.slice(0, 4).join(', ')}${list.length > 4 ? ` and ${list.length - 4} more` : ''}`,
+      link: list.length === 1 ? `/students/${first}` : '/invoices?status=overdue',
+      tag: 'overdue',
+    });
+  }
+  return { coaches: byCoach.size };
+}
+
+/** Monday 9 am: last week's fees in one push for admins. */
+export async function sendWeeklyFeesSummary(now: Date = new Date()) {
+  if (!pushEnabled()) return { sent: false };
+  const from = addDays(startOfIsoWeek(todayInAppTz(now)), -7);
+  const to = addDays(from, 6);
+  const today = todayInAppTz(now);
+  const [[paid], [billed], [overdue]] = await Promise.all([
+    db
+      .select({
+        total: sql<number>`coalesce(sum(${payments.amount}), 0)::int`,
+        n: count(),
+      })
+      .from(payments)
+      .where(
+        and(gte(payments.paidOn, from), lte(payments.paidOn, to), eq(payments.status, 'completed')),
+      ),
+    db
+      .select({
+        total: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        n: count(),
+      })
+      .from(invoices)
+      .where(
+        and(
+          gte(invoices.issueDate, from),
+          lte(invoices.issueDate, to),
+          inArray(invoices.status, ['due', 'paid']),
+        ),
+      ),
+    db
+      .select({
+        total: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        n: count(),
+      })
+      .from(invoices)
+      .where(and(eq(invoices.status, 'due'), lt(invoices.dueDate, today))),
+  ]);
+  const sent = await notifyOnce(`fees-week:${from}`, await activeAdminIds(), {
+    title: `Last week: ${formatInr(paid!.total)} collected`,
+    body: [
+      `${paid!.n} payment${paid!.n === 1 ? '' : 's'}`,
+      `${formatInr(billed!.total)} billed (${billed!.n} invoice${billed!.n === 1 ? '' : 's'})`,
+      overdue!.n
+        ? `${formatInr(overdue!.total)} overdue across ${overdue!.n} invoice${overdue!.n === 1 ? '' : 's'}`
+        : 'nothing overdue',
+    ].join(' · '),
+    link: '/finance',
+    tag: 'fees-week',
+  });
+  return { sent };
 }
 
 /** Logged-and-swallowed runner for cron. */

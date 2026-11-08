@@ -3,7 +3,14 @@ import { APP_TIMEZONE } from '../config/constants.js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { runInvoiceJob } from './invoice-job.js';
-import { runSafely, runSessionAlerts, sendAdminDigest, sendFeedbackReminders } from './alerts.js';
+import {
+  runSafely,
+  runSessionAlerts,
+  sendAdminDigest,
+  sendFeedbackReminders,
+  sendOverdueNotices,
+  sendWeeklyFeesSummary,
+} from './alerts.js';
 import { sendSessionReminders } from './session-reminders.js';
 
 const tasks: ScheduledTask[] = [];
@@ -66,6 +73,16 @@ export function startScheduler(): void {
         noOverlap: true,
       },
     ),
+    cron.schedule('0 10 * * *', () => runSafely('Overdue notices', () => sendOverdueNotices()), {
+      timezone: APP_TIMEZONE,
+      name: 'overdue-notices',
+      noOverlap: true,
+    }),
+    cron.schedule('0 9 * * 1', () => runSafely('Weekly fees', () => sendWeeklyFeesSummary()), {
+      timezone: APP_TIMEZONE,
+      name: 'weekly-fees',
+      noOverlap: true,
+    }),
   );
 
   // Catch up shortly after boot in case the server was down at midnight. Idempotent.

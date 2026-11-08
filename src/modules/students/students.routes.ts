@@ -55,7 +55,12 @@ import {
   getStudentDetail,
   transferStudent,
 } from './students.service.js';
-import { noticeStudentJoined } from '../push/coach-notices.js';
+import {
+  noticeMakeupBooked,
+  noticeStudentJoined,
+  noticeStudentLeft,
+  noticeStudentMovedOut,
+} from '../push/coach-notices.js';
 import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
 import { assertNotCancelled } from '../attendance/cancellations.js';
 
@@ -388,10 +393,15 @@ studentsRouter.post('/:id/transfer', requireAdmin, async (req, res) => {
       },
       tx,
     );
-    return previous.batchId !== current.batchId;
+    return previous.batchId !== current.batchId
+      ? { from: previous.batchId, to: current.batchId }
+      : null;
   });
 
-  if (moved) notifyInBackground(() => noticeStudentJoined(id));
+  if (moved) {
+    notifyInBackground(() => noticeStudentJoined(id));
+    notifyInBackground(() => noticeStudentMovedOut(id, moved.from, moved.to, body.effectiveFrom));
+  }
   ok(res, await getStudentDetail(id));
 });
 
@@ -405,7 +415,7 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(LeaveBody, req.body);
 
-  await db.transaction(async (tx) => {
+  const leftBatchId = await db.transaction(async (tx) => {
     const s = await tx.query.students.findFirst({ where: eq(students.id, id) });
     if (!s) throw AppError.notFound('Student');
     if (s.status === 'left') throw AppError.unprocessable('Student has already left');
@@ -444,7 +454,9 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
       },
       tx,
     );
+    return current?.batchId ?? null;
   });
+  if (leftBatchId) notifyInBackground(() => noticeStudentLeft(id, leftBatchId, body.leftOn));
 
   ok(res, await getStudentDetail(id));
 });
@@ -518,7 +530,9 @@ studentsRouter.post('/:id/makeups', async (req, res) => {
     entityId: id,
     metadata: body,
   });
-  if (!admin) {
+  if (admin) {
+    notifyInBackground(() => noticeMakeupBooked(id, body.batchId, body.date, user.id));
+  } else {
     notifyInBackground(() =>
       notifyAdmins({
         title: 'Makeup request',

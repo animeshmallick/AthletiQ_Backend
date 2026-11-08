@@ -15,6 +15,8 @@ import { parse, zId, zIdParam, zIsoDate } from '../../lib/validation.js';
 import { currentUser } from '../../middleware/auth.js';
 import { assertBatchAccess } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import { noticeSessionCancelled } from '../push/coach-notices.js';
+import { notifyInBackground } from '../push/push.service.js';
 
 /** Cancellation for one session, or null. */
 export async function getCancellation(batchId: string, date: IsoDate) {
@@ -137,12 +139,14 @@ cancellationsRouter.post('/:id/cancellations', async (req, res) => {
     entityId: id,
     metadata: body,
   });
+  notifyInBackground(() => noticeSessionCancelled(id, body.date, user.id, body.reason));
   created(res, row);
 });
 
 cancellationsRouter.delete('/:id/cancellations/:date', async (req, res) => {
   const { id, date } = parse(z.object({ id: zId, date: zIsoDate }), req.params);
-  await assertBatchAccess(currentUser(req), id);
+  const user = currentUser(req);
+  await assertBatchAccess(user, id);
   const [row] = await db
     .delete(sessionCancellations)
     .where(and(eq(sessionCancellations.batchId, id), eq(sessionCancellations.date, date)))
@@ -155,5 +159,6 @@ cancellationsRouter.delete('/:id/cancellations/:date', async (req, res) => {
     entityId: id,
     metadata: { date, reason: row.reason },
   });
+  notifyInBackground(() => noticeSessionCancelled(id, date, user.id, row.reason, true));
   noContent(res);
 });
