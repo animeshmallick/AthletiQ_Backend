@@ -1,6 +1,6 @@
-import { and, desc, eq, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { invoices, payments, students, users } from '../../db/schema/index.js';
+import { enrollments, invoices, payments, students, users } from '../../db/schema/index.js';
 import { formatDisplayDate, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { formatInr } from '../../lib/money.js';
@@ -93,6 +93,45 @@ export function toPdfData(inv: InvoiceDetail): InvoicePdfData {
     payment: completed
       ? { paidOn: completed.paidOn, mode: completed.mode, reference: completed.reference }
       : null,
+  };
+}
+
+/** PDF data plus the extras shown on it: coach, training days, other dues, payment history. */
+export async function invoicePdfData(inv: InvoiceDetail): Promise<InvoicePdfData> {
+  const [coach, enrollment, otherDue] = await Promise.all([
+    inv.coachId
+      ? db.query.users.findFirst({ columns: { name: true }, where: eq(users.id, inv.coachId) })
+      : Promise.resolve(undefined),
+    db.query.enrollments.findFirst({
+      columns: { trainingDays: true },
+      where: and(eq(enrollments.studentId, inv.student.id), isNull(enrollments.effectiveTo)),
+    }),
+    db
+      .select({ number: invoices.number, dueDate: invoices.dueDate, amount: invoices.totalAmount })
+      .from(invoices)
+      .where(
+        and(
+          eq(invoices.studentId, inv.student.id),
+          eq(invoices.status, 'due'),
+          ne(invoices.id, inv.id),
+        ),
+      )
+      .orderBy(asc(invoices.dueDate)),
+  ]);
+  return {
+    ...toPdfData(inv),
+    coachName: coach?.name ?? null,
+    trainingDays: enrollment?.trainingDays ?? null,
+    otherDue,
+    history: inv.payments
+      .filter((p) => p.status !== 'completed')
+      .map((p) => ({
+        paidOn: p.paidOn,
+        amount: p.amount,
+        mode: p.mode,
+        status: p.status,
+        reason: p.reversalReason,
+      })),
   };
 }
 

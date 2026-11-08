@@ -24,7 +24,7 @@ import {
   getInvoiceForUser,
   invoiceScope,
   invoiceSortSql,
-  toPdfData,
+  invoicePdfData,
 } from './invoices.service.js';
 import { activeAdminIds, notifyInBackground, notifyUsers } from '../push/push.service.js';
 import { formatInr } from '../../lib/money.js';
@@ -121,7 +121,7 @@ invoicesRouter.get('/:id', async (req, res) => {
 invoicesRouter.get('/:id/pdf', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const inv = await getInvoiceForUser(currentUser(req), id);
-  const pdf = await renderInvoicePdf(toPdfData(inv), await getAcademySettings());
+  const pdf = await renderInvoicePdf(await invoicePdfData(inv), await getAcademySettings());
   res
     .type('application/pdf')
     .setHeader('Content-Disposition', `inline; filename="${inv.number.replaceAll('/', '-')}.pdf"`)

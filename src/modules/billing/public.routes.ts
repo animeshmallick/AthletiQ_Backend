@@ -4,7 +4,7 @@ import { AppError } from '../../lib/errors.js';
 import { parse, zIdParam } from '../../lib/validation.js';
 import { getAcademySettings } from '../settings/settings.js';
 import { renderInvoicePdf } from './invoice-pdf.js';
-import { getInvoiceForUser, toPdfData } from './invoices.service.js';
+import { getInvoiceForUser, invoicePdfData } from './invoices.service.js';
 import { verifyInvoiceLink } from './share-links.js';
 
 /** Unauthenticated routes reachable via signed links (shared with parents over WhatsApp). */
@@ -31,7 +31,7 @@ publicRouter.get('/invoices/:id/pdf', async (req, res) => {
   }
   const inv = await getInvoiceForUser(SYSTEM, id);
   if (inv.status === 'cancelled') throw AppError.notFound('Invoice');
-  const pdf = await renderInvoicePdf(toPdfData(inv), await getAcademySettings());
+  const pdf = await renderInvoicePdf(await invoicePdfData(inv), await getAcademySettings());
   res
     .type('application/pdf')
     .setHeader('Content-Disposition', `inline; filename="${inv.number.replaceAll('/', '-')}.pdf"`)
