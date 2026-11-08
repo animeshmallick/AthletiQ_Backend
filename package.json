@@ -31,7 +31,6 @@
   },
   "dependencies": {
     "@node-rs/argon2": "^2.2.2",
-    "@sentry/node": "^11.11.0",
     "compression": "^1.8.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",

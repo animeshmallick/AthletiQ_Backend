@@ -38,8 +38,6 @@ export default {
   collectCoverageFrom: [
     'src/**/*.ts',
     '!src/server.ts',
-    // Third-party SDK bootstrap; the logic it relies on (lib/monitoring.ts) is tested.
-    '!src/instrument.ts',
     '!src/db/migrate.ts',
     '!src/db/seed.ts',
     '!src/db/client.ts',

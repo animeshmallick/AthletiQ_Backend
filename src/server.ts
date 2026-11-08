@@ -3,11 +3,7 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { closeDatabase } from './db/client.js';
 import { startScheduler, stopScheduler } from './jobs/scheduler.js';
-import { flushMonitoring, initMonitoring } from './instrument.js';
 import { logger } from './lib/logger.js';
-import { reportError } from './lib/monitoring.js';
-
-await initMonitoring();
 
 const app = createApp();
 const server: Server = app.listen(env.PORT, () => {
@@ -38,7 +34,6 @@ async function shutdown(signal: string) {
       server.close((err) => (err ? reject(err) : resolve())),
     );
     await closeDatabase();
-    await flushMonitoring();
     logger.info('Shutdown complete');
     process.exit(0);
   } catch (err) {
@@ -51,10 +46,8 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('unhandledRejection', (reason) => {
   logger.error({ err: reason }, 'Unhandled promise rejection');
-  reportError(reason, { where: 'unhandledRejection' });
 });
 process.on('uncaughtException', (err) => {
   logger.fatal({ err }, 'Uncaught exception');
-  reportError(err, { where: 'uncaughtException' });
   void shutdown('uncaughtException');
 });

@@ -2,7 +2,6 @@ import type { ErrorRequestHandler, RequestHandler } from 'express';
 import { ZodError } from 'zod';
 import { AppError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
-import { reportError } from '../lib/monitoring.js';
 import { mapPgError } from '../lib/pg-errors.js';
 import { validationError } from '../lib/validation.js';
 
@@ -33,17 +32,6 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
 
   if (appError.status >= 500) {
     logger.error({ err, requestId: req.id, path: req.path }, 'Unhandled error');
-    const routePath = (req.route as { path?: unknown } | undefined)?.path;
-    reportError(err, {
-      where: 'http',
-      requestId: typeof req.id === 'object' ? undefined : String(req.id),
-      method: req.method,
-      path: routePath
-        ? `${req.baseUrl}${typeof routePath === 'string' ? routePath : ''}`
-        : req.path,
-      userId: req.user?.id,
-      role: req.user?.role,
-    });
   } else if (appError.code !== 'NOT_FOUND' && appError.code !== 'UNAUTHENTICATED') {
     logger.debug({ code: appError.code, requestId: req.id }, appError.message);
   }
@@ -55,7 +43,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
       code: appError.code,
       message: appError.message,
       ...(appError.details !== undefined ? { details: appError.details } : {}),
-      requestId: typeof req.id === 'object' ? undefined : String(req.id),
+      requestId: req.id,
     },
   });
 };

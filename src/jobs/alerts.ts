@@ -18,7 +18,6 @@ import {
 } from '../db/schema/index.js';
 import { addDays, startOfIsoWeek, todayInAppTz } from '../lib/dates.js';
 import { logger } from '../lib/logger.js';
-import { reportError } from '../lib/monitoring.js';
 import { formatInr } from '../lib/money.js';
 import { dayOverview } from '../modules/attendance/attendance.routes.js';
 import type { AuthUser } from '../modules/auth/auth.types.js';
@@ -293,8 +292,5 @@ export async function sendWeeklyFeesSummary(now: Date = new Date()) {
 
 /** Logged-and-swallowed runner for cron. */
 export function runSafely(name: string, job: () => Promise<unknown>) {
-  job().catch((err: unknown) => {
-    logger.error({ err }, `${name} failed`);
-    reportError(err, { where: `job:${name}` });
-  });
+  job().catch((err: unknown) => logger.error({ err }, `${name} failed`));
 }

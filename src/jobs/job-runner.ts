@@ -3,7 +3,6 @@ import { db } from '../db/client.js';
 import { jobRuns } from '../db/schema/index.js';
 import { todayInAppTz } from '../lib/dates.js';
 import { logger } from '../lib/logger.js';
-import { reportError } from '../lib/monitoring.js';
 import { tryAdvisoryLock } from './advisory-lock.js';
 
 /** Stable 32-bit keys for pg advisory locks, one per job. */
@@ -63,7 +62,6 @@ export async function runExclusive(
         })
         .where(eq(jobRuns.id, runId));
       logger.error({ err, job: name, runId }, 'Job failed');
-      reportError(err, { where: `job:${name}` });
       throw err;
     }
   } finally {
