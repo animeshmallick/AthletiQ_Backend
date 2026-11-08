@@ -280,7 +280,7 @@ describe('coach notices', () => {
       userToken: 'coach-device-token-xxxxxxxxxxxx',
       message: {
         title: `New student in ${batch.name}`,
-        body: 'Diya Kapoor · Mon · Wed · Fri from 10 Mar',
+        body: 'Diya Kapoor · Mon · Wed · Fri from Tuesday',
       },
     });
 
@@ -331,7 +331,7 @@ describe('coach notices', () => {
     await settle(sent, 1);
     expect(sent[0]!.message).toMatchObject({
       title: 'Kabir Das left the academy',
-      body: `${batch.name} · last day 14 Mar`,
+      body: `${batch.name} · last day Saturday`,
     });
   });
 
@@ -349,13 +349,13 @@ describe('coach notices', () => {
       .expect(201);
     await settle(sent, 1);
     expect(sent[0]!.message).toMatchObject({
-      title: `${batch.name} on 11 Mar is cancelled`,
+      title: `${batch.name} is cancelled on Wednesday`,
       body: 'Reason: Ground under repair',
       link: '/calendar?date=2026-03-11&view=day',
     });
     await api.delete(`/api/v1/batches/${batch.id}/cancellations/2026-03-11`).expect(204);
     await settle(sent, 2);
-    expect(sent[1]!.message.title).toBe(`${batch.name} on 11 Mar is back on`);
+    expect(sent[1]!.message.title).toBe(`${batch.name} is on again on Wednesday`);
 
     // The coach's own cancellation needs no push to themselves.
     await (
@@ -387,7 +387,7 @@ describe('coach notices', () => {
     await settle(sent, 1);
     expect(sent[0]!.message).toMatchObject({
       title: `Makeup student in ${otherBatch.name}`,
-      body: 'Meera N joins on 12 Mar',
+      body: 'Meera N joins on Thursday',
     });
   });
 
@@ -449,7 +449,7 @@ describe('coach notices', () => {
     await noticeStudentLeft(gone, batch.id, MON);
     expect(sent.map((m) => m.message.body)).toEqual([
       'Reason: not given',
-      `${batch.name} · last day 9 Mar`,
+      `${batch.name} · last day today`,
     ]);
     expect(sent[1]!.message.title).toBe('A student left the academy');
   });

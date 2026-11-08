@@ -132,3 +132,49 @@ const displayFormatter = new Intl.DateTimeFormat('en-IN', {
 export function formatDisplayDate(date: IsoDate): string {
   return displayFormatter.format(toUtc(date));
 }
+
+const WEEKDAY_NAMES = [
+  '',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+];
+const MONTH_SHORT = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
+/**
+ * A date the way people say it in a notification: "today", "tomorrow", "yesterday", a weekday
+ * within the next six days ("Thursday"), otherwise "12 Mar" (with the year if it differs).
+ */
+export function dayPhrase(date: IsoDate, today: IsoDate = todayInAppTz()): string {
+  const d = diffDays(today, date);
+  if (d === 0) return 'today';
+  if (d === 1) return 'tomorrow';
+  if (d === -1) return 'yesterday';
+  if (d > 1 && d < 7) return WEEKDAY_NAMES[isoWeekday(date)]!;
+  const { year, month, day } = dateParts(date);
+  const sameYear = date.slice(0, 4) === today.slice(0, 4);
+  return `${day} ${MONTH_SHORT[month - 1]}${sameYear ? '' : ` ${year}`}`;
+}
+
+/** Like dayPhrase, with "on" where English needs it: "today", "on Thursday", "on 12 Mar". */
+export function onDay(date: IsoDate, today: IsoDate = todayInAppTz()): string {
+  const p = dayPhrase(date, today);
+  return ['today', 'tomorrow', 'yesterday'].includes(p) ? p : `on ${p}`;
+}

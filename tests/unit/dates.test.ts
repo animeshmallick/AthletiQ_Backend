@@ -3,6 +3,7 @@ import {
   addDays,
   addMonthsClamped,
   dateParts,
+  dayPhrase,
   daysInMonth,
   diffDays,
   eachDay,
@@ -15,6 +16,7 @@ import {
   makeDate,
   maxDate,
   minDate,
+  onDay,
   startOfIsoWeek,
   startOfMonth,
   todayInAppTz,
@@ -101,5 +103,27 @@ describe('dates', () => {
 
   it('formats dates for display', () => {
     expect(formatDisplayDate('2026-11-08')).toBe('08 Nov 2026');
+  });
+});
+
+describe('dayPhrase / onDay', () => {
+  const MON = '2026-03-09';
+  it('speaks like a person', () => {
+    expect(dayPhrase(MON, MON)).toBe('today');
+    expect(dayPhrase('2026-03-10', MON)).toBe('tomorrow');
+    expect(dayPhrase('2026-03-08', MON)).toBe('yesterday');
+    expect(dayPhrase('2026-03-12', MON)).toBe('Thursday');
+    expect(dayPhrase('2026-03-15', MON)).toBe('Sunday');
+    expect(dayPhrase('2026-03-16', MON)).toBe('16 Mar');
+    expect(dayPhrase('2026-03-02', MON)).toBe('2 Mar');
+    expect(dayPhrase('2027-01-04', MON)).toBe('4 Jan 2027');
+  });
+
+  it('adds "on" only where needed', () => {
+    expect(onDay(MON, MON)).toBe('today');
+    expect(onDay('2026-03-10', MON)).toBe('tomorrow');
+    expect(onDay('2026-03-08', MON)).toBe('yesterday');
+    expect(onDay('2026-03-12', MON)).toBe('on Thursday');
+    expect(onDay('2026-04-01', MON)).toBe('on 1 Apr');
   });
 });

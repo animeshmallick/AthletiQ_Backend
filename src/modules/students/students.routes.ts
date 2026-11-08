@@ -27,7 +27,7 @@ import {
   users,
   weeklyFeedback,
 } from '../../db/schema/index.js';
-import { isoWeekday, minDate, todayInAppTz } from '../../lib/dates.js';
+import { isoWeekday, minDate, onDay, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok, pageMeta } from '../../lib/http.js';
 import {
@@ -536,7 +536,7 @@ studentsRouter.post('/:id/makeups', async (req, res) => {
     notifyInBackground(() =>
       notifyAdmins({
         title: 'Makeup request',
-        body: `${s.fullName} → ${batch.name} on ${body.date} · requested by ${user.name}`,
+        body: `${s.fullName} → ${batch.name} ${onDay(body.date)} · requested by ${user.name}`,
         link: '/makeups',
         tag: 'makeups',
       }),

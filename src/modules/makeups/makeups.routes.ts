@@ -7,7 +7,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { batches, enrollments, makeupSessions, students, users } from '../../db/schema/index.js';
-import { todayInAppTz } from '../../lib/dates.js';
+import { onDay, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok } from '../../lib/http.js';
 import { parse, zIdParam } from '../../lib/validation.js';
@@ -113,7 +113,7 @@ makeupsRouter.post('/:id/approve', async (req, res) => {
       [m.createdById, batch.coachId].filter((x): x is string => !!x),
       {
         title: 'Makeup approved',
-        body: `${student?.fullName ?? 'Student'} · ${batch.name} on ${m.date}`,
+        body: `${student?.fullName ?? 'Student'} · ${batch.name} ${onDay(m.date)}`,
         link: `/attendance?batch=${batch.id}&date=${m.date}`,
         tag: `makeup-${id}`,
       },
@@ -149,7 +149,7 @@ makeupsRouter.post('/:id/reject', async (req, res) => {
     notifyInBackground(() =>
       notifyUsers([to], {
         title: 'Makeup not approved',
-        body: `${student?.fullName ?? 'Student'} on ${m.date}: ${reason}`,
+        body: `${student?.fullName ?? 'Student'} ${onDay(m.date)}: ${reason}`,
         link: `/students/${m.studentId}`,
         tag: `makeup-${id}`,
       }),

@@ -4,6 +4,7 @@
  */
 import { and, count, eq, isNull } from 'drizzle-orm';
 import { db } from '../../db/client.js';
+import { dayPhrase, onDay } from '../../lib/dates.js';
 import { batches, enrollments, locations, students } from '../../db/schema/index.js';
 import { clockLabel } from '../tasks/tasks.service.js';
 import { notifyUsers } from './push.service.js';
@@ -14,13 +15,6 @@ export const daysLabel = (days: number[]) =>
     .sort((a, b) => a - b)
     .map((d) => DAY[d])
     .join(' · ');
-
-const shortDate = (iso: string) =>
-  new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-IN', {
-    day: 'numeric',
-    month: 'short',
-    timeZone: 'UTC',
-  });
 
 type BatchRow = typeof batches.$inferSelect;
 
@@ -109,7 +103,7 @@ export async function noticeStudentJoined(studentId: string) {
   if (!row) return;
   await notifyUsers([row.coachId], {
     title: `New student in ${row.batchName}`,
-    body: `${row.name} · ${daysLabel(row.days)} from ${shortDate(row.from)}`,
+    body: `${row.name} · ${daysLabel(row.days)} from ${dayPhrase(row.from)}`,
     link: `/students/${studentId}`,
     tag: `student-${studentId}`,
   });
@@ -126,7 +120,7 @@ export async function noticeStudentLeft(studentId: string, batchId: string, left
   if (!b) return;
   await notifyUsers([b.coachId], {
     title: `${await studentName(studentId)} left the academy`,
-    body: `${b.name} · last day ${shortDate(leftOn)}`,
+    body: `${b.name} · last day ${dayPhrase(leftOn)}`,
     link: `/students/${studentId}`,
     tag: `student-${studentId}`,
   });
@@ -146,7 +140,7 @@ export async function noticeStudentMovedOut(
   if (!a || !b || a.coachId === b.coachId) return; // same coach also gets the "joined" notice
   await notifyUsers([a.coachId], {
     title: `${await studentName(studentId)} moved out of ${a.name}`,
-    body: `Now in ${b.name} from ${shortDate(from)}`,
+    body: `Now in ${b.name} from ${dayPhrase(from)}`,
     link: `/batches/${a.id}`,
     tag: `student-${studentId}`,
   });
@@ -165,8 +159,8 @@ export async function noticeSessionCancelled(
   const { batch: b } = row;
   await notifyUsers([b.coachId], {
     title: restored
-      ? `${b.name} on ${shortDate(date)} is back on`
-      : `${b.name} on ${shortDate(date)} is cancelled`,
+      ? `${b.name} is on again ${onDay(date)}`
+      : `${b.name} is cancelled ${onDay(date)}`,
     body: restored
       ? `The session is running again · ${clockLabel(b.startTime)}–${clockLabel(b.endTime)}`
       : `Reason: ${reason ?? 'not given'}`,
@@ -186,7 +180,7 @@ export async function noticeMakeupBooked(
   if (!b || b.coachId === byUserId) return;
   await notifyUsers([b.coachId], {
     title: `Makeup student in ${b.name}`,
-    body: `${await studentName(studentId)} joins on ${shortDate(date)}`,
+    body: `${await studentName(studentId)} joins ${onDay(date)}`,
     link: `/attendance?batch=${b.id}&date=${date}`,
     tag: `makeup-${studentId}-${date}`,
   });
