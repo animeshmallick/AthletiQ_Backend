@@ -22,6 +22,7 @@ import { settingsRouter } from './modules/settings/settings.js';
 import { studentsRouter } from './modules/students/students.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
 import { makeupsRouter } from './modules/makeups/makeups.routes.js';
+import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 
 /** Versioned API. Mounted at /api/v1. */
 export function apiRouter(): Router {
@@ -48,6 +49,7 @@ export function apiRouter(): Router {
   api.use('/finance', financeRouter);
   api.use('/settings', settingsRouter);
   api.use('/me', pushRouter);
+  api.use('/dashboard', dashboardRouter);
 
   // Admin only
   api.use('/registrations', requireAdmin, registrationsRouter);
