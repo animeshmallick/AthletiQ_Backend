@@ -1,0 +1,62 @@
+import { sql } from 'drizzle-orm';
+import { check, date, index, integer, jsonb, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { id, jobRunStatus, timestamps, tz } from './_shared.js';
+import { users } from './users.js';
+
+/** Single-row table (id = 1) with academy details shown on invoices and shared messages. */
+export const academySettings = pgTable(
+  'academy_settings',
+  {
+    id: integer().primaryKey().default(1),
+    name: text().notNull().default('AthletiQ Academy'),
+    legalName: text(),
+    address: text(),
+    phone: text(),
+    email: text(),
+    website: text(),
+    gstin: text(),
+    /** Shown on invoices as a payment instruction, e.g. academy@upi. */
+    upiId: text(),
+    invoiceFooter: text(),
+    ...timestamps,
+  },
+  (t) => [check('academy_settings_singleton_chk', sql`${t.id} = 1`)],
+);
+
+/** Append-only trail of sensitive actions (finance, enrollment, access changes). */
+export const auditLogs = pgTable(
+  'audit_logs',
+  {
+    id: id(),
+    actorId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    action: text().notNull(),
+    entityType: text().notNull(),
+    entityId: uuid(),
+    metadata: jsonb().$type<Record<string, unknown>>(),
+    ipAddress: text(),
+    createdAt: tz().notNull().defaultNow(),
+  },
+  (t) => [
+    index('audit_logs_entity_idx').on(t.entityType, t.entityId),
+    index('audit_logs_actor_idx').on(t.actorId),
+    index('audit_logs_created_idx').on(t.createdAt),
+  ],
+);
+
+/** History of scheduled job executions for observability. */
+export const jobRuns = pgTable(
+  'job_runs',
+  {
+    id: id(),
+    jobName: text().notNull(),
+    /** The business date the run processed (IST). */
+    runDate: date({ mode: 'string' }).notNull(),
+    trigger: text().notNull(),
+    status: jobRunStatus().notNull(),
+    stats: jsonb().$type<Record<string, unknown>>(),
+    error: text(),
+    startedAt: tz().notNull().defaultNow(),
+    finishedAt: tz(),
+  },
+  (t) => [index('job_runs_name_started_idx').on(t.jobName, t.startedAt)],
+);
