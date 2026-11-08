@@ -5,9 +5,10 @@ Production layout:
 ```
  Browser / Android app
         │ HTTPS
-        ├──────────────► AWS Amplify  ── app.example.com   (AthletiQ_Frontend, static React build)
+        ├──────────────► AWS Amplify  ── www.edupilots.in  (AthletiQ_Frontend, static React build)
+        │                                (edupilots.in redirects to www)
         │
-        └──────────────► EC2 (Ubuntu) ── api.example.com
+        └──────────────► EC2 (Ubuntu) ── api.edupilots.in
                            nginx :443 (HTTPS)  →  Docker container "athletiq-api"  127.0.0.1:4000
                                                             │
                                                             └──► Neon Postgres (TLS)
@@ -19,7 +20,13 @@ Production layout:
   container. HTTPS is required: login cookies are `Secure` and phones only allow GPS on HTTPS.
 - **Deploys are manual.** Pushing to GitHub never changes the server; CI only runs checks.
 
-Replace `example.com` with your domain throughout. Commands are for **Ubuntu 24.04 LTS** on EC2.
+| Address                    | Serves                                   |
+| -------------------------- | ---------------------------------------- |
+| `https://www.edupilots.in` | Web app for coaches and admins (Amplify) |
+| `https://edupilots.in`     | Redirects to `www`                       |
+| `https://api.edupilots.in` | Backend API (EC2)                        |
+
+Commands are for **Ubuntu 24.04 LTS** on EC2.
 
 ---
 
@@ -27,14 +34,14 @@ Replace `example.com` with your domain throughout. Commands are for **Ubuntu 24.
 
 You need:
 
-- A domain where you can add DNS records (two subdomains: `api.` and `app.`).
+- Access to the DNS settings of **edupilots.in** at your domain registrar (or Route 53).
 - An AWS account, a GitHub account with access to both repos, and a Neon account.
 - A public Mapbox token (`pk.…`), used by the web app for maps.
 
-> **Use the same parent domain for both apps** (`app.example.com` + `api.example.com`). The login
-> refresh cookie then works as a normal first-party cookie. If you use Amplify's default
-> `*.amplifyapp.com` domain instead, set `COOKIE_CROSS_SITE=true` (step 4). Safari can block
-> cross-site cookies, so a custom domain is strongly recommended.
+> The web app and API share the parent domain **edupilots.in**, so the login cookie works as a
+> normal first-party cookie and `COOKIE_CROSS_SITE` stays `false`. If you ever test from Amplify's
+> default `*.amplifyapp.com` address, add it to `CORS_ORIGINS` and expect Safari to block the
+> login cookie there.
 
 ---
 
@@ -74,14 +81,20 @@ You need:
 
 3. **Elastic IP:** EC2 → Elastic IPs → Allocate → Associate with the instance. This keeps the IP
    fixed across reboots.
-4. **DNS:** add an `A` record for `api.example.com` pointing at the Elastic IP.
+4. **DNS for the API:** at your registrar, add a record for **edupilots.in**:
+
+   | Type | Name / Host | Value             | TTL |
+   | ---- | ----------- | ----------------- | --- |
+   | A    | `api`       | _your Elastic IP_ | 300 |
+
+   Check it resolves before requesting a certificate (step 6): `nslookup api.edupilots.in`.
 
 ---
 
 ## 3. Prepare the server
 
 ```bash
-ssh -i ~/path/to/key.pem ubuntu@api.example.com
+ssh -i ~/path/to/key.pem ubuntu@api.edupilots.in
 
 # System updates + basics
 sudo apt update && sudo apt -y upgrade
@@ -153,7 +166,7 @@ LOG_LEVEL=info
 TRUST_PROXY=1
 
 # Web app origin(s) allowed to call the API, comma-separated
-CORS_ORIGINS=https://app.example.com
+CORS_ORIGINS=https://www.edupilots.in
 
 DATABASE_URL=postgresql://…-pooler….neon.tech/athletiq?sslmode=verify-full
 DATABASE_URL_UNPOOLED=postgresql://….neon.tech/athletiq?sslmode=verify-full
@@ -163,14 +176,14 @@ JWT_ACCESS_SECRET=<random secret #1>
 ACCESS_TOKEN_TTL_MINUTES=15
 REFRESH_TOKEN_TTL_DAYS=30
 COOKIE_SECURE=true
-# true ONLY if the web app is not under the same parent domain (e.g. *.amplifyapp.com)
+# false: www.edupilots.in and api.edupilots.in share the parent domain
 COOKIE_CROSS_SITE=false
 COOKIE_DOMAIN=
 
 SHARE_LINK_SECRET=<random secret #2>
 SHARE_LINK_TTL_DAYS=30
-PUBLIC_API_URL=https://api.example.com
-APP_URL=https://app.example.com
+PUBLIC_API_URL=https://api.edupilots.in
+APP_URL=https://www.edupilots.in
 
 SCHEDULER_ENABLED=true
 # 00:00 IST daily: issues each student's prepaid invoice on the day their month starts
@@ -262,7 +275,7 @@ Create `/etc/nginx/sites-available/athletiq-api` with `sudo nano`:
 ```nginx
 server {
     listen 80;
-    server_name api.example.com;
+    server_name api.edupilots.in;
 
     client_max_body_size 2m;
 
@@ -286,15 +299,15 @@ sudo nginx -t && sudo systemctl reload nginx
 
 # Free TLS certificate with auto-renewal, plus HTTP→HTTPS redirect
 sudo apt -y install certbot python3-certbot-nginx
-sudo certbot --nginx -d api.example.com --redirect -m you@yourdomain.com --agree-tos -n
+sudo certbot --nginx -d api.edupilots.in --redirect -m <your-email> --agree-tos -n
 sudo certbot renew --dry-run
 ```
 
 Verify from your laptop:
 
 ```bash
-curl -s https://api.example.com/health   # {"status":"ok"}
-curl -s https://api.example.com/ready    # {"status":"ready","database":true}
+curl -s https://api.edupilots.in/health   # {"status":"ok"}
+curl -s https://api.edupilots.in/ready    # {"status":"ready","database":true}
 ```
 
 ---
@@ -305,10 +318,10 @@ curl -s https://api.example.com/ready    # {"status":"ready","database":true}
    Amplify detects `amplify.yml`; keep it.
 2. **Environment variables** (App settings → Environment variables):
 
-   | Variable            | Value                     |
-   | ------------------- | ------------------------- |
-   | `VITE_API_URL`      | `https://api.example.com` |
-   | `VITE_MAPBOX_TOKEN` | your `pk.…` token         |
+   | Variable            | Value                      |
+   | ------------------- | -------------------------- |
+   | `VITE_API_URL`      | `https://api.edupilots.in` |
+   | `VITE_MAPBOX_TOKEN` | your `pk.…` token          |
 
    These are baked in at build time, so **redeploy after changing them**.
 
@@ -319,11 +332,19 @@ curl -s https://api.example.com/ready    # {"status":"ready","database":true}
    | -------------------------------------------------------------------------------------------------------- | ------------- | ------------- |
    | `</^[^.]+$\|\.(?!(css\|gif\|ico\|jpg\|js\|png\|txt\|svg\|woff\|woff2\|ttf\|map\|json\|webp)$)([^.]+$)/>` | `/index.html` | 200 (Rewrite) |
 
-4. **Custom domain** (Hosting → Custom domains): add `app.example.com`. Amplify issues the
-   certificate and shows the DNS records to create.
+4. **Custom domain** (Hosting → Custom domains → Add domain): enter **edupilots.in**, then:
+   - map the subdomain **`www`** to the `mainline` branch;
+   - keep the root **`edupilots.in`** entry and set it to **redirect to `https://www.edupilots.in`**.
+
+   Amplify issues the certificate and lists the DNS records to add at your registrar: a `CNAME` for
+   certificate validation, a `CNAME` for `www` pointing to the Amplify domain, and an
+   `ANAME`/`ALIAS` (or `A`) record for the root. If your registrar can't create `ALIAS`/`ANAME`
+   records for the root, use its URL-forwarding feature to redirect `edupilots.in` →
+   `https://www.edupilots.in`, or move DNS to Route 53. Validation usually takes 15–30 minutes.
+
 5. Security and caching headers come from `customHttp.yml` in the repo.
 6. **Mapbox:** in the Mapbox dashboard, restrict the token's _URL restrictions_ to
-   `https://app.example.com`.
+   `https://www.edupilots.in` (and `http://localhost:5173` if you use the same token for development).
 
 By default every push to `mainline` builds the frontend. To release it manually too, turn off _Auto
 build_ for the branch (App settings → Branch settings) and use **Redeploy this version** when ready.
@@ -332,7 +353,7 @@ build_ for the branch (App settings → Branch settings) and use **Redeploy this
 
 ## 8. After the first deploy
 
-1. Open `https://app.example.com`, sign in with the seed admin, and **change the password**
+1. Open `https://www.edupilots.in`, sign in with the seed admin, and **change the password**
    (avatar menu → Account).
 2. **Settings:** fill in the academy name, address, phone, GSTIN (optional) and UPI ID. These appear
    on invoices and in WhatsApp messages.
@@ -430,19 +451,19 @@ df -h /                                     # check free disk space
 
 ## 10. Operating it
 
-| Task                | How                                                                                          |
-| ------------------- | -------------------------------------------------------------------------------------------- |
-| Status              | `docker ps` (look for `(healthy)`)                                                           |
-| Live logs           | `docker logs -f athletiq-api` (JSON lines; rotated 5 × 20 MB)                                |
-| Resource usage      | `docker stats athletiq-api`                                                                  |
-| Restart (same env)  | `docker restart athletiq-api`                                                                |
-| Shell inside        | `docker exec -it athletiq-api sh`                                                            |
-| Billing job history | Web app → **Settings → Automatic billing** (or `GET /api/v1/admin/jobs/runs`)                |
-| Run billing now     | Settings → **Run now**, or `docker exec athletiq-api node dist/jobs/run-invoice-job.js`      |
-| Who changed what    | Web app → **Audit log**                                                                      |
-| Uptime checks       | Point a monitor (e.g. UptimeRobot, Route 53 health check) at `https://api.example.com/ready` |
-| Database backups    | Neon point-in-time restore; create a branch before risky changes                             |
-| OS patches          | Automatic (unattended-upgrades). After `sudo reboot`, Docker restarts the container itself   |
+| Task                | How                                                                                           |
+| ------------------- | --------------------------------------------------------------------------------------------- |
+| Status              | `docker ps` (look for `(healthy)`)                                                            |
+| Live logs           | `docker logs -f athletiq-api` (JSON lines; rotated 5 × 20 MB)                                 |
+| Resource usage      | `docker stats athletiq-api`                                                                   |
+| Restart (same env)  | `docker restart athletiq-api`                                                                 |
+| Shell inside        | `docker exec -it athletiq-api sh`                                                             |
+| Billing job history | Web app → **Settings → Automatic billing** (or `GET /api/v1/admin/jobs/runs`)                 |
+| Run billing now     | Settings → **Run now**, or `docker exec athletiq-api node dist/jobs/run-invoice-job.js`       |
+| Who changed what    | Web app → **Audit log**                                                                       |
+| Uptime checks       | Point a monitor (e.g. UptimeRobot, Route 53 health check) at `https://api.edupilots.in/ready` |
+| Database backups    | Neon point-in-time restore; create a branch before risky changes                              |
+| OS patches          | Automatic (unattended-upgrades). After `sudo reboot`, Docker restarts the container itself    |
 
 **Billing job:** it runs inside the container at 00:00 IST, guarded by a Postgres advisory lock. It
 also catches up 15 seconds after each start, so a server that was down at midnight bills the missed
