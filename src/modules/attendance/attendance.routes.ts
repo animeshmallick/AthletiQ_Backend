@@ -194,14 +194,16 @@ attendanceRouter.get('/session', async (req, res) => {
     });
   }
 
-  const needsCheckIn = user.role === 'coach' && !(await hasCheckedIn(user.id, batchId, date));
+  const visit = user.role === 'coach' ? await coachVisit(user.id, batchId, date) : null;
+  const needsCheckIn = !!visit && !visit.checkedIn;
+  const checkedOut = !!visit?.checkedOut;
   const edit = canEdit(user.role, date);
   ok(res, {
     batch: { id: batch.id, name: batch.name, startTime: batch.startTime, endTime: batch.endTime },
     date,
     isScheduledDay: batch.weekdays.includes(isoWeekday(date)),
     cancelled: cancellation,
-    editable: !cancellation && edit.allowed && !needsCheckIn,
+    editable: !cancellation && edit.allowed && !needsCheckIn && !checkedOut,
     /** Coaches mark attendance only for sessions they checked in to. */
     needsCheckIn,
     lockedReason: cancellation
@@ -210,23 +212,28 @@ attendanceRouter.get('/session', async (req, res) => {
         ? edit.reason
         : needsCheckIn
           ? 'Check in to this session to mark attendance.'
-          : null,
+          : checkedOut
+            ? CHECKED_OUT_LOCK
+            : null,
     students: rows,
     summary: summarize(rows.map((r) => r.status)),
   });
 });
 
-/** Did this coach check in (GPS) for the batch's session on that date? */
-async function hasCheckedIn(coachId: string, batchId: string, date: IsoDate) {
+const CHECKED_OUT_LOCK =
+  'Attendance is locked after you check out of this session. Ask an admin to make changes.';
+
+/** Has this coach checked in (GPS) to the batch's session that day, and checked out since? */
+async function coachVisit(coachId: string, batchId: string, date: IsoDate) {
   const row = await db.query.coachSessions.findFirst({
-    columns: { id: true },
+    columns: { id: true, checkOutAt: true },
     where: and(
       eq(coachSessions.coachId, coachId),
       eq(coachSessions.batchId, batchId),
       eq(coachSessions.date, date),
     ),
   });
-  return !!row;
+  return { checkedIn: !!row, checkedOut: !!row?.checkOutAt };
 }
 
 function canEdit(role: 'admin' | 'coach', date: string): { allowed: boolean; reason?: string } {
@@ -263,8 +270,13 @@ attendanceRouter.put('/session', async (req, res) => {
   if (!batch.weekdays.includes(isoWeekday(body.date))) {
     throw AppError.unprocessable(`${batch.name} does not run on this day`);
   }
-  if (user.role === 'coach' && !(await hasCheckedIn(user.id, body.batchId, body.date))) {
-    throw AppError.unprocessable('Check in to this session before marking attendance.');
+  if (user.role === 'coach') {
+    const visit = await coachVisit(user.id, body.batchId, body.date);
+    if (!visit.checkedIn) {
+      throw AppError.unprocessable('Check in to this session before marking attendance.');
+    }
+    // Coaches lose edit rights once they check out; admins can still correct the record.
+    if (visit.checkedOut) throw AppError.unprocessable(CHECKED_OUT_LOCK);
   }
 
   const roster = await expectedRoster(body.batchId, body.date);

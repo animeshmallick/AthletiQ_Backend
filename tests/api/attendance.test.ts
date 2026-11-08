@@ -1,4 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
+import { and, eq } from 'drizzle-orm';
+import { db } from '../../src/db/client';
+import { coachSessions } from '../../src/db/schema';
 import { as, makeAcademy, makeBatch, makeStudent, setToday, checkIn } from '../helpers/factories';
 
 // 2026-03-09 is a Monday. Batches run Mon–Sat; students train Mon/Wed/Fri by default.
@@ -19,6 +22,41 @@ async function setup() {
 }
 
 describe('student attendance', () => {
+  it('locks attendance for the coach after check-out; admins can still correct it', async () => {
+    setToday(MON);
+    const { admin, coach, batch, s1 } = await setup();
+    await checkIn(coach.id, batch.id, MON);
+    const api = await as(coach);
+    const mark = (status: string) => ({
+      batchId: batch.id,
+      date: MON,
+      records: [{ studentId: s1.id, status }],
+    });
+    await api.put('/api/v1/attendance/session', mark('present')).expect(200);
+
+    await db
+      .update(coachSessions)
+      .set({ checkOutAt: new Date(`${MON}T02:35:00Z`) })
+      .where(and(eq(coachSessions.coachId, coach.id), eq(coachSessions.date, MON)));
+
+    const sheet = await api
+      .get(`/api/v1/attendance/session?batchId=${batch.id}&date=${MON}`)
+      .expect(200);
+    expect(sheet.body.data).toMatchObject({
+      editable: false,
+      lockedReason: expect.stringMatching(/locked after you check out/),
+    });
+    const refused = await api.put('/api/v1/attendance/session', mark('absent')).expect(422);
+    expect(refused.body.error.message).toMatch(/Ask an admin/);
+
+    const adminApi = await as(admin);
+    const adminSheet = await adminApi
+      .get(`/api/v1/attendance/session?batchId=${batch.id}&date=${MON}`)
+      .expect(200);
+    expect(adminSheet.body.data.editable).toBe(true);
+    await adminApi.put('/api/v1/attendance/session', mark('absent')).expect(200);
+  });
+
   it('builds the session sheet and saves marks idempotently', async () => {
     setToday(MON);
     const { coach, batch, s1, s2 } = await setup();
