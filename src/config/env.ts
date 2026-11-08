@@ -48,6 +48,16 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => (v ? v : undefined)),
+  /** Sentry project DSN for error reporting. Unset = reporting disabled. */
+  SENTRY_DSN: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v : undefined)),
+  /** Defaults to NODE_ENV. */
+  SENTRY_ENVIRONMENT: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v : undefined)),
   /** When coaches get their "sessions today" push (IST). */
   REMINDER_CRON: z.string().default('0 7 * * *'),
 });
