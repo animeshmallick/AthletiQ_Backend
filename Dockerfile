@@ -13,11 +13,18 @@ RUN npm run build && npm prune --omit=dev
 FROM node:26-bookworm-slim AS runtime
 # Commit the image was built from: docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) …
 ARG GIT_SHA=unknown
+ARG GIT_COMMIT_MESSAGE=
+ARG GIT_COMMIT_TIME=
+ARG BUILD_TIME=
 LABEL org.opencontainers.image.title="athletiq-api" \
       org.opencontainers.image.source="https://github.com/animeshmallick/AthletiQ_Backend" \
       org.opencontainers.image.revision=$GIT_SHA
 ENV NODE_ENV=production \
-    PORT=4000
+    PORT=4000 \
+    GIT_SHA=$GIT_SHA \
+    GIT_COMMIT_MESSAGE=$GIT_COMMIT_MESSAGE \
+    GIT_COMMIT_TIME=$GIT_COMMIT_TIME \
+    BUILD_TIME=$BUILD_TIME
 WORKDIR /app
 
 COPY --from=build --chown=node:node /app/node_modules ./node_modules

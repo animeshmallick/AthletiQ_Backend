@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
 import { env } from './config/env.js';
 import { checkDatabase } from './db/client.js';
+import { buildInfo } from './lib/build-info.js';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { apiLimiter } from './middleware/rate-limit.js';
@@ -69,13 +70,17 @@ export function createApp(): Express {
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
 
-  // Liveness: process is up. Readiness: dependencies reachable (use for load balancer checks).
+  // Liveness: process is up. Readiness: dependencies reachable (use for load balancer checks),
+  // plus what is deployed: commit, deploy time, rollback flag and uptime.
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
   });
   app.get('/ready', async (_req, res) => {
     const dbOk = await checkDatabase();
-    res.status(dbOk ? 200 : 503).json({ status: dbOk ? 'ready' : 'degraded', database: dbOk });
+    res
+      .status(dbOk ? 200 : 503)
+      .set('Cache-Control', 'no-store')
+      .json({ status: dbOk ? 'ready' : 'degraded', database: dbOk, ...buildInfo() });
   });
 
   app.use('/api/v1', apiLimiter, apiRouter());

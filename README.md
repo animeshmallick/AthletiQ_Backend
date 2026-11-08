@@ -138,7 +138,9 @@ tests/
 The API runs on **EC2 as a Docker container** (built from `Dockerfile`) behind nginx (HTTPS), and the web
 app runs on **AWS Amplify**. The full step-by-step guide is in **[deploy.md](deploy.md)**.
 
-- Deploys are **manual**: CI only runs checks. Each release is built on the server, tagged with its git
-  commit, and swapped in (deploy.md §9). Rolling back is just running the previous tag.
+- Deploys are **automatic**: when CI passes on `mainline`, the _Deploy_ workflow SSHes into the server
+  and runs `scripts/deploy.sh`, which builds the image (tagged with the git commit), runs migrations,
+  swaps the container and rolls back by itself if the new version isn't healthy (deploy.md §9).
+  The same script can be run by hand on the server.
 - One-off tasks use the same image, for example
   `docker run --rm --env-file .env athletiq-api:<tag> node dist/db/migrate.js`.

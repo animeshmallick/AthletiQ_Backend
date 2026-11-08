@@ -6,7 +6,13 @@ describe('app shell', () => {
   it('reports liveness and readiness', async () => {
     await request(getApp()).get('/health').expect(200, { status: 'ok' });
     const ready = await request(getApp()).get('/ready').expect(200);
-    expect(ready.body).toEqual({ status: 'ready', database: true });
+    expect(ready.body).toMatchObject({
+      status: 'ready',
+      database: true,
+      version: { commit: null },
+      deployment: { rollback: false },
+      server: { uptimeSeconds: expect.any(Number) },
+    });
   });
 
   it('sets a request id and echoes a valid incoming one', async () => {

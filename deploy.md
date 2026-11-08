@@ -18,7 +18,9 @@ Production layout:
   if it crashes or the server reboots, and rotates its logs, so no PM2 is needed.
 - **nginx** on the host terminates HTTPS with a free Let's Encrypt certificate and forwards to the
   container. HTTPS is required: login cookies are `Secure` and phones only allow GPS on HTTPS.
-- **Deploys are manual.** Pushing to GitHub never changes the server; CI only runs checks.
+- **Deploys are automatic.** When CI passes on `mainline`, GitHub Actions SSHes into the server and
+  runs `scripts/deploy.sh` (build → migrate → swap → health check → automatic rollback). You can
+  also deploy by hand with the same script (section 9).
 
 | Address                    | Serves                                   |
 | -------------------------- | ---------------------------------------- |
@@ -407,10 +409,184 @@ build_ for the branch (App settings → Branch settings) and use **Redeploy this
 
 ---
 
-## 9. Manual deploy (every update)
+## 9. Deploying updates
 
-Deploy when you choose to, ideally after the GitHub Actions checks are green for the commit. SSH into
-the server, then:
+### 9.1 Automatic deploys (GitHub Actions)
+
+Every push to `mainline` runs **CI** (format, lint, typecheck, tests, Docker build). Only when it
+passes does the **Deploy** workflow (`.github/workflows/deploy.yml`) SSH into the server, check out
+that exact commit and run `scripts/deploy.sh`. That script:
+
+1. builds the new image while the old container keeps serving,
+2. applies database migrations,
+3. replaces the container and waits up to 60 s for `/ready`,
+4. **rolls back to the previous version by itself** if the new one doesn't become ready (the run
+   then fails and GitHub emails you),
+5. keeps the last 5 image tags for manual rollback and cleans older ones.
+
+Deploys run one at a time and are never cancelled midway. A failed CI run never deploys.
+
+#### One-time setup
+
+Two SSH connections are involved, each with its own key:
+
+```
+ GitHub Actions ──(1) logs in to EC2──────► EC2 server
+                                              │
+ GitHub repo ◄──(2) server pulls the code─────┘
+```
+
+| Connection                        | Key                                                               | Set up in               |
+| --------------------------------- | ----------------------------------------------------------------- | ----------------------- |
+| (2) Server pulls code from GitHub | **Deploy key** (private on EC2, public in GitHub → _Deploy keys_) | Step 3 → _Get the code_ |
+| (1) GitHub Actions logs in to EC2 | **Actions key** (private in a GitHub secret, public on EC2)       | Steps A–F below         |
+
+##### A. Create a key for GitHub Actions (on your own computer)
+
+Windows PowerShell (macOS/Linux: same command with `-N ""`):
+
+```powershell
+cd $HOME\Downloads
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f athletiq_actions -N '""'
+```
+
+| File                   | What it is                 | Where it goes                          |
+| ---------------------- | -------------------------- | -------------------------------------- |
+| `athletiq_actions`     | **private** key (secret)   | GitHub secret `EC2_SSH_KEY`            |
+| `athletiq_actions.pub` | **public** key (shareable) | `~/.ssh/authorized_keys` on the server |
+
+- No passphrase, since GitHub can't type one.
+- Use a **new** key, not your `.pem` or the deploy key, so GitHub's access can be revoked on its own.
+
+##### B. Let that key log in to the server
+
+Show the public key and copy the whole line (`ssh-ed25519 AAAA… github-actions-deploy`):
+
+```powershell
+Get-Content $HOME\Downloads\athletiq_actions.pub
+```
+
+SSH into the server as usual, then **append** it (`>>`, never `>`, which would erase your own key and
+lock you out):
+
+```bash
+echo 'ssh-ed25519 AAAA...paste-the-whole-line... github-actions-deploy' >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+Check from your computer. It should print `it works`:
+
+```powershell
+ssh -i $HOME\Downloads\athletiq_actions ec2-user@api.edupilots.in "echo it works"
+```
+
+##### C. Get the server's fingerprint (known hosts)
+
+GitHub checks the server's identity against this fingerprint, so it can't be tricked into talking to a fake server.
+Either:
+
+```powershell
+# Option A (simple), on your computer: copy the line that is not a # comment
+ssh-keyscan -t ed25519 api.edupilots.in
+```
+
+```bash
+# Option B (most secure), on the server itself
+echo "api.edupilots.in $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
+```
+
+Both give one line like `api.edupilots.in ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA…`.
+
+##### D. Add the secrets on GitHub
+
+1. **AthletiQ_Backend → Settings → Environments → New environment**, name it exactly
+   **`production`** → _Configure environment_.
+2. Under **Environment secrets → Add environment secret**, add:
+
+   | Secret            | Value                                                                                                                      |
+   | ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+   | `EC2_SSH_KEY`     | The whole private key file, including the `-----BEGIN/END OPENSSH PRIVATE KEY-----` lines (copy it with the command below) |
+   | `EC2_KNOWN_HOSTS` | The line from step C                                                                                                       |
+
+   ```powershell
+   Get-Content $HOME\Downloads\athletiq_actions -Raw | Set-Clipboard   # copies the private key
+   ```
+
+3. Optional, same page:
+   - **Required reviewers**: add yourself to approve each deploy with a click. Leave it off for fully
+     automatic deploys.
+   - **Deployment branches**: _Selected branches_ → `mainline`.
+   - Environment variables `EC2_HOST` / `EC2_USER` are only needed if they differ from
+     `api.edupilots.in` / `ec2-user`.
+
+##### E. Open SSH (port 22) in the security group
+
+GitHub's runners connect from many changing IP addresses, so a "My IP" rule won't work.
+
+1. **AWS Console → EC2 → Instances →** your instance **→ Security** tab **→** the security group link.
+2. **Edit inbound rules** → the **SSH / 22** rule → **Source: Anywhere-IPv4 (`0.0.0.0/0`)** →
+   **Save rules**.
+
+This is safe because Amazon Linux only accepts key logins, so passwords can't be guessed. Confirm on the server:
+
+```bash
+sudo sshd -T | grep -i passwordauthentication     # must print: passwordauthentication no
+```
+
+Bots will still try to connect and fill the logs with failed logins; that's harmless.
+
+##### F. Delete the private key from your computer
+
+It's stored in GitHub now:
+
+```powershell
+Remove-Item $HOME\Downloads\athletiq_actions, $HOME\Downloads\athletiq_actions.pub
+```
+
+To revoke GitHub's access later, delete the `github-actions-deploy` line from
+`~/.ssh/authorized_keys` on the server.
+
+##### G. First deploy and checking it
+
+1. Push to `mainline`. **GitHub → AthletiQ_Backend → Actions** shows **CI** first (3–5 min).
+2. When CI is green, **Deploy** starts by itself. Its log shows `building image…`,
+   `applying database migrations`, `switching container…`, `healthy`, `done`.
+3. The first build on a t3.micro takes 5–10 minutes. Later builds reuse Docker's cache and are faster.
+4. Open **https://api.edupilots.in/ready**: `version.commit` should be the new commit and
+   `deployment.rollback` should be `false`.
+
+From then on every push to `mainline` deploys itself. To redeploy without a push, use **Actions → Deploy →
+Run workflow** (branch `mainline`).
+
+##### If the Deploy workflow fails
+
+| Error in the Deploy log                           | Fix                                                                                           |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `Set the EC2_SSH_KEY and EC2_KNOWN_HOSTS secrets` | Secrets missing, or not in an environment named exactly `production` (step D)                 |
+| `Permission denied (publickey)`                   | Step B not done, or the private key was pasted without its BEGIN/END lines                    |
+| `Host key verification failed`                    | `EC2_KNOWN_HOSTS` is wrong or the server was replaced; redo step C                            |
+| `Connection timed out`                            | Port 22 isn't open to `0.0.0.0/0` (step E)                                                    |
+| `.env not found` / `No such file or directory`    | The repo on the server must be at `~/apps/athletiq-api` with `.env` inside it                 |
+| `commit is not on mainline`                       | The manual run was started from another branch; pick `mainline`                               |
+| `another deploy is running`                       | A manual deploy was in progress on the server; re-run when it finishes                        |
+| `new version did not become ready`                | The script already restored the previous version (site stays up); the log shows why it failed |
+| Deploy didn't run at all                          | CI failed, or a newer push cancelled it; the newer push deploys once its CI passes            |
+
+**What still needs you:** changes to `.env` (edit it on the server, then run the script again or
+recreate the container as below), and anything in sections 2–6 (nginx, certificates, swap).
+
+### 9.2 Manual deploy
+
+Same thing by hand, e.g. if GitHub Actions is down. SSH into the server, then:
+
+```bash
+cd ~/apps/athletiq-api
+git fetch --prune origin && git checkout -q --detach origin/mainline
+bash scripts/deploy.sh
+```
+
+<details>
+<summary>What the script does, step by step (if you ever need to do it without the script)</summary>
 
 ```bash
 cd ~/apps/athletiq-api
@@ -446,7 +622,10 @@ docker ps --filter name=athletiq-api        # "(healthy)" after ~20 s
 docker logs --tail 50 athletiq-api
 ```
 
-Step 4 causes a few seconds of downtime, so prefer deploying outside training hours.
+</details>
+
+Swapping the container causes a few seconds of downtime. Pushes to `mainline` deploy right away, so
+prefer merging outside training hours.
 
 **Only changed `.env`?** Recreate the container (step 4) with the current tag; a plain
 `docker restart` does **not** re-read `.env`:
@@ -462,16 +641,55 @@ TAG=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revisi
 docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' athletiq-api
 ```
 
+### What's running? (`GET /ready`)
+
+`https://api.edupilots.in/ready` shows the live version and how it got there:
+
+```json
+{
+  "status": "ready",
+  "database": true,
+  "version": {
+    "commit": "a1b2c3d",
+    "commitMessage": "Show deployment info on /ready",
+    "committedAt": "2026-11-08T18:40:12+05:30",
+    "builtAt": "2026-11-08T13:12:05Z"
+  },
+  "deployment": {
+    "deployedAt": "2026-11-08T13:14:40Z",
+    "kind": "deploy",
+    "rollback": false,
+    "previousVersion": "f770048"
+  },
+  "server": {
+    "startedAt": "2026-11-08T13:14:41.120Z",
+    "uptimeSeconds": 5400,
+    "uptime": "1h 30m",
+    "node": "v26.13.0",
+    "environment": "production",
+    "memoryMb": 142
+  }
+}
+```
+
+`deployment.kind` is `deploy` (newer commit), `redeploy` (same commit again) or `rollback` (an
+older commit, or the script's automatic rollback after a failed health check); `rollback` is then
+`true`. Containers started by hand with `docker run` show `null` for the deployment fields.
+
 ### Rolling back
 
-Every build stays on the server under its commit tag:
+Run the script with an older commit. It reuses Docker's build cache, and `/ready` reports
+`"rollback": true`:
 
 ```bash
-docker images athletiq-api                  # pick the previous tag, e.g. f770048
-TAG=f770048
-docker stop athletiq-api && docker rm athletiq-api
-# …then the "docker run -d …" command from step 4
+cd ~/apps/athletiq-api
+docker images athletiq-api                  # tags = commits, e.g. f770048
+git checkout -q --detach f770048
+bash scripts/deploy.sh
 ```
+
+The next push to `mainline` deploys normally again. To stay on the old version, revert the bad
+commit on GitHub (`git revert`), so the automatic deploy ships the revert.
 
 Migrations only move forward. If a release changed the database, either fix forward or restore a
 Neon branch to a point in time.
@@ -530,7 +748,7 @@ billing lock keeps the job single-run.
 | `/ready` says `"database": false`                        | Neon URL/password wrong, or the project is suspended. Check `DATABASE_URL`.                                                                 |
 | Migrations fail                                          | They need the **direct** URL; check `DATABASE_URL_UNPOOLED`.                                                                                |
 | Rate-limit errors for every user                         | `TRUST_PROXY` isn't `1` behind nginx, so all requests appear to come from one IP.                                                           |
-| Disk full                                                | Clean old images/cache (section 9 → Cleaning up).                                                                                           |
+| Disk full                                                | Clean old images/cache (section 9 → Cleaning up old images).                                                                                |
 | Deep links 404 on the web app                            | Add the Amplify SPA rewrite (step 7.3).                                                                                                     |
 | Maps don't load                                          | `VITE_MAPBOX_TOKEN` missing, or the token's URL restrictions don't include your domain; redeploy after fixing.                              |
 | `sudo: apt: command not found`                           | You're on Amazon Linux: use `dnf` as in this guide.                                                                                         |
