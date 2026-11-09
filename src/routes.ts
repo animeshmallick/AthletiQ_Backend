@@ -24,6 +24,7 @@ import { usersRouter } from './modules/users/users.routes.js';
 import { makeupsRouter } from './modules/makeups/makeups.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { reportsRouter } from './modules/reports/reports.routes.js';
+import { fundsRouter } from './modules/funds/funds.routes.js';
 
 /** Versioned API. Mounted at /api/v1. */
 export function apiRouter(): Router {
@@ -48,6 +49,7 @@ export function apiRouter(): Router {
   api.use('/feedback', feedbackRouter);
   api.use('/invoices', invoicesRouter);
   api.use('/finance', financeRouter);
+  api.use('/funds', fundsRouter);
   api.use('/settings', settingsRouter);
   api.use('/me', pushRouter);
   api.use('/dashboard', dashboardRouter);

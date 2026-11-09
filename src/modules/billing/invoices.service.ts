@@ -5,6 +5,7 @@ import { formatDisplayDate, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { formatInr } from '../../lib/money.js';
 import { studentScope } from '../access/access.js';
+import { paymentShares } from '../funds/ledger.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { getAcademySettings } from '../settings/settings.js';
 import type { InvoicePdfData } from './invoice-pdf.js';
@@ -65,11 +66,18 @@ export async function getInvoiceForUser(user: AuthUser, invoiceId: string) {
     .where(eq(payments.invoiceId, invoiceId))
     .orderBy(desc(payments.createdAt));
 
+  // Where the fee went. Coaches see only their own share.
+  const completed = history.find((p) => p.status === 'completed');
+  const split = completed
+    ? await paymentShares(completed.id, user.role === 'admin' ? undefined : user.id)
+    : [];
+
   return {
     ...row.invoice,
     displayStatus: displayStatus(row.invoice.status, row.invoice.dueDate),
     student: row.student,
     payments: history,
+    split,
   };
 }
 

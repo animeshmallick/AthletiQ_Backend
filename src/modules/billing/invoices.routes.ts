@@ -28,6 +28,8 @@ import {
 } from './invoices.service.js';
 import { activeAdminIds, notifyInBackground, notifyUsers } from '../push/push.service.js';
 import { formatInr } from '../../lib/money.js';
+import { postFeeSplit, reverseFeeSplit } from '../funds/ledger.js';
+import { noticeFeeShares, noticeSharesReversed } from '../funds/notices.js';
 
 export const invoicesRouter = Router();
 
@@ -145,9 +147,14 @@ const PaymentBody = z.object({
   reference: zOptionalText(120),
   paidOn: zIsoDate,
   note: zOptionalText(500),
+  /** Coaches only: the money is with them (default) or went straight to the academy's account. */
+  heldBy: z.enum(['collector', 'academy']).default('collector'),
 });
 
-/** Coaches and admins can mark an invoice as paid (full amount). */
+/**
+ * Coaches and admins can mark an invoice as paid (full amount). The fee is distributed by the
+ * plan's split in the same transaction.
+ */
 invoicesRouter.post('/:id/payments', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(PaymentBody, req.body);
@@ -167,14 +174,27 @@ invoicesRouter.post('/:id/payments', async (req, res) => {
           : `This invoice is ${locked?.status}`,
       );
     }
-    await tx.insert(payments).values({
-      invoiceId: id,
+    const [payment] = await tx
+      .insert(payments)
+      .values({
+        invoiceId: id,
+        amount: locked.totalAmount,
+        mode: body.mode,
+        reference: body.reference,
+        paidOn: body.paidOn,
+        note: body.note,
+        recordedById: user.id,
+      })
+      .returning();
+    await postFeeSplit(tx, {
+      paymentId: payment!.id,
       amount: locked.totalAmount,
-      mode: body.mode,
-      reference: body.reference,
       paidOn: body.paidOn,
-      note: body.note,
-      recordedById: user.id,
+      title: `Fee · ${locked.number} · ${inv.student.fullName}`,
+      feePlanId: locked.feePlanId,
+      batchCoachId: locked.coachId,
+      collector: user,
+      heldBy: body.heldBy,
     });
     await tx
       .update(invoices)
@@ -193,6 +213,9 @@ invoicesRouter.post('/:id/payments', async (req, res) => {
   });
 
   const paid = await getInvoiceForUser(user, id);
+  const completed = paid.payments.find((p) => p.status === 'completed');
+  if (completed)
+    noticeFeeShares(completed.id, user, paid.student.fullName, body.heldBy === 'academy');
   notifyInBackground(async () => {
     const admins = (await activeAdminIds()).filter((a) => a !== user.id);
     await notifyUsers(admins, {
@@ -242,6 +265,12 @@ for (const action of ['revert', 'refund'] as const) {
         .update(invoices)
         .set(action === 'revert' ? { status: 'due', paidAt: null } : { status: 'refunded' })
         .where(eq(invoices.id, id));
+      await reverseFeeSplit(
+        tx,
+        paymentId,
+        user.id,
+        `Payment ${action === 'revert' ? 'reverted' : 'refunded'}: ${reason}`,
+      );
       await audit(
         {
           ...auditCtx(req),
@@ -254,6 +283,7 @@ for (const action of ['revert', 'refund'] as const) {
       );
     });
 
+    noticeSharesReversed(paymentId, user, action === 'revert' ? 'reverted' : 'refunded');
     ok(res, await getInvoiceForUser(user, id));
   });
 }

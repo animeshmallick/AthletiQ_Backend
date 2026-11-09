@@ -12,6 +12,7 @@ import {
   sendWeeklyFeesSummary,
 } from './alerts.js';
 import { sendSessionReminders } from './session-reminders.js';
+import { sendMoneyReminders } from '../modules/funds/notices.js';
 
 const tasks: ScheduledTask[] = [];
 
@@ -76,6 +77,11 @@ export function startScheduler(): void {
     cron.schedule('0 10 * * *', () => runSafely('Overdue notices', () => sendOverdueNotices()), {
       timezone: APP_TIMEZONE,
       name: 'overdue-notices',
+      noOverlap: true,
+    }),
+    cron.schedule('30 9 * * 1', () => runSafely('Money reminders', () => sendMoneyReminders()), {
+      timezone: APP_TIMEZONE,
+      name: 'money-reminders',
       noOverlap: true,
     }),
     cron.schedule('0 9 * * 1', () => runSafely('Weekly fees', () => sendWeeklyFeesSummary()), {

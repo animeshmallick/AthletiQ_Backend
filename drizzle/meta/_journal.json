@@ -43,6 +43,13 @@
       "when": 1794174948894,
       "tag": "0005_reset_payments",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794204814225,
+      "tag": "0006_funds",
+      "breakpoints": true
     }
   ]
 }

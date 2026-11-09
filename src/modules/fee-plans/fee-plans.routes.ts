@@ -6,7 +6,8 @@ import { feePlans, students } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
 import { created, ok } from '../../lib/http.js';
 import { parse, zBoolQuery, zIdParam, zName, zOptionalText, zPaise } from '../../lib/validation.js';
-import { requireAdmin } from '../../middleware/auth.js';
+import { currentUser, requireAdmin } from '../../middleware/auth.js';
+import { saveSplit, splitTrees } from '../funds/split.routes.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 
 export const feePlansRouter = Router();
@@ -38,9 +39,15 @@ feePlansRouter.get('/', async (req, res) => {
     .where(q.active === undefined ? undefined : eq(feePlans.isActive, q.active))
     .orderBy(asc(feePlans.daysPerWeek), asc(feePlans.monthlyFee));
 
+  // Admins also get each plan's fee split ([] = everything to the academy).
+  const splits = currentUser(req).role === 'admin' ? await splitTrees() : null;
   ok(
     res,
-    rows.map((r) => ({ ...r.plan, activeStudents: Number(r.activeStudents ?? 0) })),
+    rows.map((r) => ({
+      ...r.plan,
+      activeStudents: Number(r.activeStudents ?? 0),
+      ...(splits ? { split: splits.get(r.plan.id) ?? [] } : {}),
+    })),
   );
 });
 
@@ -92,3 +99,5 @@ feePlansRouter.patch('/:id', requireAdmin, async (req, res) => {
   });
   ok(res, plan);
 });
+
+feePlansRouter.put('/:id/split', requireAdmin, saveSplit);
