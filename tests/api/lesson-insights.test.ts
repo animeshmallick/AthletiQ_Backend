@@ -7,7 +7,8 @@ describe('lesson planning insights', () => {
     const academy = await makeAcademy();
     const api = await as(academy.coach);
     const id = async (kind: 'stages' | 'events', name: string) =>
-      (await api.post(`/api/v1/lessons/${kind}`, { name }).expect(201)).body.data.id as string;
+      (await api.post(`/api/v1/lessons/${kind}`, { batchId: academy.batch.id, name }).expect(201))
+        .body.data.id as string;
     const s1 = await id('stages', 'Warm-up');
     const s2 = await id('stages', 'Main');
     const e1 = await id('events', 'Footwork');

@@ -13,11 +13,19 @@ import { id, timestamps } from './_shared.js';
 import { batches } from './academy.js';
 import { users } from './users.js';
 
-/** Columns of a coach's lesson-plan grid, e.g. Warm-up, Main, Test, Post-play. Owned per coach. */
+/**
+ * Columns of a batch's lesson-plan grid, e.g. Warm-up, Main, Test, Post-play. Together with the
+ * events below they form the batch's plan template, edited by the batch's coach.
+ */
 export const lessonStages = pgTable(
   'lesson_stages',
   {
     id: id(),
+    /** The batch whose plan template this belongs to (one template per batch). */
+    batchId: uuid()
+      .notNull()
+      .references(() => batches.id, { onDelete: 'cascade' }),
+    /** Who created it. */
     coachId: uuid()
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
@@ -28,16 +36,21 @@ export const lessonStages = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex('lesson_stages_coach_name_uq').on(t.coachId, sql`lower(${t.name})`),
-    index('lesson_stages_coach_idx').on(t.coachId, t.sortOrder),
+    uniqueIndex('lesson_stages_batch_name_uq').on(t.batchId, sql`lower(${t.name})`),
+    index('lesson_stages_batch_idx').on(t.batchId, t.sortOrder),
   ],
 );
 
-/** Rows of the grid: the games / events / drills a coach runs. Owned per coach. */
+/** Rows of the grid: the games / events / drills run in the batch. Part of the batch template. */
 export const lessonEvents = pgTable(
   'lesson_events',
   {
     id: id(),
+    /** The batch whose plan template this belongs to (one template per batch). */
+    batchId: uuid()
+      .notNull()
+      .references(() => batches.id, { onDelete: 'cascade' }),
+    /** Who created it. */
     coachId: uuid()
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
@@ -48,8 +61,8 @@ export const lessonEvents = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex('lesson_events_coach_name_uq').on(t.coachId, sql`lower(${t.name})`),
-    index('lesson_events_coach_idx').on(t.coachId, t.sortOrder),
+    uniqueIndex('lesson_events_batch_name_uq').on(t.batchId, sql`lower(${t.name})`),
+    index('lesson_events_batch_idx').on(t.batchId, t.sortOrder),
   ],
 );
 

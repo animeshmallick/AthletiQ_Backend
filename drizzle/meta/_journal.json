@@ -50,6 +50,13 @@
       "when": 1794204814225,
       "tag": "0006_funds",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794213192840,
+      "tag": "0007_batch_lesson_templates",
+      "breakpoints": true
     }
   ]
 }

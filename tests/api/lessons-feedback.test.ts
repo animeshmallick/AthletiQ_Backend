@@ -1,42 +1,60 @@
 import { describe, expect, it } from '@jest/globals';
-import { as, makeAcademy, makeStudent, setToday } from '../helpers/factories';
+import { as, makeAcademy, makeBatch, makeStudent, setToday } from '../helpers/factories';
 
-describe('lesson library', () => {
-  it('lets coaches build their own stages and events', async () => {
-    const { coach, otherCoach, admin } = await makeAcademy();
+describe('batch plan templates', () => {
+  it('lets the batch coach build the batch template', async () => {
+    const { coach, otherCoach, admin, batch, otherBatch, location } = await makeAcademy();
     const api = await as(coach);
+    const B = batch.id;
+    const stages = (q = '') => api.get(`/api/v1/lessons/stages?batchId=${B}${q}`).expect(200);
 
     const warm = await api
-      .post('/api/v1/lessons/stages', { name: 'Warm-up', color: '#22c55e' })
+      .post('/api/v1/lessons/stages', { batchId: B, name: 'Warm-up', color: '#22c55e' })
       .expect(201);
-    const main = await api.post('/api/v1/lessons/stages', { name: 'Main' }).expect(201);
+    const main = await api.post('/api/v1/lessons/stages', { batchId: B, name: 'Main' }).expect(201);
     expect([warm.body.data.sortOrder, main.body.data.sortOrder]).toEqual([0, 1]);
-    await api.post('/api/v1/lessons/stages', { name: 'warm-up' }).expect(409);
-    await api.post('/api/v1/lessons/stages', { name: 'Bad', color: 'green' }).expect(400);
+    expect(warm.body.data).toMatchObject({ batchId: B, coachId: coach.id });
+    await api.post('/api/v1/lessons/stages', { batchId: B, name: 'warm-up' }).expect(409);
+    await api
+      .post('/api/v1/lessons/stages', { batchId: B, name: 'Bad', color: 'green' })
+      .expect(400);
+    await api.post('/api/v1/lessons/stages', { name: 'No batch' }).expect(400);
     const drill = await api
-      .post('/api/v1/lessons/events', { name: 'Footwork', description: 'Ladder' })
+      .post('/api/v1/lessons/events', { batchId: B, name: 'Footwork', description: 'Ladder' })
       .expect(201);
     expect(drill.body.data.description).toBe('Ladder');
 
-    // Another coach can reuse the same names; libraries are personal.
-    await (await as(otherCoach)).post('/api/v1/lessons/stages', { name: 'Warm-up' }).expect(201);
+    // Templates are per batch: another of my batches can reuse names; others' batches are off limits.
+    const second = await makeBatch(coach.id, location.id, {
+      startTime: '09:00:00',
+      endTime: '10:00:00',
+    });
+    await api.post('/api/v1/lessons/stages', { batchId: second.id, name: 'Warm-up' }).expect(201);
+    await api.post('/api/v1/lessons/stages', { batchId: otherBatch.id, name: 'X' }).expect(404);
+    await api.get(`/api/v1/lessons/stages?batchId=${otherBatch.id}`).expect(404);
 
     await api
-      .put('/api/v1/lessons/stages/order', { ids: [main.body.data.id, warm.body.data.id] })
+      .put('/api/v1/lessons/stages/order', {
+        batchId: B,
+        ids: [main.body.data.id, warm.body.data.id],
+      })
       .expect(204);
     await api
-      .put('/api/v1/lessons/stages/order', { ids: ['6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c'] })
+      .put('/api/v1/lessons/stages/order', {
+        batchId: B,
+        ids: ['6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c'],
+      })
       .expect(400);
-    const ordered = await api.get('/api/v1/lessons/stages').expect(200);
-    expect(ordered.body.data.map((s: { name: string }) => s.name)).toEqual(['Main', 'Warm-up']);
+    expect((await stages()).body.data.map((s: { name: string }) => s.name)).toEqual([
+      'Main',
+      'Warm-up',
+    ]);
 
     await api
       .patch(`/api/v1/lessons/stages/${warm.body.data.id}`, { isArchived: true })
       .expect(200);
-    expect((await api.get('/api/v1/lessons/stages').expect(200)).body.data).toHaveLength(1);
-    expect(
-      (await api.get('/api/v1/lessons/stages?includeArchived=true').expect(200)).body.data,
-    ).toHaveLength(2);
+    expect((await stages()).body.data).toHaveLength(1);
+    expect((await stages('&includeArchived=true')).body.data).toHaveLength(2);
     await api
       .patch(`/api/v1/lessons/events/${drill.body.data.id}`, { name: 'Footwork II' })
       .expect(200);
@@ -45,30 +63,92 @@ describe('lesson library', () => {
     )
       .patch(`/api/v1/lessons/events/${drill.body.data.id}`, { name: 'Hijack' })
       .expect(404);
+    await api
+      .patch('/api/v1/lessons/events/6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c', { name: 'X' })
+      .expect(404);
 
-    // Admins can read (not edit) a coach's library.
+    // Admins can read (not edit) any batch's template.
     const adminApi = await as(admin);
-    const viaAdmin = await adminApi.get(`/api/v1/lessons/events?coachId=${coach.id}`).expect(200);
+    const viaAdmin = await adminApi.get(`/api/v1/lessons/events?batchId=${B}`).expect(200);
     expect(viaAdmin.body.data[0].name).toBe('Footwork II');
     await adminApi.get('/api/v1/lessons/events').expect(400);
-    await adminApi.post('/api/v1/lessons/events', { name: 'Nope' }).expect(403);
+    await adminApi.post('/api/v1/lessons/events', { batchId: B, name: 'Nope' }).expect(403);
+
+    // A batch can start from another batch's template; names it already has are skipped.
+    const copied = await api
+      .post('/api/v1/lessons/template/copy', { fromBatchId: B, toBatchId: second.id })
+      .expect(200);
+    expect(copied.body.data).toEqual({ stages: 1, events: 1 }); // Main + Footwork II
+    const secondStages = await api.get(`/api/v1/lessons/stages?batchId=${second.id}`).expect(200);
+    expect(secondStages.body.data.map((s: { name: string }) => s.name)).toEqual([
+      'Warm-up',
+      'Main',
+    ]);
+    await api.post('/api/v1/lessons/template/copy', { fromBatchId: B, toBatchId: B }).expect(400);
+    await api
+      .post('/api/v1/lessons/template/copy', { fromBatchId: otherBatch.id, toBatchId: B })
+      .expect(404);
+  });
+
+  it('copies a plan to another batch by matching names in its template', async () => {
+    const { coach, batch, location } = await makeAcademy();
+    const api = await as(coach);
+    const second = await makeBatch(coach.id, location.id, {
+      startTime: '09:00:00',
+      endTime: '10:00:00',
+    });
+    const add = async (kind: string, batchId: string, name: string) =>
+      (await api.post(`/api/v1/lessons/${kind}`, { batchId, name }).expect(201)).body.data
+        .id as string;
+    const s1 = await add('stages', batch.id, 'Warm-up');
+    const e1 = await add('events', batch.id, 'Serve');
+    const existing = await add('stages', second.id, 'warm-up');
+    await api
+      .put('/api/v1/lessons/plans/day', {
+        batchId: batch.id,
+        date: '2026-03-09',
+        stageIds: [s1],
+        eventIds: [e1],
+        cells: [{ eventId: e1, stageId: s1, content: 'Shadow serves' }],
+      })
+      .expect(200);
+    const res = await api
+      .post('/api/v1/lessons/plans/copy', {
+        batchId: batch.id,
+        toBatchId: second.id,
+        fromDate: '2026-03-09',
+        toDates: ['2026-03-10'],
+      })
+      .expect(200);
+    expect(res.body.data.copied).toEqual(['2026-03-10']);
+    const day = await api
+      .get(`/api/v1/lessons/plans/day?batchId=${second.id}&date=2026-03-10`)
+      .expect(200);
+    const plan = day.body.data.plan;
+    expect(plan.stages.map((s: { id: string }) => s.id)).toEqual([existing]);
+    expect(plan.events[0].name).toBe('Serve');
+    expect(plan.events[0].id).not.toBe(e1);
+    expect(plan.cells).toEqual([
+      { eventId: plan.events[0].id, stageId: existing, content: 'Shadow serves' },
+    ]);
   });
 });
 
 describe('daily lesson plans', () => {
-  async function library(coach: { id: string; role: 'coach' }) {
+  async function library(coach: { id: string; role: 'coach' }, batchId: string) {
     const api = await as(coach);
-    const s1 = (await api.post('/api/v1/lessons/stages', { name: 'Warm-up' })).body.data
-      .id as string;
-    const s2 = (await api.post('/api/v1/lessons/stages', { name: 'Main' })).body.data.id as string;
-    const e1 = (await api.post('/api/v1/lessons/events', { name: 'Serve' })).body.data.id as string;
-    const e2 = (await api.post('/api/v1/lessons/events', { name: 'Rally' })).body.data.id as string;
+    const add = async (kind: string, name: string) =>
+      (await api.post(`/api/v1/lessons/${kind}`, { batchId, name })).body.data.id as string;
+    const s1 = await add('stages', 'Warm-up');
+    const s2 = await add('stages', 'Main');
+    const e1 = await add('events', 'Serve');
+    const e2 = await add('events', 'Rally');
     return { api, s1, s2, e1, e2 };
   }
 
   it('saves, loads, copies and deletes a grid', async () => {
     const { coach, admin, batch, otherCoach } = await makeAcademy();
-    const { api, s1, s2, e1, e2 } = await library(coach as { id: string; role: 'coach' });
+    const { api, s1, s2, e1, e2 } = await library(coach as { id: string; role: 'coach' }, batch.id);
     const plan = {
       batchId: batch.id,
       date: '2026-03-09',
@@ -187,10 +267,10 @@ describe('daily lesson plans', () => {
     expect(overview.body.data.sessions[0].hasLessonPlan).toBe(true);
   });
 
-  it('rejects stages/events from another library and duplicate columns', async () => {
+  it('rejects stages/events from another batch template and duplicate columns', async () => {
     const { coach, otherCoach, batch, otherBatch } = await makeAcademy();
-    const mine = await library(coach as { id: string; role: 'coach' });
-    const theirs = await library(otherCoach as { id: string; role: 'coach' });
+    const mine = await library(coach as { id: string; role: 'coach' }, batch.id);
+    const theirs = await library(otherCoach as { id: string; role: 'coach' }, otherBatch.id);
     const base = {
       batchId: batch.id,
       date: '2026-03-09',
@@ -439,8 +519,12 @@ describe('lesson plans on non-session days', () => {
     setToday('2026-03-09');
     const { coach, batch } = await makeAcademy();
     const api = await as(coach);
-    const stage = await api.post('/api/v1/lessons/stages', { name: 'Warm-up' }).expect(201);
-    const event = await api.post('/api/v1/lessons/events', { name: 'Footwork' }).expect(201);
+    const stage = await api
+      .post('/api/v1/lessons/stages', { batchId: batch.id, name: 'Warm-up' })
+      .expect(201);
+    const event = await api
+      .post('/api/v1/lessons/events', { batchId: batch.id, name: 'Footwork' })
+      .expect(201);
     await api
       .put('/api/v1/lessons/plans/day', {
         batchId: batch.id,

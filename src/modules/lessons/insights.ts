@@ -286,8 +286,8 @@ export async function lessonInsights(req: Request, res: Response) {
   }
 
   // A single library is in view when the scope has exactly one coach.
-  const coachIds = [...new Set(scope.map((b) => b.coachId))];
-  const libraryCoach = coachIds.length === 1 ? coachIds[0]! : null;
+  // A single template is in view when the scope is exactly one batch.
+  const libraryBatch = scope.length === 1 ? scope[0]!.id : null;
 
   const [eventRows, stageRows, lastUsedEver] = await Promise.all([
     db
@@ -295,12 +295,11 @@ export async function lessonInsights(req: Request, res: Response) {
         id: lessonEvents.id,
         name: lessonEvents.name,
         isArchived: lessonEvents.isArchived,
-        coachId: lessonEvents.coachId,
       })
       .from(lessonEvents)
       .where(
-        libraryCoach
-          ? eq(lessonEvents.coachId, libraryCoach)
+        libraryBatch
+          ? eq(lessonEvents.batchId, libraryBatch)
           : eventUse.size
             ? inArray(lessonEvents.id, [...eventUse.keys()])
             : sql`false`,
@@ -312,11 +311,11 @@ export async function lessonInsights(req: Request, res: Response) {
           .where(inArray(lessonStages.id, [...stageUse.keys()]))
       : [],
     // Recent history (newest first) to say when an unused drill was last run.
-    libraryCoach
+    libraryBatch
       ? db
           .select({ date: lessonPlans.date, eventIds: lessonPlans.eventIds })
           .from(lessonPlans)
-          .where(and(eq(lessonPlans.coachId, libraryCoach), lte(lessonPlans.date, today)))
+          .where(and(eq(lessonPlans.batchId, libraryBatch), lte(lessonPlans.date, today)))
           .orderBy(desc(lessonPlans.date))
           .limit(500)
       : [],
@@ -329,7 +328,7 @@ export async function lessonInsights(req: Request, res: Response) {
     .filter((e) => eventUse.has(e.id))
     .map((e) => ({ id: e.id, name: e.name, ...eventUse.get(e.id)! }))
     .sort((a, b) => b.plans - a.plans || b.cells - a.cells || a.name.localeCompare(b.name));
-  const unusedEvents = libraryCoach
+  const unusedEvents = libraryBatch
     ? eventRows
         .filter((e) => !e.isArchived && !eventUse.has(e.id))
         .map((e) => ({ id: e.id, name: e.name, lastUsed: lastEver.get(e.id) ?? null }))
