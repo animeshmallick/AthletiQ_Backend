@@ -231,7 +231,7 @@ export async function sendOverdueNotices(now: Date = new Date()) {
         list.length === 1
           ? 'A gentle word with the parents at the next session may help.'
           : `${list.slice(0, 4).join(', ')}${list.length > 4 ? ` and ${list.length - 4} more` : ''}`,
-      link: list.length === 1 ? `/students/${first}` : '/invoices?status=overdue',
+      link: list.length === 1 ? `/students/${first}` : '/finance?tab=invoices&status=overdue',
       tag: 'overdue',
     });
   }

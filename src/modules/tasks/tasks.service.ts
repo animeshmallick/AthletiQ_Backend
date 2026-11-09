@@ -245,8 +245,8 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
         severity: 'warning',
         title: `${overdue!.n} overdue invoice${overdue!.n === 1 ? '' : 's'}`,
         detail: 'Fees past their due date',
-        link: '/invoices?status=overdue',
-        screen: '/invoices',
+        link: '/finance?tab=invoices&status=overdue',
+        screen: '/finance',
         count: overdue!.n,
       });
     }

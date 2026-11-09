@@ -16,7 +16,7 @@ import {
   pushEnabled,
 } from '../push/push.service.js';
 
-const LINK = '/money';
+const LINK = '/finance?tab=money';
 
 /** Staff shares of one fee split, by person. */
 async function staffShares(paymentId: string, live: boolean) {

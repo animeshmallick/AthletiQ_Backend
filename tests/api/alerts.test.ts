@@ -104,7 +104,7 @@ describe('tasks', () => {
     expect(res.body.data.items).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: 'overdue-fees' })]),
     );
-    expect(res.body.data.counts['/invoices']).toBeGreaterThanOrEqual(1);
+    expect(res.body.data.counts['/finance']).toBeGreaterThanOrEqual(1);
     expect(s.id).toBeTruthy();
   });
 });
@@ -514,7 +514,7 @@ describe('coach notices', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]!.message).toMatchObject({
       title: "5 students' fees are over a week overdue",
-      link: '/invoices?status=overdue',
+      link: '/finance?tab=invoices&status=overdue',
     });
     expect(sent[0]!.message.body).toMatch(/and 1 more$/);
   });

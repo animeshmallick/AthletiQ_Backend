@@ -221,7 +221,7 @@ invoicesRouter.post('/:id/payments', async (req, res) => {
     await notifyUsers(admins, {
       title: `Fee received · ${formatInr(paid.totalAmount)}`,
       body: `${paid.student.fullName} · ${body.mode.toUpperCase()} · received by ${user.name}`,
-      link: `/invoices?status=paid&invoice=${id}`,
+      link: `/finance?tab=invoices&status=paid&invoice=${id}`,
       tag: `paid-${id}`,
     });
   });
