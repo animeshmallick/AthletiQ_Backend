@@ -196,9 +196,20 @@ describe('batches', () => {
       weekdays: [6, 1, 3],
       startTime: '17:00',
       endTime: '18:30',
+      capacity: 12,
     };
     const res = await api.post('/api/v1/batches', body).expect(201);
-    expect(res.body.data).toMatchObject({ weekdays: [1, 3, 6], startTime: '17:00:00' });
+    expect(res.body.data).toMatchObject({
+      weekdays: [1, 3, 6],
+      startTime: '17:00:00',
+      capacity: 12,
+    });
+
+    // Capacity is required and must be a positive number.
+    const { capacity: _omit, ...noCapacity } = body;
+    await api.post('/api/v1/batches', { ...noCapacity, name: 'E0' }).expect(400);
+    await api.post('/api/v1/batches', { ...body, name: 'E0', capacity: null }).expect(400);
+    await api.post('/api/v1/batches', { ...body, name: 'E0', capacity: 0 }).expect(400);
 
     await api.post('/api/v1/batches', { ...body, name: 'E2', endTime: '16:00' }).expect(400);
     await api.post('/api/v1/batches', { ...body, name: 'E3', coachId: admin.id }).expect(422);
@@ -230,6 +241,18 @@ describe('batches', () => {
     expect(conflict.body.error.details.students[0].id).toBe(s.id);
     await api.patch(`/api/v1/batches/${batch.id}`, { isActive: false }).expect(422);
     await api.patch(`/api/v1/batches/${batch.id}`, { endTime: '05:00' }).expect(400);
+    // Capacity can't drop below the students already in the batch, or be cleared.
+    const tight = await api.patch(`/api/v1/batches/${batch.id}`, { capacity: 0 }).expect(400);
+    expect(tight.body.error.code).toBe('VALIDATION_ERROR');
+    await api.patch(`/api/v1/batches/${batch.id}`, { capacity: null }).expect(400);
+    const s2 = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, trainingDays: [1, 3, 5] },
+      admin.id,
+    );
+    expect(s2.id).toBeTruthy();
+    const below = await api.patch(`/api/v1/batches/${batch.id}`, { capacity: 1 }).expect(422);
+    expect(below.body.error.message).toMatch(/has 2 students/);
+    await api.patch(`/api/v1/batches/${batch.id}`, { capacity: 2 }).expect(200);
 
     const moved = await api
       .patch(`/api/v1/batches/${batch.id}`, { coachId: otherCoach.id, weekdays: [1, 3, 5] })

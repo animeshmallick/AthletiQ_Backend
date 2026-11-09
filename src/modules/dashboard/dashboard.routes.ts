@@ -178,11 +178,8 @@ export async function dashboardFor(user: AuthUser, today: IsoDate = todayInAppTz
 
   const memberCount = new Map<string, number>();
   for (const m of members) memberCount.set(m.batchId, (memberCount.get(m.batchId) ?? 0) + 1);
-  const capacity = scope.reduce((n, b) => n + (b.capacity ?? 0), 0);
-  const cappedMembers = scope.reduce(
-    (n, b) => n + (b.capacity ? (memberCount.get(b.id) ?? 0) : 0),
-    0,
-  );
+  const capacity = scope.reduce((n, b) => n + b.capacity, 0);
+  const cappedMembers = scope.reduce((n, b) => n + (memberCount.get(b.id) ?? 0), 0);
 
   const batchHealth = scope
     .map((b) => {
@@ -194,7 +191,7 @@ export async function dashboardFor(user: AuthUser, today: IsoDate = todayInAppTz
         coachName: b.coachName,
         enrolled,
         capacity: b.capacity,
-        fill: b.capacity ? pct(enrolled, b.capacity) : null,
+        fill: pct(enrolled, b.capacity),
         attendanceRate: a ? pct(a.a, a.b) : null,
       };
     })

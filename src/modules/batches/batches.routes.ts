@@ -130,7 +130,7 @@ const BatchBody = z.object({
   weekdays: zWeekdays,
   startTime: zTime,
   endTime: zTime,
-  capacity: z.number().int().min(1).max(1000).nullable().optional(),
+  capacity: z.number().int().min(1).max(1000),
   isActive: z.boolean().default(true),
 });
 
@@ -151,10 +151,7 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
   if (body.endTime <= body.startTime)
     throw AppError.badRequest('End time must be after start time');
   await Promise.all([assertCoach(body.coachId), assertLocation(body.locationId)]);
-  const [batch] = await db
-    .insert(batches)
-    .values({ ...body, capacity: body.capacity ?? null })
-    .returning();
+  const [batch] = await db.insert(batches).values(body).returning();
   await audit({
     ...auditCtx(req),
     action: 'batch.created',
@@ -185,6 +182,12 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
     await assertLocation(body.locationId);
 
   const members = await currentMembers(id);
+  if (body.capacity !== undefined && body.capacity < members.length) {
+    throw AppError.unprocessable(
+      `This batch has ${members.length} students. Capacity can't be less than that.`,
+      { fields: [{ path: 'capacity', message: `At least ${members.length}` }] },
+    );
+  }
   const applyToStudents = !!(applyDaysToStudents && body.weekdays && members.length);
   if (applyToStudents && body.weekdays!.length > MAX_TRAINING_DAYS_PER_WEEK) {
     throw AppError.unprocessable(

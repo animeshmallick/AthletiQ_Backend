@@ -52,20 +52,18 @@ export async function assertEnrollable(
       fields: [{ path: 'trainingDays', message: 'Pick only days the batch runs' }],
     });
   }
-  if (batch.capacity !== null) {
-    const [{ n } = { n: 0 }] = await tx
-      .select({ n: sql<number>`count(*)::int` })
-      .from(enrollments)
-      .where(
-        and(
-          eq(enrollments.batchId, batchId),
-          isNull(enrollments.effectiveTo),
-          excludeStudentId ? ne(enrollments.studentId, excludeStudentId) : undefined,
-        ),
-      );
-    if (n >= batch.capacity)
-      throw AppError.unprocessable(`${batch.name} is full (capacity ${batch.capacity})`);
-  }
+  const [{ n } = { n: 0 }] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(enrollments)
+    .where(
+      and(
+        eq(enrollments.batchId, batchId),
+        isNull(enrollments.effectiveTo),
+        excludeStudentId ? ne(enrollments.studentId, excludeStudentId) : undefined,
+      ),
+    );
+  if (n >= batch.capacity)
+    throw AppError.unprocessable(`${batch.name} is full (capacity ${batch.capacity})`);
   return batch;
 }
 

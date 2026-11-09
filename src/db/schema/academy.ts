@@ -52,7 +52,7 @@ export const batches = pgTable(
     weekdays: smallint().array().notNull(),
     startTime: time().notNull(),
     endTime: time().notNull(),
-    capacity: integer(),
+    capacity: integer().notNull(),
     isActive: boolean().notNull().default(true),
     ...timestamps,
   },

@@ -228,6 +228,7 @@ describe('coach notices', () => {
         weekdays: [5, 1, 3],
         startTime: '17:00',
         endTime: '18:30',
+        capacity: 10,
       })
       .expect(201);
     await settle(sent, 1);
