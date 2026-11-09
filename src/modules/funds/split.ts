@@ -80,8 +80,9 @@ export function computeShares(
     const parts = allocate(nodes, money);
     nodes.forEach((n, i) => {
       const part = parts[i]!;
-      const label = prefix ? `${prefix} › ${n.name}` : n.name;
-      if (n.children.length) return walk(n.children, part, label);
+      // Lines are named after who finally receives the money (no parent section names).
+      const label = n.name || prefix || 'Share';
+      if (n.children.length) return walk(n.children, part, '');
       if (part === 0) return;
       if (n.recipient === 'staff' && n.userId)
         lines.push({ label, account: 'staff_due', userId: n.userId, payeeId: null, amount: part });
@@ -129,12 +130,8 @@ export function validateTree(tree: SplitNode[]): { path: string; message: string
       errors.push({ path, message: 'Add a percentage section to receive what is left' });
     else if (total !== FULL)
       errors.push({ path, message: `Percentages add up to ${total / 100}%, not 100%` });
-    const names = new Set<string>();
     nodes.forEach((n, i) => {
       const at = `${path}${path ? '.' : ''}${i}`;
-      const key = n.name.trim().toLowerCase();
-      if (names.has(key)) errors.push({ path: at, message: `“${n.name}” is used twice` });
-      names.add(key);
       if (n.kind === 'percent' && n.value > FULL)
         errors.push({ path: at, message: 'A percentage cannot exceed 100%' });
       if (n.children.length) {

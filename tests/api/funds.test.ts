@@ -132,7 +132,7 @@ describe('fee plan splits', () => {
     const plan = plans.find((p: { id: string }) => p.id === a.plan.id);
     expect(plan.split).toMatchObject([
       {
-        name: 'Academy',
+        name: '', // Divided sections have no name of their own.
         recipient: null,
         children: [{ name: 'Society', recipient: 'payee' }, { name: 'Academy' }],
       },
@@ -159,8 +159,8 @@ describe('fee distribution on payment', () => {
     const detail = (await (await as(a.admin)).get(`/api/v1/invoices/${inv.id}`)).body.data;
     expect(detail.split).toEqual(
       expect.arrayContaining([
-        { label: 'Academy › Society', name: 'Society', amount: 43_750 },
-        { label: 'Academy › Academy', name: 'Academy', amount: 81_250 },
+        { label: 'Society', name: 'Society', amount: 43_750 },
+        { label: 'Academy', name: 'Academy', amount: 81_250 },
         { label: 'Coach', name: a.coach.name, amount: 125_000 },
       ]),
     );

@@ -61,14 +61,14 @@ describe('computeShares', () => {
   it('splits ₹2,000: half to the coach, and 35% of the academy half to the society', () => {
     expect(computeShares(tree, 200_000, 'coach-1')).toEqual([
       {
-        label: 'Academy › Society',
+        label: 'Society',
         account: 'payee_due',
         userId: null,
         payeeId: 'society',
         amount: 35_000,
       },
       {
-        label: 'Academy › Academy',
+        label: 'Academy',
         account: 'academy_fund',
         userId: null,
         payeeId: null,
@@ -123,7 +123,6 @@ describe('validateTree', () => {
     ]);
     expect(messages([pct('A', 60), pct('a', 30)])).toEqual([
       ': Percentages add up to 90%, not 100%',
-      '1: “a” is used twice',
     ]);
     expect(messages([pct('A', 150), pct('B', -50)])).toEqual([
       '0: A percentage cannot exceed 100%',

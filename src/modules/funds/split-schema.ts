@@ -1,9 +1,10 @@
 import { z } from 'zod';
-import { zId, zName, zPaise } from '../../lib/validation.js';
+import { zId, zPaise } from '../../lib/validation.js';
 import { FULL, MAX_SECTIONS, type SplitNode } from './split.js';
 
 const base = {
-  name: zName.max(60),
+  /** Shown on the share line: the recipient's name. Divided sections have none. */
+  name: z.string().trim().max(60).default(''),
   kind: z.enum(['percent', 'flat']),
   /** Basis points (10000 = 100%) for percent, paise for flat. */
   value: z.number().int().min(1),
@@ -29,7 +30,7 @@ export const SplitBody = z.object({ sections: z.array(Section).max(MAX_SECTIONS)
 /** Normalises parsed input into tree nodes (recipient fields cleared where they do not apply). */
 export function toTree(sections: z.output<typeof SplitBody>['sections']): SplitNode[] {
   const node = (n: z.output<typeof Leaf>, children: SplitNode[]): SplitNode => ({
-    name: n.name,
+    name: children.length ? '' : n.name,
     kind: n.kind,
     value: n.value,
     recipient: children.length ? null : n.recipient,
