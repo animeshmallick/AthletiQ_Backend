@@ -6,6 +6,7 @@ import {
   doublePrecision,
   index,
   integer,
+  jsonb,
   pgTable,
   smallint,
   text,
@@ -13,6 +14,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import type { DayTimes } from '../../lib/batch-times.js';
 import { id, timestamps } from './_shared.js';
 import { users } from './users.js';
 
@@ -65,6 +67,8 @@ export const batches = pgTable(
     weekdays: smallint().array().notNull(),
     startTime: time().notNull(),
     endTime: time().notNull(),
+    /** Days that run at a different time than the default above (ISO weekday → start/end). */
+    dayTimes: jsonb().$type<DayTimes>().notNull().default({}),
     capacity: integer().notNull(),
     /**
      * The batch's price: every student in the batch is billed this plan (their enrollment can

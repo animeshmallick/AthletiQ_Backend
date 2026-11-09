@@ -67,11 +67,8 @@ export const toMinutes = (t: string) => {
   return h * 60 + m;
 };
 
-/** "17:00:00" → "5:00 pm" */
-export function clockLabel(t: string): string {
-  const [h = 0, m = 0] = t.split(':').map(Number);
-  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h >= 12 ? 'pm' : 'am'}`;
-}
+export { clockLabel } from '../../lib/batch-times.js';
+import { clockLabel } from '../../lib/batch-times.js';
 
 const SEVERITY_ORDER: Record<TaskSeverity, number> = { critical: 0, warning: 1, info: 2 };
 

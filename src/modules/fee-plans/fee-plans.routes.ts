@@ -5,7 +5,15 @@ import { db } from '../../db/client.js';
 import { batches, enrollments, feePlans } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
 import { created, ok } from '../../lib/http.js';
-import { parse, zBoolQuery, zIdParam, zName, zOptionalText, zPaise } from '../../lib/validation.js';
+import {
+  parse,
+  zBoolQuery,
+  zIdParam,
+  zName,
+  zOptionalText,
+  zPaise,
+  patchOf,
+} from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { saveSplit, splitTrees } from '../funds/split.routes.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
@@ -71,7 +79,7 @@ feePlansRouter.post('/', requireAdmin, async (req, res) => {
  */
 feePlansRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const body = parse(PlanBody.partial(), req.body);
+  const body = parse(patchOf(PlanBody), req.body);
 
   if (body.isActive === false) {
     const [inUse] = await db

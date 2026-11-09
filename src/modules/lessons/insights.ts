@@ -1,3 +1,4 @@
+import { timesOn } from '../../lib/batch-times.js';
 import { and, asc, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
@@ -79,6 +80,7 @@ export async function lessonInsights(req: Request, res: Response) {
       weekdays: batches.weekdays,
       startTime: batches.startTime,
       endTime: batches.endTime,
+      dayTimes: batches.dayTimes,
       coachId: batches.coachId,
       coachName: users.name,
       locationId: locations.id,
@@ -196,7 +198,7 @@ export async function lessonInsights(req: Request, res: Response) {
         needsPlan.push({
           batchId: b.id,
           batchName: b.name,
-          startTime: b.startTime,
+          startTime: timesOn(b, d).startTime,
           date: d,
           status: s,
         });
@@ -226,6 +228,7 @@ export async function lessonInsights(req: Request, res: Response) {
       name: b.name,
       startTime: b.startTime,
       endTime: b.endTime,
+      dayTimes: b.dayTimes,
       weekdays: b.weekdays,
       coach: { id: b.coachId, name: b.coachName },
       location: { id: b.locationId, name: b.locationName },

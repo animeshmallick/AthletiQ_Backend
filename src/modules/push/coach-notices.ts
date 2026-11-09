@@ -6,7 +6,7 @@ import { and, count, eq, isNull } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { dayPhrase, onDay } from '../../lib/dates.js';
 import { batches, enrollments, locations, students } from '../../db/schema/index.js';
-import { clockLabel } from '../tasks/tasks.service.js';
+import { clockLabel, scheduleLabel, timesOn } from '../../lib/batch-times.js';
 import { notifyUsers } from './push.service.js';
 
 const DAY = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -27,8 +27,7 @@ async function batchWithLocation(batchId: string) {
   return row;
 }
 
-const schedule = (b: BatchRow, location: string) =>
-  `${daysLabel(b.weekdays)} · ${clockLabel(b.startTime)}–${clockLabel(b.endTime)} · ${location}`;
+const schedule = (b: BatchRow, location: string) => `${scheduleLabel(b)} · ${location}`;
 
 /** A batch was created for, or reassigned to, this coach. */
 export async function noticeBatchAssigned(batchId: string, previousCoachId?: string) {
@@ -66,12 +65,11 @@ export async function noticeBatchChanged(
   const { batch: b, location } = row;
   const changes: string[] = [];
   if (before.name !== b.name) changes.push(`renamed from ${before.name}`);
-  if (before.startTime !== b.startTime || before.endTime !== b.endTime) {
-    changes.push(`now ${clockLabel(b.startTime)}–${clockLabel(b.endTime)}`);
-  }
-  if (before.weekdays.join() !== b.weekdays.join()) {
+  const daysChanged = before.weekdays.join() !== b.weekdays.join();
+  if (daysChanged || scheduleLabel(before) !== scheduleLabel(b)) {
+    // From today on: "now Mon · Wed 6:00 am–8:00 am, Sat 7:00 am–9:00 am".
     changes.push(
-      `days now ${daysLabel(b.weekdays)}${opts.studentsUpdated ? ' (students updated)' : ''}`,
+      `now ${scheduleLabel(b)}${daysChanged && opts.studentsUpdated ? ' (students updated)' : ''}`,
     );
   }
   if (before.locationId !== b.locationId) changes.push(`location now ${location}`);
@@ -174,7 +172,7 @@ export async function noticeSessionCancelled(
       ? `${b.name} is on again ${onDay(date)}`
       : `${b.name} is cancelled ${onDay(date)}`,
     body: restored
-      ? `The session is running again · ${clockLabel(b.startTime)}–${clockLabel(b.endTime)}`
+      ? `The session is running again · ${(({ startTime, endTime }) => `${clockLabel(startTime)}–${clockLabel(endTime)}`)(timesOn(b, date))}`
       : `Reason: ${reason ?? 'not given'}`,
     link: `/calendar?date=${date}&view=day`,
     tag: `session-${b.id}-${date}`,

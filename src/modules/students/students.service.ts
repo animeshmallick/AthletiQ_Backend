@@ -1,3 +1,4 @@
+import { timesOn } from '../../lib/batch-times.js';
 import { and, asc, desc, eq, gt, isNull, ne, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from '../../db/client.js';
 import {
@@ -275,6 +276,7 @@ export async function getStudentDetail(studentId: string) {
         locationName: locations.name,
         startTime: batches.startTime,
         endTime: batches.endTime,
+        dayTimes: batches.dayTimes,
         weekdays: batches.weekdays,
         trainingDays: enrollments.trainingDays,
         effectiveFrom: enrollments.effectiveFrom,
@@ -310,6 +312,8 @@ export async function getStudentDetail(studentId: string) {
         batchId: batches.id,
         batchName: batches.name,
         startTime: batches.startTime,
+        endTime: batches.endTime,
+        dayTimes: batches.dayTimes,
         status: makeupSessions.status,
       })
       .from(makeupSessions)
@@ -359,6 +363,7 @@ export async function getStudentDetail(studentId: string) {
         weekdays: h.weekdays,
         startTime: h.startTime,
         endTime: h.endTime,
+        dayTimes: h.dayTimes,
         since: h.effectiveFrom,
         plan: h.plan,
         customMonthlyFee: h.customMonthlyFee,
@@ -387,7 +392,10 @@ export async function getStudentDetail(studentId: string) {
         ...h
       }) => h,
     ),
-    upcomingMakeups,
+    upcomingMakeups: upcomingMakeups.map(({ dayTimes, ...m }) => ({
+      ...m,
+      ...timesOn({ ...m, dayTimes }, m.date),
+    })),
     billing: invoiceSummary[0] ?? { outstanding: 0, overdue: 0, paid: 0, invoiceCount: 0 },
   };
 }

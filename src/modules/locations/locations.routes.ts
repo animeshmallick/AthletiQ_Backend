@@ -6,7 +6,14 @@ import { db } from '../../db/client.js';
 import { batches, locations } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
 import { created, ok } from '../../lib/http.js';
-import { parse, zBoolQuery, zIdParam, zName, zOptionalText } from '../../lib/validation.js';
+import {
+  parse,
+  zBoolQuery,
+  zIdParam,
+  zName,
+  zOptionalText,
+  patchOf,
+} from '../../lib/validation.js';
 import { requireAdmin } from '../../middleware/auth.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 
@@ -66,7 +73,7 @@ locationsRouter.post('/', requireAdmin, async (req, res) => {
 
 locationsRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const body = parse(LocationBody.partial(), req.body);
+  const body = parse(patchOf(LocationBody), req.body);
 
   if (body.isActive === false) {
     const [inUse] = await db

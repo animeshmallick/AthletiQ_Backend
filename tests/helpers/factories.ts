@@ -252,6 +252,8 @@ export async function checkIn(coachId: string, batchId: string, ...dates: string
         batchId,
         locationId: b!.locationId,
         date,
+        scheduledStart: b!.startTime,
+        scheduledEnd: b!.endTime,
         checkInAt: new Date(`${date}T00:30:00Z`),
         checkInLat: 0,
         checkInLng: 0,

@@ -1,3 +1,4 @@
+import { timesOn } from '../../lib/batch-times.js';
 import { and, asc, eq, gte, inArray, lte, sql, type SQL, or } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -55,20 +56,24 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
   // Coaches: their own batches, plus batches they cover as a substitute that day.
   if (!isAdmin(user)) filters.push(or(eq(batches.coachId, user.id), coveredBy(user.id, day))!);
 
-  const sessionBatches = await db
+  const rows = await db
     .select({
       id: batches.id,
       name: batches.name,
       startTime: batches.startTime,
       endTime: batches.endTime,
+      dayTimes: batches.dayTimes,
       coach: { id: users.id, name: users.name },
       location: { id: locations.id, name: locations.name },
     })
     .from(batches)
     .innerJoin(users, eq(users.id, batches.coachId))
     .innerJoin(locations, eq(locations.id, batches.locationId))
-    .where(and(...filters))
-    .orderBy(asc(batches.startTime));
+    .where(and(...filters));
+  // Each batch at its time on this day.
+  const sessionBatches = rows
+    .map(({ dayTimes, ...b }) => ({ ...b, ...timesOn({ ...b, dayTimes }, day) }))
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
 
   const ids = sessionBatches.map((b) => b.id);
   const [cancelled, subs] = await Promise.all([
@@ -206,7 +211,7 @@ attendanceRouter.get('/session', async (req, res) => {
   const checkedOut = !!visit?.checkedOut;
   const edit = canEdit(user.role, date);
   ok(res, {
-    batch: { id: batch.id, name: batch.name, startTime: batch.startTime, endTime: batch.endTime },
+    batch: { id: batch.id, name: batch.name, ...timesOn(batch, date) },
     date,
     isScheduledDay: batch.weekdays.includes(isoWeekday(date)),
     cancelled: cancellation,

@@ -42,6 +42,7 @@ import {
   zName,
   zOptionalText,
   zPagination,
+  patchOf,
 } from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
@@ -138,7 +139,7 @@ fundsRouter.post('/payees', requireAdmin, async (req, res) => {
 
 fundsRouter.patch('/payees/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const body = parse(PayeeBody.partial(), req.body);
+  const body = parse(patchOf(PayeeBody), req.body);
   const [p] = await db.update(payees).set(body).where(eq(payees.id, id)).returning();
   if (!p) throw AppError.notFound('Payee');
   await audit({

@@ -72,6 +72,7 @@ publicRegistrationRouter.get('/options', async (_req, res) => {
         weekdays: batches.weekdays,
         startTime: batches.startTime,
         endTime: batches.endTime,
+        dayTimes: batches.dayTimes,
         location: { id: locations.id, name: locations.name, address: locations.address },
       })
       .from(batches)

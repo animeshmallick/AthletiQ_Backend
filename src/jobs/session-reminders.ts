@@ -5,6 +5,7 @@
 import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { batches, sessionCancellations } from '../db/schema/index.js';
+import { onDay } from '../lib/batch-times.js';
 import { isoWeekday, todayInAppTz } from '../lib/dates.js';
 import { logger } from '../lib/logger.js';
 import { notifyUsers, pushEnabled } from '../modules/push/push.service.js';
@@ -30,7 +31,7 @@ export async function sendSessionReminders(today = todayInAppTz()) {
   const byCoach = new Map<string, typeof active>();
   for (const b of active) {
     if (!b.weekdays.includes(weekday) || off.has(b.id)) continue;
-    byCoach.set(b.coachId, [...(byCoach.get(b.coachId) ?? []), b]);
+    byCoach.set(b.coachId, [...(byCoach.get(b.coachId) ?? []), onDay(b, today)]);
   }
   for (const [coachId, list] of byCoach) {
     list.sort((a, b) => a.startTime.localeCompare(b.startTime));

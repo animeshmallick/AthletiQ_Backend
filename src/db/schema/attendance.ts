@@ -7,6 +7,7 @@ import {
   integer,
   pgTable,
   text,
+  time,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
@@ -81,6 +82,9 @@ export const coachSessions = pgTable(
       .notNull()
       .references(() => locations.id, { onDelete: 'restrict' }),
     date: date({ mode: 'string' }).notNull(),
+    /** The session's scheduled time that day, kept so later timing changes don't rewrite history. */
+    scheduledStart: time().notNull(),
+    scheduledEnd: time().notNull(),
 
     checkInAt: tz().notNull(),
     checkInLat: doublePrecision().notNull(),

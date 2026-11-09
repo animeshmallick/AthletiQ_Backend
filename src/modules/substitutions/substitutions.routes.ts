@@ -3,6 +3,7 @@
  * batch's sessions for a date range. Substitutes get session access only on those days (see
  * access.ts); fees and income never move.
  */
+import { timesOn, type DayTimes } from '../../lib/batch-times.js';
 import { aliasedTable, and, desc, eq, gte, inArray, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -44,6 +45,7 @@ const select = {
     name: batches.name,
     startTime: batches.startTime,
     endTime: batches.endTime,
+    dayTimes: batches.dayTimes,
     weekdays: batches.weekdays,
   },
   substitute: { id: sub.id, name: sub.name },
@@ -82,7 +84,14 @@ interface Row {
   reviewNote: string | null;
   reviewedAt: Date | null;
   createdAt: Date;
-  batch: { id: string; name: string; startTime: string; endTime: string; weekdays: number[] };
+  batch: {
+    id: string;
+    name: string;
+    startTime: string;
+    endTime: string;
+    dayTimes: DayTimes;
+    weekdays: number[];
+  };
   substitute: Person;
   coach: Person;
   requestedBy: Person;
@@ -165,6 +174,7 @@ async function conflict(
         name: batches.name,
         startTime: batches.startTime,
         endTime: batches.endTime,
+        dayTimes: batches.dayTimes,
         weekdays: batches.weekdays,
       })
       .from(batches)
@@ -180,6 +190,7 @@ async function conflict(
         name: batches.name,
         startTime: batches.startTime,
         endTime: batches.endTime,
+        dayTimes: batches.dayTimes,
         weekdays: batches.weekdays,
         fromDate: batchSubstitutions.fromDate,
         toDate: batchSubstitutions.toDate,
@@ -191,10 +202,16 @@ async function conflict(
   for (const d of eachDay(s.fromDate, s.toDate)) {
     const wd = isoWeekday(d);
     if (!batch.weekdays.includes(wd)) continue;
+    // Compare each batch's own time on that weekday.
+    const here = timesOn(batch, wd);
     const clash =
-      own.find((o) => o.weekdays.includes(wd) && overlaps(o, batch)) ??
+      own.find((o) => o.weekdays.includes(wd) && overlaps(timesOn(o, wd), here)) ??
       covers.find(
-        (c) => c.fromDate <= d && c.toDate >= d && c.weekdays.includes(wd) && overlaps(c, batch),
+        (c) =>
+          c.fromDate <= d &&
+          c.toDate >= d &&
+          c.weekdays.includes(wd) &&
+          overlaps(timesOn(c, wd), here),
       );
     if (clash) return `The substitute already coaches ${clash.name} at that time on ${d}`;
   }

@@ -1,3 +1,4 @@
+import { timesOn } from '../../lib/batch-times.js';
 import { and, asc, desc, eq, gte, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -92,17 +93,16 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
     cancellationsIn(ids, today, today),
     substitutesOn(ids, today),
   ]);
+  const list = todaysBatches
+    .map((r) => ({ ...r, time: timesOn(r.batch, today) }))
+    .sort((a, b) => a.time.startTime.localeCompare(b.time.startTime));
   ok(res, {
     date: today,
-    sessions: todaysBatches.map(({ batch, location }) => {
+    sessions: list.map(({ batch, location, time }) => {
       const s = sessions.find((x) => x.batchId === batch.id);
       return {
-        batch: {
-          id: batch.id,
-          name: batch.name,
-          startTime: batch.startTime,
-          endTime: batch.endTime,
-        },
+        // Today's own time (a batch can run at different times on different days).
+        batch: { id: batch.id, name: batch.name, ...time },
         location: {
           id: location.id,
           name: location.name,
@@ -139,6 +139,9 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
       batchId: batch.id,
       locationId: location.id,
       date: today,
+      ...(({ startTime, endTime }) => ({ scheduledStart: startTime, scheduledEnd: endTime }))(
+        timesOn(batch, today),
+      ),
       checkInAt: new Date(),
       checkInLat: body.latitude,
       checkInLng: body.longitude,
@@ -245,8 +248,9 @@ coachSessionsRouter.get('/', async (req, res) => {
       batch: {
         id: batches.id,
         name: batches.name,
-        startTime: batches.startTime,
-        endTime: batches.endTime,
+        // The time the session was scheduled for that day.
+        startTime: coachSessions.scheduledStart,
+        endTime: coachSessions.scheduledEnd,
       },
       location: { id: locations.id, name: locations.name, radiusMeters: locations.radiusMeters },
     })
@@ -255,7 +259,7 @@ coachSessionsRouter.get('/', async (req, res) => {
     .innerJoin(batches, eq(batches.id, coachSessions.batchId))
     .innerJoin(locations, eq(locations.id, coachSessions.locationId))
     .where(and(...filters))
-    .orderBy(desc(coachSessions.date), asc(batches.startTime));
+    .orderBy(desc(coachSessions.date), asc(coachSessions.scheduledStart));
 
   const sessions = rows.map((r) => ({
     ...present(r.session),

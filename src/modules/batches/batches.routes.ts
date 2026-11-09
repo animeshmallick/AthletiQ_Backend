@@ -5,10 +5,12 @@ import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { batches, enrollments, feePlans, locations, sports, users } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
+import { normalizeDayTimes, type DayTimes } from '../../lib/batch-times.js';
 import { todayInAppTz } from '../../lib/dates.js';
 import { created, ok } from '../../lib/http.js';
 import {
   parse,
+  patchOf,
   zBoolQuery,
   zId,
   zIdParam,
@@ -44,6 +46,7 @@ function batchSelect(members: ReturnType<typeof memberCounts>) {
     weekdays: batches.weekdays,
     startTime: batches.startTime,
     endTime: batches.endTime,
+    dayTimes: batches.dayTimes,
     capacity: batches.capacity,
     isActive: batches.isActive,
     createdAt: batches.createdAt,
@@ -132,6 +135,11 @@ batchesRouter.get('/:id/roster', async (req, res) => {
 
 // ─── Admin mutations ─────────────────────────────────────────────────────────
 
+const DayTimesBody = z.partialRecord(
+  z.enum(['1', '2', '3', '4', '5', '6', '7']),
+  z.object({ start: zTime, end: zTime }),
+);
+
 const BatchBody = z.object({
   name: zName,
   coachId: zId,
@@ -139,11 +147,41 @@ const BatchBody = z.object({
   weekdays: zWeekdays,
   startTime: zTime,
   endTime: zTime,
+  /** Days that run at a different time: ISO weekday ("1"…"7") → start/end. */
+  dayTimes: DayTimesBody.default({}),
   capacity: z.number().int().min(1).max(1000),
   sportId: zId,
   feePlanId: zId,
   isActive: z.boolean().default(true),
 });
+
+const DAY_NAMES = [
+  '',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+];
+
+/** Checks every day's time and returns only the overrides that matter. */
+function timings(weekdays: number[], startTime: string, endTime: string, dayTimes: DayTimes) {
+  if (endTime <= startTime) throw AppError.badRequest('End time must be after start time');
+  const out = normalizeDayTimes(dayTimes, weekdays, startTime, endTime);
+  for (const [d, t] of Object.entries(out)) {
+    if (t!.end <= t!.start)
+      throw new AppError(
+        'VALIDATION_ERROR',
+        `${DAY_NAMES[Number(d)]}: end time must be after start time`,
+        {
+          fields: [{ path: `dayTimes.${d}`, message: 'End must be after start' }],
+        },
+      );
+  }
+  return out;
+}
 
 async function assertCoach(coachId: string) {
   const u = await db.query.users.findFirst({ where: eq(users.id, coachId) });
@@ -179,8 +217,7 @@ async function assertLocation(locationId: string) {
 
 batchesRouter.post('/', requireAdmin, async (req, res) => {
   const body = parse(BatchBody, req.body);
-  if (body.endTime <= body.startTime)
-    throw AppError.badRequest('End time must be after start time');
+  body.dayTimes = timings(body.weekdays, body.startTime, body.endTime, body.dayTimes);
   await Promise.all([
     assertCoach(body.coachId),
     assertLocation(body.locationId),
@@ -201,12 +238,17 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
 
 batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const body = parse(BatchBody.partial(), req.body);
+  const body = parse(patchOf(BatchBody), req.body);
   const existing = await assertBatchAccess(currentUser(req), id);
 
-  const start = body.startTime ?? existing.startTime;
-  const end = body.endTime ?? existing.endTime;
-  if (end <= start) throw AppError.badRequest('End time must be after start time');
+  // Timing changes apply from today on: past check-ins keep the time they were scheduled for.
+  if (body.startTime || body.endTime || body.weekdays || body.dayTimes)
+    body.dayTimes = timings(
+      body.weekdays ?? existing.weekdays,
+      body.startTime ?? existing.startTime,
+      body.endTime ?? existing.endTime,
+      body.dayTimes ?? existing.dayTimes,
+    );
   if (body.coachId && body.coachId !== existing.coachId) await assertCoach(body.coachId);
   if (body.locationId && body.locationId !== existing.locationId)
     await assertLocation(body.locationId);

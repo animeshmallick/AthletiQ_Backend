@@ -94,3 +94,17 @@ export const zBoolQuery = z
   .enum(['true', 'false'])
   .optional()
   .transform((v) => (v === undefined ? undefined : v === 'true'));
+
+/**
+ * The body schema for an edit: every field optional, and no defaults. (zod 4 applies defaults
+ * even inside `.partial()`, so an edit that omits `isActive` would otherwise reactivate.)
+ */
+export function patchOf<S extends z.ZodRawShape>(schema: z.ZodObject<S>) {
+  const shape = Object.fromEntries(
+    Object.entries(schema.shape).map(([k, v]) => [
+      k,
+      v instanceof z.ZodDefault ? (v.removeDefault() as z.ZodType) : v,
+    ]),
+  );
+  return z.object(shape).partial() as unknown as ReturnType<z.ZodObject<S>['partial']>;
+}

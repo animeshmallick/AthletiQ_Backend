@@ -244,7 +244,7 @@ describe('coach notices', () => {
     await settle(sent, 2);
     expect(sent[1]!.message).toMatchObject({
       title: 'Evening Juniors was updated',
-      body: 'now 5:30 pm–7:00 pm',
+      body: 'now Mon · Wed · Fri · 5:30 pm–7:00 pm',
     });
 
     // No real change → no push.
@@ -252,9 +252,16 @@ describe('coach notices', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(sent).toHaveLength(2);
 
+    // One day at its own time.
+    await api
+      .patch(`/api/v1/batches/${id}`, { dayTimes: { '5': { start: '07:00', end: '08:00' } } })
+      .expect(200);
+    await settle(sent, 3);
+    expect(sent[2]!.message.body).toBe('now Mon · Wed 5:30 pm–7:00 pm, Fri 7:00 am–8:00 am');
+
     await api.patch(`/api/v1/batches/${id}`, { coachId: otherCoach.id }).expect(200);
-    await settle(sent, 4);
-    const byToken = Object.fromEntries(sent.slice(2).map((s) => [s.userToken, s.message.title]));
+    await settle(sent, 5);
+    const byToken = Object.fromEntries(sent.slice(3).map((s) => [s.userToken, s.message.title]));
     expect(byToken).toEqual({
       'other-coach-token-xxxxxxxxxxxx': 'New batch assigned: Evening Juniors',
       'coach-device-token-xxxxxxxxxxxx': 'Evening Juniors moved to another coach',

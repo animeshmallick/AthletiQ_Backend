@@ -174,6 +174,8 @@ describe('admin academy-wide tasks', () => {
         batchId: a.batch.id,
         locationId: a.location.id,
         date,
+        scheduledStart: '06:00:00',
+        scheduledEnd: '08:00:00',
         checkInAt: new Date(`${date}T00:30:00Z`),
         checkInLat: 0,
         checkInLng: 0,

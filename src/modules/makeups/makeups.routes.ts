@@ -1,6 +1,7 @@
 /**
  * Admin review of makeup requests made by coaches. Mounted at /api/v1/makeups (admin only).
  */
+import { timesOn } from '../../lib/batch-times.js';
 import { and, asc, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { Router } from 'express';
@@ -47,6 +48,7 @@ makeupsRouter.get('/', async (req, res) => {
         name: batches.name,
         startTime: batches.startTime,
         endTime: batches.endTime,
+        dayTimes: batches.dayTimes,
       },
       batchCoach: { id: batchCoach.id, name: batchCoach.name },
       homeBatch: { id: homeBatch.id, name: homeBatch.name },
@@ -75,8 +77,10 @@ makeupsRouter.get('/', async (req, res) => {
     .limit(200);
   ok(
     res,
-    rows.map((r) => ({
+    rows.map(({ batch: { dayTimes, ...batch }, ...r }) => ({
       ...r,
+      // The batch's time on the makeup day.
+      batch: { ...batch, ...timesOn({ ...batch, dayTimes }, r.date) },
       // The session is with a different coach than the student's regular one.
       otherCoach: !!r.homeCoach?.id && r.homeCoach.id !== r.batchCoach.id,
     })),
