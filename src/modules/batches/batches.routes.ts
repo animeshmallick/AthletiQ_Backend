@@ -1,4 +1,4 @@
-import { and, asc, count, eq, isNull, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, eq, isNull, sql, type SQL, or } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -20,6 +20,7 @@ import {
 } from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
+import { coveringNowOrLater, myCoverage } from '../substitutions/coverage.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { transferStudent } from '../students/students.service.js';
 import { currentMembers, expectedRoster } from './roster.js';
@@ -70,7 +71,8 @@ batchesRouter.get('/', async (req, res) => {
   const user = currentUser(req);
   const q = parse(ListQuery, req.query);
   const filters: SQL[] = [];
-  if (!isAdmin(user)) filters.push(eq(batches.coachId, user.id));
+  // Coaches: own batches plus any they cover (now or upcoming) as a substitute.
+  if (!isAdmin(user)) filters.push(or(eq(batches.coachId, user.id), coveringNowOrLater(user.id))!);
   else if (q.coachId) filters.push(eq(batches.coachId, q.coachId));
   if (q.locationId) filters.push(eq(batches.locationId, q.locationId));
   if (q.active !== undefined) filters.push(eq(batches.isActive, q.active));
@@ -84,7 +86,16 @@ batchesRouter.get('/', async (req, res) => {
     .leftJoin(members, eq(members.batchId, batches.id))
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(asc(batches.startTime), asc(batches.name));
-  ok(res, rows);
+  if (isAdmin(user)) return ok(res, rows);
+  // Mark batches the coach only covers as a substitute, with the days they cover.
+  const coverage = await myCoverage(user.id);
+  ok(
+    res,
+    rows.map((r) => ({
+      ...r,
+      substitution: r.coach.id === user.id ? null : (coverage.get(r.id) ?? null),
+    })),
+  );
 });
 
 batchesRouter.get('/:id', async (req, res) => {
@@ -105,8 +116,8 @@ batchesRouter.get('/:id', async (req, res) => {
 batchesRouter.get('/:id/roster', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const { date } = parse(z.object({ date: zIsoDate.optional() }), req.query);
-  await assertBatchAccess(currentUser(req), id);
   const day = date ?? todayInAppTz();
+  await assertBatchAccess(currentUser(req), id, { on: day });
   ok(res, { date: day, students: await expectedRoster(id, day) });
 });
 

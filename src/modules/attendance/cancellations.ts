@@ -99,7 +99,7 @@ cancellationsRouter.post('/:id/cancellations', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(CancelBody, req.body);
   const user = currentUser(req);
-  const batch = await assertBatchAccess(user, id);
+  const batch = await assertBatchAccess(user, id, { on: body.date });
   const today = todayInAppTz();
 
   if (!batch.weekdays.includes(isoWeekday(body.date))) {
@@ -146,7 +146,7 @@ cancellationsRouter.post('/:id/cancellations', async (req, res) => {
 cancellationsRouter.delete('/:id/cancellations/:date', async (req, res) => {
   const { id, date } = parse(z.object({ id: zId, date: zIsoDate }), req.params);
   const user = currentUser(req);
-  await assertBatchAccess(user, id);
+  await assertBatchAccess(user, id, { on: date });
   const [row] = await db
     .delete(sessionCancellations)
     .where(and(eq(sessionCancellations.batchId, id), eq(sessionCancellations.date, date)))

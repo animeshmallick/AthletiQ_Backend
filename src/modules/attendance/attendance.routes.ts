@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, inArray, lte, sql, type SQL } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, lte, sql, type SQL, or } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { COACH_ATTENDANCE_EDIT_WINDOW_DAYS } from '../../config/constants.js';
@@ -28,6 +28,7 @@ import { assertBatchAccess, assertStudentAccess, isAdmin } from '../access/acces
 import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { expectedRoster } from '../batches/roster.js';
+import { coveredBy, substitutesOn } from '../substitutions/coverage.js';
 import { assertNotCancelled, cancellationsIn, getCancellation } from './cancellations.js';
 
 export const attendanceRouter = Router();
@@ -51,7 +52,8 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
   const weekday = isoWeekday(day);
 
   const filters: SQL[] = [eq(batches.isActive, true), sql`${weekday} = any(${batches.weekdays})`];
-  if (!isAdmin(user)) filters.push(eq(batches.coachId, user.id));
+  // Coaches: their own batches, plus batches they cover as a substitute that day.
+  if (!isAdmin(user)) filters.push(or(eq(batches.coachId, user.id), coveredBy(user.id, day))!);
 
   const sessionBatches = await db
     .select({
@@ -69,7 +71,10 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
     .orderBy(asc(batches.startTime));
 
   const ids = sessionBatches.map((b) => b.id);
-  const cancelled = await cancellationsIn(ids, day, day);
+  const [cancelled, subs] = await Promise.all([
+    cancellationsIn(ids, day, day),
+    substitutesOn(ids, day),
+  ]);
   const [marks, checkIns, plans, rosters] = await Promise.all([
     ids.length
       ? db
@@ -106,6 +111,8 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
         attendanceComplete: expected > 0 && batchMarks.length >= expected,
         hasLessonPlan: plans.some((p) => p.batchId === b.id),
         cancelled: cancelled.get(`${b.id}:${day}`) ?? null,
+        /** Who covers this session as a substitute coach, if anyone. */
+        substitute: subs.get(b.id) ?? null,
         coachSession: cs
           ? {
               checkInAt: cs.checkInAt,
@@ -147,7 +154,7 @@ const SessionQuery = z.object({ batchId: zId, date: zIsoDate });
 attendanceRouter.get('/session', async (req, res) => {
   const { batchId, date } = parse(SessionQuery, req.query);
   const user = currentUser(req);
-  const batch = await assertBatchAccess(user, batchId);
+  const batch = await assertBatchAccess(user, batchId, { on: date });
 
   const [roster, marks, cancellation] = await Promise.all([
     expectedRoster(batchId, date),
@@ -262,7 +269,7 @@ const MarkBody = z.object({
 attendanceRouter.put('/session', async (req, res) => {
   const body = parse(MarkBody, req.body);
   const user = currentUser(req);
-  const batch = await assertBatchAccess(user, body.batchId);
+  const batch = await assertBatchAccess(user, body.batchId, { on: body.date });
 
   await assertNotCancelled(body.batchId, body.date);
   const edit = canEdit(user.role, body.date);
@@ -390,7 +397,8 @@ attendanceRouter.get('/register', async (req, res) => {
   const q = parse(RegisterQuery, req.query);
   if (q.to < q.from) throw AppError.badRequest('"to" must be on or after "from"');
   if (diffDays(q.from, q.to) > 62) throw AppError.badRequest('Date range cannot exceed 62 days');
-  const batch = await assertBatchAccess(currentUser(req), q.batchId);
+  // The full register is the batch's history: its own coach and admins only.
+  const batch = await assertBatchAccess(currentUser(req), q.batchId, { mainOnly: true });
 
   const sessionDates = eachDay(q.from, q.to).filter((d) => batch.weekdays.includes(isoWeekday(d)));
   const records = await db

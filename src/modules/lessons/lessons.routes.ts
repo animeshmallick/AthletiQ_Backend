@@ -8,7 +8,7 @@ import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate, zName, zOptionalText } from '../../lib/validation.js';
 import { currentUser, requireCoach } from '../../middleware/auth.js';
-import { assertBatchAccess } from '../access/access.js';
+import { assertBatchAccess, isSubstituteFor } from '../access/access.js';
 import { cancellationsIn, getCancellation } from '../attendance/cancellations.js';
 import { lessonInsights } from './insights.js';
 
@@ -252,7 +252,7 @@ lessonsRouter.get('/insights', lessonInsights);
 
 lessonsRouter.get('/plans/day', async (req, res) => {
   const q = parse(z.object({ batchId: zId, date: zIsoDate }), req.query);
-  const batch = await assertBatchAccess(currentUser(req), q.batchId);
+  const batch = await assertBatchAccess(currentUser(req), q.batchId, { on: q.date });
   const [plan, cancelled, blocked, [previous]] = await Promise.all([
     loadPlan(q.batchId, q.date),
     getCancellation(q.batchId, q.date),
@@ -389,7 +389,7 @@ async function planBlockedReason(
 lessonsRouter.put('/plans/day', requireCoach, async (req, res) => {
   const body = parse(SavePlanBody, req.body);
   const coachId = currentUser(req).id;
-  const batch = await assertBatchAccess(currentUser(req), body.batchId);
+  const batch = await assertBatchAccess(currentUser(req), body.batchId, { on: body.date });
   const blocked = await planBlockedReason(batch, body.date);
   if (blocked) throw AppError.unprocessable(blocked);
 
@@ -402,7 +402,7 @@ lessonsRouter.put('/plans/day', requireCoach, async (req, res) => {
 
 lessonsRouter.delete('/plans/day', requireCoach, async (req, res) => {
   const q = parse(z.object({ batchId: zId, date: zIsoDate }), req.query);
-  await assertBatchAccess(currentUser(req), q.batchId);
+  await assertBatchAccess(currentUser(req), q.batchId, { on: q.date });
   await db
     .delete(lessonPlans)
     .where(and(eq(lessonPlans.batchId, q.batchId), eq(lessonPlans.date, q.date)));
@@ -478,20 +478,22 @@ async function mapOntoTemplate(
 lessonsRouter.post('/plans/copy', requireCoach, async (req, res) => {
   const body = parse(CopyBody, req.body);
   const user = currentUser(req);
-  await assertBatchAccess(user, body.batchId);
+  const sourceBatch = await assertBatchAccess(user, body.batchId, { on: body.fromDate });
   const targetBatchId = body.toBatchId ?? body.batchId;
   const targetBatch =
-    targetBatchId !== body.batchId
-      ? await assertBatchAccess(user, targetBatchId)
-      : await assertBatchAccess(user, body.batchId);
+    targetBatchId !== body.batchId ? await assertBatchAccess(user, targetBatchId) : sourceBatch;
 
   const source = await loadPlan(body.batchId, body.fromDate);
   if (!source) throw AppError.notFound('Source plan');
 
   // Days the target batch doesn't run (or cancelled) are skipped. Checked before the transaction.
   const blocked = new Set<string>();
+  const substitute = targetBatch.coachId !== user.id;
   for (const date of new Set(body.toDates)) {
     if (await planBlockedReason(targetBatch, date)) blocked.add(date);
+    // A substitute can only plan the days they cover.
+    else if (substitute && !(await isSubstituteFor(user.id, targetBatchId, date)))
+      blocked.add(date);
   }
 
   const result = await db.transaction(async (tx) => {

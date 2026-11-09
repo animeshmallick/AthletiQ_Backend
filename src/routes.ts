@@ -19,6 +19,7 @@ import {
   registrationsRouter,
 } from './modules/registrations/registrations.routes.js';
 import { settingsRouter } from './modules/settings/settings.js';
+import { substitutionsRouter } from './modules/substitutions/substitutions.routes.js';
 import { studentsRouter } from './modules/students/students.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
 import { makeupsRouter } from './modules/makeups/makeups.routes.js';
@@ -54,6 +55,7 @@ export function apiRouter(): Router {
   api.use('/me', pushRouter);
   api.use('/dashboard', dashboardRouter);
   api.use('/reports', reportsRouter);
+  api.use('/substitutions', substitutionsRouter);
 
   // Admin only
   api.use('/registrations', requireAdmin, registrationsRouter);

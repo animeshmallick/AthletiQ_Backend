@@ -9,8 +9,9 @@ import { ok } from '../../lib/http.js';
 import { distanceMeters, isWithinGeofence } from '../../lib/geo.js';
 import { parse, zId, zIdParam, zIsoDate, zOptionalText } from '../../lib/validation.js';
 import { currentUser, requireAdmin, requireCoach } from '../../middleware/auth.js';
-import { isAdmin } from '../access/access.js';
+import { isAdmin, isSubstituteFor } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import { coveredBy, substitutesOn } from '../substitutions/coverage.js';
 import { assertNotCancelled, cancellationsIn } from './cancellations.js';
 import { notifyAdmins, notifyInBackground, notifyUsers } from '../push/push.service.js';
 
@@ -25,13 +26,16 @@ const GpsBody = z.object({
   note: zOptionalText(500),
 });
 
+/** The batch (with location) if this coach runs it today: as its coach or its substitute. */
 async function loadOwnBatchWithLocation(coachId: string, batchId: string) {
   const [row] = await db
     .select({ batch: batches, location: locations })
     .from(batches)
     .innerJoin(locations, eq(locations.id, batches.locationId))
-    .where(and(eq(batches.id, batchId), eq(batches.coachId, coachId)));
+    .where(eq(batches.id, batchId));
   if (!row) throw AppError.notFound('Batch');
+  if (row.batch.coachId !== coachId && !(await isSubstituteFor(coachId, batchId, todayInAppTz())))
+    throw AppError.notFound('Batch');
   return row;
 }
 
@@ -71,7 +75,7 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
       .innerJoin(locations, eq(locations.id, batches.locationId))
       .where(
         and(
-          eq(batches.coachId, user.id),
+          or(eq(batches.coachId, user.id), coveredBy(user.id, today)),
           eq(batches.isActive, true),
           sql`${weekday} = any(${batches.weekdays})`,
         ),
@@ -83,11 +87,11 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
       .where(and(eq(coachSessions.coachId, user.id), eq(coachSessions.date, today))),
   ]);
 
-  const cancelled = await cancellationsIn(
-    todaysBatches.map((b) => b.batch.id),
-    today,
-    today,
-  );
+  const ids = todaysBatches.map((b) => b.batch.id);
+  const [cancelled, subs] = await Promise.all([
+    cancellationsIn(ids, today, today),
+    substitutesOn(ids, today),
+  ]);
   ok(res, {
     date: today,
     sessions: todaysBatches.map(({ batch, location }) => {
@@ -109,6 +113,9 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
         },
         session: s ? present(s) : null,
         cancelled: cancelled.get(`${batch.id}:${today}`) ?? null,
+        /** You're covering this batch today as a substitute. */
+        asSubstitute: batch.coachId !== user.id,
+        substitute: subs.get(batch.id) ?? null,
       };
     }),
   });

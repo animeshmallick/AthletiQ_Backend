@@ -8,6 +8,7 @@ import { db } from '../../db/client.js';
 import {
   coachSessions,
   invoices,
+  batchSubstitutions,
   makeupSessions,
   registrationRequests,
 } from '../../db/schema/index.js';
@@ -31,7 +32,8 @@ export interface Task {
     | 'registrations'
     | 'flagged-check-ins'
     | 'overdue-fees'
-    | 'makeup-requests';
+    | 'makeup-requests'
+    | 'substitute-requests';
   severity: TaskSeverity;
   title: string;
   detail: string;
@@ -169,7 +171,7 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
       });
     }
   } else {
-    const [[regs], [flags], [overdue], [makeups]] = await Promise.all([
+    const [[regs], [flags], [overdue], [makeups], [subs]] = await Promise.all([
       db
         .select({ n: count() })
         .from(registrationRequests)
@@ -183,7 +185,23 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
         .from(invoices)
         .where(and(eq(invoices.status, 'due'), lt(invoices.dueDate, today))),
       db.select({ n: count() }).from(makeupSessions).where(eq(makeupSessions.status, 'pending')),
+      db
+        .select({ n: count() })
+        .from(batchSubstitutions)
+        .where(eq(batchSubstitutions.status, 'pending')),
     ]);
+    if (subs!.n > 0) {
+      tasks.push({
+        id: 'substitute-requests',
+        kind: 'substitute-requests',
+        severity: 'warning',
+        title: `${subs!.n} substitute request${subs!.n === 1 ? '' : 's'} to review`,
+        detail: 'Coaches asked for someone to cover their batch',
+        link: '/substitutions',
+        screen: '/substitutions',
+        count: subs!.n,
+      });
+    }
     if (makeups!.n > 0) {
       tasks.push({
         id: 'makeup-requests',
