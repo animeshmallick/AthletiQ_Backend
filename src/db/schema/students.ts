@@ -95,6 +95,11 @@ export const enrollments = pgTable(
     billingAnchorDate: date({ mode: 'string' }),
     /** Added to local cycle numbers so a continued billing run keeps counting. */
     cycleOffset: integer().notNull().default(0),
+    /**
+     * Highest cycle that cost nothing (free plan, or fully discounted): no invoice is created for
+     * those, but they count as billed so a later fee never back-bills them.
+     */
+    lastFreeCycle: integer().notNull().default(0),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
     ...timestamps,
   },

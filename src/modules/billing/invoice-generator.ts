@@ -34,6 +34,8 @@ export interface GenerationStats {
   /** Batch memberships looked at. */
   studentsScanned: number;
   invoicesCreated: number;
+  /** Cycles that cost nothing: no invoice, just marked as covered. */
+  freeCycles: number;
   skippedExisting: number;
   failures: { studentId: string; enrollmentId: string; cycleNumber: number; error: string }[];
 }
@@ -71,7 +73,7 @@ export async function generateDueInvoices(
       monthlyDiscount: enrollments.monthlyDiscount,
       batch: { id: batches.id, name: batches.name, coachId: batches.coachId },
       plan: { id: feePlans.id, name: feePlans.name, monthlyFee: feePlans.monthlyFee },
-      lastInvoicedCycle: sql<number>`coalesce(${lastCycle.last}, 0)::int`,
+      lastInvoicedCycle: sql<number>`greatest(coalesce(${lastCycle.last}, 0), ${enrollments.lastFreeCycle})::int`,
     })
     .from(enrollments)
     .innerJoin(students, eq(students.id, enrollments.studentId))
@@ -88,6 +90,7 @@ export async function generateDueInvoices(
     runDate: today,
     studentsScanned: rows.length,
     invoicesCreated: 0,
+    freeCycles: 0,
     skippedExisting: 0,
     failures: [],
   };
@@ -107,8 +110,9 @@ export async function generateDueInvoices(
     // Keep each membership's cycles in order: after a failure, retry the rest on the next run.
     if (failed.has(e.id)) continue;
     try {
-      const createdInvoice = await createCycleInvoice(e, cycle);
-      if (createdInvoice) stats.invoicesCreated++;
+      const result = await createCycleInvoice(e, cycle);
+      if (result === 'created') stats.invoicesCreated++;
+      else if (result === 'free') stats.freeCycles++;
       else stats.skippedExisting++;
     } catch (err) {
       logger.error(
@@ -138,10 +142,19 @@ async function createCycleInvoice(
     plan: { id: string; name: string; monthlyFee: number };
   },
   cycle: Cycle,
-): Promise<boolean> {
+): Promise<'created' | 'free' | 'exists'> {
+  const fee = effectiveMonthlyFee(e.plan.monthlyFee, e.customMonthlyFee, e.monthlyDiscount);
+  if (fee.total === 0) {
+    // Nothing to pay (free plan or fully discounted): no invoice. The cycle is recorded as
+    // covered so it is never billed later, even if a fee is set afterwards.
+    await db
+      .update(enrollments)
+      .set({ lastFreeCycle: sql`greatest(${enrollments.lastFreeCycle}, ${cycle.cycleNumber})` })
+      .where(eq(enrollments.id, e.id));
+    return 'free';
+  }
   try {
     return await db.transaction(async (tx) => {
-      const fee = effectiveMonthlyFee(e.plan.monthlyFee, e.customMonthlyFee, e.monthlyDiscount);
       const number = await nextInvoiceNumber(tx, cycle.issueDate);
       await tx.insert(invoices).values({
         number,
@@ -160,16 +173,14 @@ async function createCycleInvoice(
         baseAmount: fee.base,
         discountAmount: fee.discount,
         totalAmount: fee.total,
-        // A zero-amount cycle (100% discount) is settled immediately.
-        status: fee.total === 0 ? 'paid' : 'due',
-        paidAt: fee.total === 0 ? new Date() : null,
+        status: 'due',
       });
-      return true;
+      return 'created' as const;
     });
   } catch (err) {
     // Another process created this cycle concurrently — the transaction rolled back (including
     // the sequence increment), so numbering stays gap-free.
-    if (mapPgError(err)?.code === 'CONFLICT') return false;
+    if (mapPgError(err)?.code === 'CONFLICT') return 'exists';
     throw err;
   }
 }

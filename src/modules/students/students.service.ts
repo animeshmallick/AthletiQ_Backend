@@ -287,7 +287,7 @@ export async function getStudentDetail(studentId: string) {
         billingAnchorDate: enrollments.billingAnchorDate,
         billingStartsOn: enrollments.billingStartsOn,
         cycleOffset: enrollments.cycleOffset,
-        lastInvoicedCycle: sql<number>`coalesce(${lastCycle.last}, 0)::int`,
+        lastInvoicedCycle: sql<number>`greatest(coalesce(${lastCycle.last}, 0), ${enrollments.lastFreeCycle})::int`,
         plan: {
           id: feePlans.id,
           name: feePlans.name,
@@ -342,6 +342,7 @@ export async function getStudentDetail(studentId: string) {
     .filter((h) => h.effectiveTo === null)
     .sort((x, y) => x.effectiveFrom.localeCompare(y.effectiveFrom))
     .map((h) => {
+      const fee = effectiveMonthlyFee(h.plan.monthlyFee, h.customMonthlyFee, h.monthlyDiscount);
       const next = nextUpcomingCycle(
         {
           joiningDate: h.effectiveFrom,
@@ -368,12 +369,18 @@ export async function getStudentDetail(studentId: string) {
         plan: h.plan,
         customMonthlyFee: h.customMonthlyFee,
         monthlyDiscount: h.monthlyDiscount,
-        fee: effectiveMonthlyFee(h.plan.monthlyFee, h.customMonthlyFee, h.monthlyDiscount),
+        fee,
         /** Day of the month invoices are issued for this batch. */
         billingDay: Number((h.billingAnchorDate ?? h.effectiveFrom).slice(8, 10)),
-        nextInvoice: next
-          ? { issueDate: next.issueDate, periodStart: next.periodStart, periodEnd: next.periodEnd }
-          : null,
+        // Free memberships never get an invoice.
+        nextInvoice:
+          next && fee.total > 0
+            ? {
+                issueDate: next.issueDate,
+                periodStart: next.periodStart,
+                periodEnd: next.periodEnd,
+              }
+            : null,
       };
     });
   const sum = (k: 'base' | 'discount' | 'total') => memberships.reduce((n, m) => n + m.fee[k], 0);

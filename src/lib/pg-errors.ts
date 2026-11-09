@@ -20,7 +20,8 @@ const UNIQUE_MESSAGES: Record<string, string> = {
   users_email_lower_uq: 'A user with this email already exists',
   locations_name_lower_uq: 'A location with this name already exists',
   batches_name_lower_uq: 'A batch with this name already exists',
-  fee_plans_name_lower_uq: 'A fee plan with this name already exists',
+  fee_plans_name_lower_uq:
+    'A fee plan with this name already exists (the built-in free plan counts too)',
   lesson_stages_coach_name_uq: 'You already have a stage with this name',
   lesson_events_coach_name_uq: 'You already have an event with this name',
   makeup_student_batch_date_uq: 'This student already has a makeup in this batch on that date',

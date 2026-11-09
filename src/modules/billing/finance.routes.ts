@@ -263,7 +263,7 @@ financeRouter.get('/projection', async (req, res) => {
       monthlyDiscount: enrollments.monthlyDiscount,
       planFee: feePlans.monthlyFee,
       batchName: batches.name,
-      lastInvoicedCycle: sql<number>`coalesce(${lastCycle.last}, 0)::int`,
+      lastInvoicedCycle: sql<number>`greatest(coalesce(${lastCycle.last}, 0), ${enrollments.lastFreeCycle})::int`,
     })
     .from(enrollments)
     .innerJoin(students, eq(students.id, enrollments.studentId))
@@ -284,6 +284,8 @@ financeRouter.get('/projection', async (req, res) => {
     .map((r) => {
       const cycle = nextUpcomingCycle(r, today);
       if (!cycle || cycle.issueDate > until) return null;
+      const amount = effectiveMonthlyFee(r.planFee, r.customMonthlyFee, r.monthlyDiscount).total;
+      if (amount === 0) return null; // free: no invoice
       return {
         studentId: r.id,
         code: r.code,
@@ -292,7 +294,7 @@ financeRouter.get('/projection', async (req, res) => {
         issueDate: cycle.issueDate,
         periodStart: cycle.periodStart,
         periodEnd: cycle.periodEnd,
-        amount: effectiveMonthlyFee(r.planFee, r.customMonthlyFee, r.monthlyDiscount).total,
+        amount,
       };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)

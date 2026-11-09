@@ -104,10 +104,18 @@ export const feePlans = pgTable(
     daysPerWeek: smallint().notNull(),
     monthlyFee: integer().notNull(),
     isActive: boolean().notNull().default(true),
+    /**
+     * The built-in free plan: ₹0, fits a batch on any number of days, offered when setting up a
+     * batch but not listed (or editable) on the Fee plans page. There is exactly one.
+     */
+    isSystem: boolean().notNull().default(false),
     ...timestamps,
   },
   (t) => [
     uniqueIndex('fee_plans_name_lower_uq').on(sql`lower(${t.name})`),
+    uniqueIndex('fee_plans_one_system_uq')
+      .on(t.isSystem)
+      .where(sql`${t.isSystem}`),
     check('fee_plans_days_chk', sql`${t.daysPerWeek} between 1 and 7`),
     check('fee_plans_fee_chk', sql`${t.monthlyFee} >= 0`),
   ],

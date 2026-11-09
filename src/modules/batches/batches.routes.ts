@@ -200,7 +200,8 @@ async function assertPlanFits(feePlanId: string, weekdays: number[]) {
   const p = await db.query.feePlans.findFirst({ where: eq(feePlans.id, feePlanId) });
   if (!p) throw AppError.unprocessable('Selected fee plan does not exist');
   if (!p.isActive) throw AppError.unprocessable('Selected fee plan is inactive');
-  if (p.daysPerWeek !== weekdays.length)
+  // The free plan fits a batch on any number of days.
+  if (!p.isSystem && p.daysPerWeek !== weekdays.length)
     throw new AppError(
       'VALIDATION_ERROR',
       `${p.name} is for ${p.daysPerWeek} day${p.daysPerWeek === 1 ? '' : 's'} a week, but the batch runs ${weekdays.length}.`,

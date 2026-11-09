@@ -1,4 +1,4 @@
-import { and, asc, count, eq, isNull } from 'drizzle-orm';
+import { and, asc, count, desc, eq, isNull } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -17,6 +17,7 @@ import {
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { saveSplit, splitTrees } from '../funds/split.routes.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import { ensureFreePlan } from './free-plan.js';
 
 export const feePlansRouter = Router();
 
@@ -29,10 +30,22 @@ const PlanBody = z.object({
   isActive: z.boolean().default(true),
 });
 
-const ListQuery = z.object({ active: zBoolQuery });
+const ListQuery = z.object({
+  active: zBoolQuery,
+  /** Picking a plan for a batch: also offers the built-in free plan. */
+  forBatch: zBoolQuery,
+});
+
+async function assertEditable(id: string) {
+  const p = await db.query.feePlans.findFirst({ where: eq(feePlans.id, id) });
+  if (!p) throw AppError.notFound('Fee plan');
+  if (p.isSystem) throw AppError.unprocessable('The free plan is built in and can’t be changed.');
+  return p;
+}
 
 feePlansRouter.get('/', async (req, res) => {
   const q = parse(ListQuery, req.query);
+  if (q.forBatch) await ensureFreePlan();
   const usage = db
     .select({ feePlanId: batches.feePlanId, n: count().as('n') })
     .from(enrollments)
@@ -45,8 +58,14 @@ feePlansRouter.get('/', async (req, res) => {
     .select({ plan: feePlans, activeStudents: usage.n })
     .from(feePlans)
     .leftJoin(usage, eq(usage.feePlanId, feePlans.id))
-    .where(q.active === undefined ? undefined : eq(feePlans.isActive, q.active))
-    .orderBy(asc(feePlans.daysPerWeek), asc(feePlans.monthlyFee));
+    .where(
+      and(
+        q.active === undefined ? undefined : eq(feePlans.isActive, q.active),
+        q.forBatch ? undefined : eq(feePlans.isSystem, false),
+      ),
+    )
+    // The free plan first, then by days and price.
+    .orderBy(desc(feePlans.isSystem), asc(feePlans.daysPerWeek), asc(feePlans.monthlyFee));
 
   // Admins also get each plan's fee split ([] = everything to the academy).
   const splits = currentUser(req).role === 'admin' ? await splitTrees() : null;
@@ -80,6 +99,7 @@ feePlansRouter.post('/', requireAdmin, async (req, res) => {
 feePlansRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(patchOf(PlanBody), req.body);
+  const before = await assertEditable(id);
 
   if (body.isActive === false) {
     const [inUse] = await db
@@ -93,8 +113,6 @@ feePlansRouter.patch('/:id', requireAdmin, async (req, res) => {
     }
   }
 
-  const before = await db.query.feePlans.findFirst({ where: eq(feePlans.id, id) });
-  if (!before) throw AppError.notFound('Fee plan');
   const [plan] = await db.update(feePlans).set(body).where(eq(feePlans.id, id)).returning();
   await audit({
     ...auditCtx(req),
@@ -109,4 +127,12 @@ feePlansRouter.patch('/:id', requireAdmin, async (req, res) => {
   ok(res, plan);
 });
 
-feePlansRouter.put('/:id/split', requireAdmin, saveSplit);
+feePlansRouter.put(
+  '/:id/split',
+  requireAdmin,
+  async (req, _res, next) => {
+    await assertEditable(parse(zIdParam, req.params).id);
+    next();
+  },
+  saveSplit,
+);

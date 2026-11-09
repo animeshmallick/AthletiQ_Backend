@@ -327,7 +327,7 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
         let billing: Partial<typeof enrollments.$inferInsert> = {
           billingStartsOn: minDate(todayInAppTz(), body.joiningDate),
         };
-        if (rows.length) {
+        if (rows.length || e.lastFreeCycle) {
           await tx
             .update(invoices)
             .set({ status: 'cancelled', cancelledReason: 'Joining date corrected' })
@@ -335,7 +335,7 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
           billing = {
             ...billing,
             billingAnchorDate: body.joiningDate,
-            cycleOffset: Math.max(...rows.map((r) => r.cycle)),
+            cycleOffset: Math.max(e.lastFreeCycle, ...rows.map((r) => r.cycle)),
           };
           rebill = true;
         }

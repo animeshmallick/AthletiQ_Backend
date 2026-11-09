@@ -94,10 +94,26 @@ describe('invoice generation', () => {
     expect((await allInvoices()).map((r) => r.totalAmount)).toEqual([250_000, 400_000]);
   });
 
-  it('settles zero-amount cycles automatically', async () => {
-    await academyWithStudent({ customMonthlyFee: 0 });
-    await generateDueInvoices('2026-01-10');
-    expect((await allInvoices())[0]).toMatchObject({ totalAmount: 0, status: 'paid' });
+  it('creates no invoice for a free cycle, and never back-bills it', async () => {
+    const { admin, student } = await academyWithStudent({ customMonthlyFee: 0 });
+    const stats = await generateDueInvoices('2026-02-10');
+    expect(stats).toMatchObject({ invoicesCreated: 0, freeCycles: 2 });
+    expect(await allInvoices()).toEqual([]);
+    const api = await as(admin);
+    const detail = (await api.get(`/api/v1/students/${student.id}`).expect(200)).body.data;
+    expect(detail.memberships[0].nextInvoice).toBeNull();
+    // A fee from now on bills only the cycles still to come.
+    await api
+      .patch(`/api/v1/students/${student.id}/batches/${detail.memberships[0].enrollmentId}`, {
+        customMonthlyFee: null,
+      })
+      .expect(200);
+    await generateDueInvoices('2026-03-10');
+    expect((await allInvoices()).map((i) => [i.cycleNumber, i.periodStart])).toEqual([
+      [3, '2026-03-10'],
+    ]);
+    // Free again → re-running creates nothing new.
+    expect((await generateDueInvoices('2026-03-10')).invoicesCreated).toBe(0);
   });
 
   it('stops billing after a student leaves (the month in progress was prepaid)', async () => {
