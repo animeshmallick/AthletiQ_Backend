@@ -234,6 +234,16 @@ function noticeDecision(r: Row, actorId: string) {
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
+/** Active coaches who can be picked as a substitute (names only; any signed-in user). */
+substitutionsRouter.get('/coaches', async (_req, res) => {
+  const rows = await db
+    .select({ id: users.id, name: users.name })
+    .from(users)
+    .where(and(eq(users.role, 'coach'), eq(users.status, 'active')))
+    .orderBy(users.name);
+  ok(res, rows);
+});
+
 const ListQuery = z.object({
   status: z.enum(['pending', 'approved', 'rejected', 'cancelled']).optional(),
   batchId: zId.optional(),

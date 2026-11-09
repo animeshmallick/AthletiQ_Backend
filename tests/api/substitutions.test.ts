@@ -192,6 +192,10 @@ describe('substitute coaches', () => {
         toDate: '2026-03-20',
       })
       .expect(201);
+    const coaches = (await coach$.get('/api/v1/substitutions/coaches').expect(200)).body.data;
+    expect(coaches.map((c: { id: string }) => c.id)).toEqual(
+      expect.arrayContaining([coach.id, otherCoach.id]),
+    );
     const range = '?from=2026-03-01&to=2026-03-31';
     const academy = (await admin$.get(`/api/v1/substitutions/insights${range}`).expect(200)).body
       .data;
