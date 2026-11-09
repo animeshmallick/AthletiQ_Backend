@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { db, type DbOrTx } from '../../db/client.js';
@@ -10,6 +10,7 @@ import { parse, zId, zIdParam, zIsoDate, zName, zOptionalText } from '../../lib/
 import { currentUser, requireCoach } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
 import { cancellationsIn, getCancellation } from '../attendance/cancellations.js';
+import { lessonInsights } from './insights.js';
 
 export const lessonsRouter = Router();
 
@@ -195,13 +196,22 @@ lessonsRouter.get('/plans', async (req, res) => {
   });
 });
 
+/** Planning coverage, look-ahead and library usage across the caller's batches. */
+lessonsRouter.get('/insights', lessonInsights);
+
 lessonsRouter.get('/plans/day', async (req, res) => {
   const q = parse(z.object({ batchId: zId, date: zIsoDate }), req.query);
   const batch = await assertBatchAccess(currentUser(req), q.batchId);
-  const [plan, cancelled, blocked] = await Promise.all([
+  const [plan, cancelled, blocked, [previous]] = await Promise.all([
     loadPlan(q.batchId, q.date),
     getCancellation(q.batchId, q.date),
     planBlockedReason(batch, q.date),
+    db
+      .select({ date: lessonPlans.date })
+      .from(lessonPlans)
+      .where(and(eq(lessonPlans.batchId, q.batchId), lt(lessonPlans.date, q.date)))
+      .orderBy(desc(lessonPlans.date))
+      .limit(1),
   ]);
   ok(res, {
     batch: { id: batch.id, name: batch.name },
@@ -210,6 +220,8 @@ lessonsRouter.get('/plans/day', async (req, res) => {
     cancelled: cancelled?.reason ?? null,
     /** Why the plan can't be edited on this day (not a session day / cancelled), else null. */
     lockedReason: blocked,
+    /** The most recent earlier plan for this batch, to start a new day from. */
+    previousPlanDate: previous?.date ?? null,
     plan,
   });
 });
