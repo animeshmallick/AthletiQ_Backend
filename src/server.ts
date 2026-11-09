@@ -4,6 +4,7 @@ import { env } from './config/env.js';
 import { closeDatabase } from './db/client.js';
 import { startScheduler, stopScheduler } from './jobs/scheduler.js';
 import { logger } from './lib/logger.js';
+import { flushRequestLog } from './modules/activity/request-log.js';
 
 const app = createApp();
 const server: Server = app.listen(env.PORT, () => {
@@ -33,6 +34,8 @@ async function shutdown(signal: string) {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
     );
+    // Save the request log still waiting in memory before the database goes away.
+    await flushRequestLog();
     await closeDatabase();
     logger.info('Shutdown complete');
     process.exit(0);

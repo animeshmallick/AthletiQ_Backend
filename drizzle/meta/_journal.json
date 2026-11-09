@@ -71,6 +71,13 @@
       "when": 1794218706297,
       "tag": "0009_batch_substitutions",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794223359415,
+      "tag": "0010_api_requests",
+      "breakpoints": true
     }
   ]
 }

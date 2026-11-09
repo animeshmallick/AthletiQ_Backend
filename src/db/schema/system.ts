@@ -60,3 +60,33 @@ export const jobRuns = pgTable(
   },
   (t) => [index('job_runs_name_started_idx').on(t.jobName, t.startedAt)],
 );
+
+/**
+ * Request log: every write (POST/PUT/PATCH/DELETE) and every failed request, by whom, how long
+ * it took and how it ended. Collected in memory and saved in batches off the request path, so
+ * tracking costs requests nothing noticeable; pruned after 90 days.
+ */
+export const apiRequests = pgTable(
+  'api_requests',
+  {
+    id: id(),
+    method: text().notNull(),
+    /** Route pattern ("/api/v1/invoices/:id"), so the same endpoint groups together. */
+    route: text().notNull(),
+    status: integer().notNull(),
+    durationMs: integer().notNull(),
+    /** Error code and message for failed requests. */
+    code: text(),
+    message: text(),
+    userId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    requestId: text(),
+    ipAddress: text(),
+    userAgent: text(),
+    createdAt: tz().notNull().defaultNow(),
+  },
+  (t) => [
+    index('api_requests_created_idx').on(t.createdAt),
+    index('api_requests_status_idx').on(t.status, t.createdAt),
+    index('api_requests_user_idx').on(t.userId, t.createdAt),
+  ],
+);

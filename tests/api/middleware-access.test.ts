@@ -30,6 +30,7 @@ const ZERO_ID = '00000000-0000-4000-8000-000000000000';
 function mockRes(headersSent = false) {
   const res = {
     headersSent,
+    locals: {} as Record<string, unknown>,
     statusCode: 0,
     body: undefined as unknown,
     status(n: number) {

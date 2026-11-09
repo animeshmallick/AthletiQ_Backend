@@ -12,6 +12,7 @@ import { pushStatus } from './modules/push/push.service.js';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { apiLimiter } from './middleware/rate-limit.js';
+import { requestLog } from './modules/activity/request-log.js';
 import { apiRouter } from './routes.js';
 
 export function createApp(): Express {
@@ -28,6 +29,9 @@ export function createApp(): Express {
     res.setHeader('X-Request-Id', req.id);
     next();
   });
+
+  // Track writes and failures (saved in batches, off the request path).
+  app.use('/api', requestLog);
 
   app.use(
     pinoHttp({

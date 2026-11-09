@@ -36,6 +36,9 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     logger.debug({ code: appError.code, requestId: req.id }, appError.message);
   }
 
+  // The request log picks this up when the response finishes.
+  res.locals.apiError = { code: appError.code, message: appError.message };
+
   if (res.headersSent) return;
 
   res.status(appError.status).json({
