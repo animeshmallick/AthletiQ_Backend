@@ -36,8 +36,9 @@ export function routeOf(url: string): string {
 
 /** Expected, harmless failures that would only drown the real ones. */
 function isNoise(req: Request, status: number) {
-  // A signed-out browser checking for a session.
-  return status === 401 && req.originalUrl.startsWith('/api/v1/auth/refresh');
+  // Session keep-alive (and a signed-out browser checking for a session): constant and not
+  // a change anyone made. Server errors on it are still recorded.
+  return status < 500 && req.originalUrl.startsWith('/api/v1/auth/refresh');
 }
 
 /** Saves what's queued (one insert). Safe to call any time; used by tests and on shutdown. */

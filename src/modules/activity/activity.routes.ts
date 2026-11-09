@@ -37,7 +37,7 @@ const TZ = 'Asia/Kolkata';
 const TZS = sql.raw(`'${TZ}'`);
 /** Actions that deserve a second look: money reversed, access changed, things removed. */
 const SENSITIVE =
-  '(refund|revert|revers|cancel|disabl|delete|remov|password|role|split|discount|waive|reject)';
+  '(refund|revert|revers|cancel|disabl|delete|remov|password|role|split|discount|waive|reject|token_reuse|locked)';
 
 const localDay = (col: typeof auditLogs.createdAt | typeof apiRequests.createdAt) =>
   sql<string>`to_char(${col} at time zone ${TZS}, 'YYYY-MM-DD')`;
