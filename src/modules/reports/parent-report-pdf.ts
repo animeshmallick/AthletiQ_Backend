@@ -6,7 +6,7 @@
 import PDFDocument from 'pdfkit';
 import { formatDisplayDate } from '../../lib/dates.js';
 import type { AcademySettings } from '../settings/settings.js';
-import { RATING_LABELS, type Framework } from '../skills/framework.js';
+import { bandOf, RATING_LABELS, type Framework } from '../skills/framework.js';
 import { areaAverage, type AssessmentView, type SportProgress } from '../skills/progress.js';
 import { BRAND_ICON_PNG } from './brand-icon.js';
 import type { StudentReport } from './report-data.js';
@@ -67,15 +67,14 @@ const attTone = (r: number | null) =>
   r === null ? C.muted : r >= 80 ? C.good : r >= 60 ? C.warn : C.bad;
 
 /** Colours for well-known level names; others use the brand. */
-function levelColor(name: string | null | undefined): string {
-  const n = (name ?? '').toLowerCase();
-  if (n.includes('bronze')) return '#b45309';
-  if (n.includes('silver')) return '#64748b';
-  if (n.includes('gold')) return '#ca8a04';
-  if (n.includes('platinum') || n.includes('elite')) return '#7c3aed';
-  if (n.includes('foundation') || n.includes('starter')) return '#0891b2';
-  return C.brand;
+/** Band colours: A Beginner (teal), B Intermediate (blue), C Advanced (violet). */
+const BAND_COLOR: Record<string, string> = { A: '#0d9488', B: '#2563eb', C: '#7c3aed' };
+function levelColor(code: string | null | undefined): string {
+  return (code && BAND_COLOR[code[0]!]) || C.brand;
 }
+/** "B1 · Lower Intermediate" (or just the name for a custom level without a code). */
+const levelText = (code: string | null | undefined, name: string) =>
+  code ? `${code} · ${name}` : name;
 
 // ─── Drawing helpers ────────────────────────────────────────────────────────
 
@@ -325,9 +324,11 @@ function highlights(r: StudentReport, sp: SportProgress | null): string[] {
           : ''
       }.`,
     );
-    if (prev && latest.levelName && (latest.levelPosition ?? 0) > (prev.levelPosition ?? 0))
-      out.push(`Moved up to ${latest.levelName} level - well done!`);
-    else if (latest.levelName) out.push(`Current level: ${latest.levelName}.`);
+    const lvl = latest.levelName ? levelText(latest.levelCode, latest.levelName) : null;
+    const band = bandOf(latest.levelCode);
+    if (prev && lvl && (latest.levelPosition ?? 0) > (prev.levelPosition ?? 0))
+      out.push(`Moved up to ${lvl} - well done!`);
+    else if (lvl) out.push(`Current level: ${lvl}${band ? ` (${band})` : ''}.`);
     if (rows.length >= 2) {
       const best = rows.reduce((x, y) => (y.now > x.now ? y : x));
       const low = rows.reduce((x, y) => (y.now < x.now ? y : x));
@@ -491,33 +492,49 @@ function cover(
     );
   if (latest?.levelName) {
     const bx = M + W - badgeW - 16;
-    const by = cy + 22;
-    const col = levelColor(latest.levelName);
-    doc.roundedRect(bx, by, badgeW, 74, 12).fill(col);
+    const by = cy + 18;
+    const bh = 82;
+    const col = levelColor(latest.levelCode);
+    doc.roundedRect(bx, by, badgeW, bh, 12).fill(col);
     doc.save();
     doc
       .fillOpacity(0.18)
       .circle(bx + badgeW - 12, by + 10, 26)
       .fill('#ffffff');
     doc.restore();
+    const band = bandOf(latest.levelCode);
     doc
       .fillColor('#ffffff')
       .font('Helvetica-Bold')
-      .fontSize(7)
-      .text('CURRENT LEVEL', bx, by + 12, { width: badgeW, align: 'center', characterSpacing: 1 });
+      .fontSize(6.5)
+      .text((band ? `${band} level` : 'Current level').toUpperCase(), bx, by + 9, {
+        width: badgeW,
+        align: 'center',
+        characterSpacing: 1,
+      });
     doc
       .font('Helvetica-Bold')
-      .fontSize(17)
-      .text(latest.levelName, bx + 6, by + 26, {
+      .fontSize(latest.levelCode ? 24 : 15)
+      .text(latest.levelCode ?? latest.levelName, bx + 6, by + 19, {
         width: badgeW - 12,
         align: 'center',
         lineBreak: false,
         ellipsis: true,
       });
+    if (latest.levelCode)
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(7.5)
+        .text(latest.levelName, bx + 6, by + 47, {
+          width: badgeW - 12,
+          align: 'center',
+          height: 20,
+          ellipsis: true,
+        });
     doc
       .font('Helvetica')
-      .fontSize(7.5)
-      .text(monthLong(latest.month), bx, by + 52, { width: badgeW, align: 'center' });
+      .fontSize(7)
+      .text(monthLong(latest.month), bx, by + bh - 13, { width: badgeW, align: 'center' });
   }
   doc.y = cy + ch + 18;
   doc.x = M;
@@ -537,10 +554,10 @@ function cover(
       : { label: 'Skill score', value: '-', sub: 'First assessment soon' },
     {
       label: 'Level',
-      value: latest?.levelName ?? '-',
-      color: latest?.levelName ? levelColor(latest.levelName) : C.ink,
+      value: latest?.levelName ? (latest.levelCode ?? latest.levelName) : '-',
+      color: latest?.levelName ? levelColor(latest.levelCode) : C.ink,
       sub: next
-        ? `${score(next.gap)} to ${next.name}`
+        ? `${score(next.gap)} to ${next.code ?? next.name}`
         : latest?.levelName
           ? 'Top level'
           : 'Not yet rated',
@@ -650,7 +667,7 @@ function cover(
 
 function nextLevel(f: Framework, average: number) {
   const n = [...f.levels].sort((a, b) => a.minScore - b.minScore).find((l) => l.minScore > average);
-  return n ? { name: n.name, gap: n.minScore - average } : null;
+  return n ? { name: n.name, code: n.code, gap: n.minScore - average } : null;
 }
 
 function skillsDetail(doc: Doc, sp: SportProgress) {
@@ -707,36 +724,74 @@ function skillsDetail(doc: Doc, sp: SportProgress) {
     doc.y = ry + 6;
   }
 
-  // Level ladder.
+  // Level journey: the ladder grouped by band (Beginner · Intermediate · Advanced).
   const levels = [...sp.framework.levels].sort((a, b) => a.minScore - b.minScore);
   if (levels.length) {
-    heading(doc, 'Level journey', 'Levels follow the latest assessment score.', 80);
-    ensure(doc, 80);
-    const y = doc.y;
+    heading(
+      doc,
+      'Level journey',
+      'Levels follow the latest assessment score (average of every skill, 1 to 5).',
+      110,
+    );
+    const top = doc.y;
     const gap = 4;
     const w = (W - gap * (levels.length - 1)) / levels.length;
     const cur = levels.filter((l) => latest.average >= l.minScore).at(-1);
+    const hasBands = levels.some((l) => bandOf(l.code));
+    const boxY = top + (hasBands ? 18 : 0);
+    // Band headers over their levels.
+    if (hasBands) {
+      let i = 0;
+      while (i < levels.length) {
+        const band = bandOf(levels[i]!.code);
+        let j = i;
+        while (j + 1 < levels.length && bandOf(levels[j + 1]!.code) === band) j++;
+        const x = M + i * (w + gap);
+        const span = (j - i + 1) * w + (j - i) * gap;
+        if (band) {
+          const col = levelColor(levels[i]!.code);
+          doc.rect(x, top + 12, span, 2).fill(col);
+          doc.fillColor(col).font('Helvetica-Bold').fontSize(7.5).text(band.toUpperCase(), x, top, {
+            width: span,
+            align: 'center',
+            characterSpacing: 1,
+          });
+        }
+        i = j + 1;
+      }
+    }
     levels.forEach((l, i) => {
       const x = M + i * (w + gap);
       const reached = latest.average >= l.minScore;
-      const isCur = cur?.name === l.name;
-      const col = levelColor(l.name);
-      doc.roundedRect(x, y, w, 40, 8).fill(isCur ? col : reached ? C.brandSoft : C.panel);
+      const isCur = cur?.id === l.id;
+      const col = levelColor(l.code);
+      doc.roundedRect(x, boxY, w, 58, 8).fill(isCur ? col : reached ? C.brandSoft : C.panel);
+      const ink = isCur ? '#ffffff' : reached ? C.brandDeep : C.faint;
       doc
-        .fillColor(isCur ? '#ffffff' : reached ? C.brandDeep : C.faint)
+        .fillColor(ink)
         .font('Helvetica-Bold')
-        .fontSize(9.5)
-        .text(l.name, x + 4, y + 9, {
-          width: w - 8,
+        .fontSize(l.code ? 14 : 9.5)
+        .text(l.code ?? l.name, x + 3, boxY + 7, {
+          width: w - 6,
           align: 'center',
           lineBreak: false,
           ellipsis: true,
         });
+      if (l.code)
+        doc
+          .font('Helvetica')
+          .fontSize(6.5)
+          .text(l.name, x + 3, boxY + 25, {
+            width: w - 6,
+            align: 'center',
+            height: 17,
+            ellipsis: true,
+          });
       doc
         .font('Helvetica')
-        .fontSize(7.5)
-        .text(`from ${score(l.minScore)}`, x + 4, y + 23, {
-          width: w - 8,
+        .fontSize(6.5)
+        .text(`from ${score(l.minScore)}`, x + 3, boxY + 45, {
+          width: w - 6,
           align: 'center',
           lineBreak: false,
         });
@@ -748,13 +803,13 @@ function skillsDetail(doc: Doc, sp: SportProgress) {
       .fontSize(9)
       .text(
         next
-          ? `Score now ${score(latest.average)}. ${score(next.gap)} more to reach ${next.name}.`
+          ? `Score now ${score(latest.average)}. ${score(next.gap)} more to reach ${levelText(next.code, next.name)}.`
           : `Score now ${score(latest.average)}. The top level - outstanding!`,
         M,
-        y + 50,
+        boxY + 66,
         { width: W },
       );
-    doc.y = y + 70;
+    doc.y = boxY + 86;
   }
 
   // Score over time.
@@ -792,14 +847,14 @@ function skillsDetail(doc: Doc, sp: SportProgress) {
         .lineTo(left + cw, yOf(l.minScore))
         .lineWidth(0.6)
         .dash(2, { space: 3 })
-        .strokeColor(levelColor(l.name))
+        .strokeColor(levelColor(l.code))
         .stroke();
       doc.restore();
       doc
-        .fillColor(levelColor(l.name))
+        .fillColor(levelColor(l.code))
         .font('Helvetica')
         .fontSize(6.5)
-        .text(l.name, left + cw - 60, yOf(l.minScore) - 8, {
+        .text(l.code ?? l.name, left + cw - 60, yOf(l.minScore) - 8, {
           width: 60,
           align: 'right',
           lineBreak: false,

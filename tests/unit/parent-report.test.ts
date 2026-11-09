@@ -26,12 +26,13 @@ function framework(areas: number): Framework {
       })),
     })),
     levels: [
-      { id: 'l1', name: 'Foundation', minScore: 100, position: 1 },
-      { id: 'l2', name: 'Bronze', minScore: 200, position: 2 },
-      { id: 'l3', name: 'Silver', minScore: 275, position: 3 },
-      { id: 'l4', name: 'Gold', minScore: 350, position: 4 },
-      { id: 'l5', name: 'Elite', minScore: 425, position: 5 },
-      { id: 'l6', name: 'Pro', minScore: 480, position: 6 },
+      { id: 'l1', code: 'A1', name: 'Novice / Absolute Beginner', minScore: 100, position: 1 },
+      { id: 'l2', code: 'A2', name: 'Advanced Beginner', minScore: 175, position: 2 },
+      { id: 'l3', code: 'B1', name: 'Lower Intermediate', minScore: 250, position: 3 },
+      { id: 'l4', code: 'B2', name: 'Upper Intermediate', minScore: 325, position: 4 },
+      { id: 'l5', code: 'C1', name: 'Advanced / Regional Competitor', minScore: 400, position: 5 },
+      // A custom rung without a code still renders.
+      { id: 'l6', code: null, name: 'Pro', minScore: 480, position: 6 },
     ],
   };
 }
@@ -52,6 +53,7 @@ function assessment(
     month,
     average,
     levelName: level?.name ?? null,
+    levelCode: level?.code ?? null,
     levelPosition: level?.position ?? null,
     comment: null,
     goals: null,

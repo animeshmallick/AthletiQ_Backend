@@ -145,9 +145,9 @@ export async function makeSport(name?: string) {
     { areaId: areas[1]!.id, name: 'Net shot', position: 2 },
   ]);
   await db.insert(sportLevels).values([
-    { sportId: sport!.id, name: 'Foundation', minScore: 100, position: 1 },
-    { sportId: sport!.id, name: 'Bronze', minScore: 250, position: 2 },
-    { sportId: sport!.id, name: 'Gold', minScore: 400, position: 3 },
+    { sportId: sport!.id, code: 'A1', name: 'Foundation', minScore: 100, position: 1 },
+    { sportId: sport!.id, code: 'B1', name: 'Bronze', minScore: 250, position: 2 },
+    { sportId: sport!.id, code: 'C1', name: 'Gold', minScore: 400, position: 3 },
   ]);
   return sport!;
 }
@@ -168,6 +168,9 @@ export async function makeBatch(
       endTime: '08:00:00',
       capacity: 50,
       sportId: overrides.sportId ?? (await makeSport()).id,
+      // Every batch has a plan: the given one, else the first existing, else a new 3-day plan.
+      feePlanId:
+        overrides.feePlanId ?? (await db.query.feePlans.findFirst())?.id ?? (await makePlan()).id,
       ...overrides,
     })
     .returning();
@@ -182,19 +185,41 @@ export async function makePlan(overrides: Partial<typeof feePlans.$inferInsert> 
   return p!;
 }
 
+/**
+ * A student in one batch (or several via `batches`). For brevity, `feePlanId` puts the student on
+ * that plan by making it the batch's plan (plans belong to batches); `trainingDays` is ignored
+ * (students train every day their batch runs).
+ */
 export async function makeStudent(
-  input: Pick<CreateStudentInput, 'batchId' | 'feePlanId'> & Partial<CreateStudentInput>,
+  input: Partial<Omit<CreateStudentInput, 'batches'>> & {
+    batchId: string;
+    feePlanId?: string;
+    trainingDays?: number[];
+    customMonthlyFee?: number | null;
+    monthlyDiscount?: number;
+    batches?: CreateStudentInput['batches'];
+  },
   actorId: string,
 ) {
+  const {
+    batchId,
+    feePlanId,
+    trainingDays: _days,
+    customMonthlyFee,
+    monthlyDiscount,
+    batches: list,
+    ...rest
+  } = input;
+  if (feePlanId) await db.update(batches).set({ feePlanId }).where(eq(batches.id, batchId));
   return createStudent(
     db,
     {
       fullName: `Student ${uniq()}`,
       phone: '+919876543210',
       joiningDate: '2026-01-10',
-      trainingDays: [1, 3, 5],
       billingStartsOn: input.joiningDate ?? '2026-01-10',
-      ...input,
+      ...rest,
+      batches: list ?? [{ batchId, customMonthlyFee, monthlyDiscount }],
     },
     actorId,
   );
@@ -206,12 +231,13 @@ export async function makeAcademy() {
   const coach = await makeUser('coach');
   const otherCoach = await makeUser('coach');
   const location = await makeLocation();
-  const batch = await makeBatch(coach.id, location.id);
+  const plan = await makePlan();
+  const batch = await makeBatch(coach.id, location.id, { feePlanId: plan.id });
   const otherBatch = await makeBatch(otherCoach.id, location.id, {
     startTime: '17:00:00',
     endTime: '19:00:00',
+    feePlanId: plan.id,
   });
-  const plan = await makePlan();
   return { admin, coach, otherCoach, location, batch, otherBatch, plan };
 }
 

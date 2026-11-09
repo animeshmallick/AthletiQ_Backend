@@ -5,11 +5,10 @@
  *  - admins get one evening digest instead of a stream of small updates,
  *  - coaches get one weekly feedback nudge, only if reports are still open.
  */
-import { and, count, eq, gte, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
+import { and, count, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import {
   batches,
-  enrollments,
   invoices,
   notificationLog,
   payments,
@@ -194,11 +193,8 @@ export async function sendOverdueNotices(now: Date = new Date()) {
     })
     .from(invoices)
     .innerJoin(students, eq(students.id, invoices.studentId))
-    .innerJoin(
-      enrollments,
-      and(eq(enrollments.studentId, students.id), isNull(enrollments.effectiveTo)),
-    )
-    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    // The coach of the batch the invoice bills.
+    .innerJoin(batches, eq(batches.id, invoices.batchId))
     .where(
       and(eq(invoices.status, 'due'), lte(invoices.dueDate, cutoff), eq(students.status, 'active')),
     );

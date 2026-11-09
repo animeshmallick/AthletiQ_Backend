@@ -246,10 +246,11 @@ describe('report variants', () => {
       a.admin.id,
     );
     const admin = await as(a.admin);
+    const eid = (await admin.get(`/api/v1/students/${s.id}`)).body.data.memberships[0]
+      .enrollmentId as string;
     await admin
-      .post(`/api/v1/students/${s.id}/transfer`, {
+      .post(`/api/v1/students/${s.id}/batches/${eid}/move`, {
         batchId: a.otherBatch.id,
-        trainingDays: [1, 3, 5],
         effectiveFrom: '2026-02-02',
         reason: 'Evening slot suits school',
       })

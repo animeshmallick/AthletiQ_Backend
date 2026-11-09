@@ -41,20 +41,12 @@ import {
   zPagination,
   zPaise,
   zPhone,
-  zTrainingDays,
 } from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { assertStudentAccess, isAdmin, studentScope } from '../access/access.js';
 import { billOnAcceptance } from '../billing/invoice-generator.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
-import {
-  assertActivePlan,
-  assertEnrollable,
-  createStudent,
-  effectiveMonthlyFee,
-  getStudentDetail,
-  transferStudent,
-} from './students.service.js';
+import { createStudent, getStudentDetail, joinBatch, moveEnrollment } from './students.service.js';
 import {
   noticeMakeupBooked,
   noticeStudentJoined,
@@ -87,9 +79,19 @@ studentsRouter.get('/', async (req, res) => {
   const scope = studentScope(user, students.id);
   if (scope) filters.push(scope);
   if (q.status) filters.push(eq(students.status, q.status));
-  if (q.feePlanId) filters.push(eq(students.feePlanId, q.feePlanId));
-  if (q.batchId) filters.push(eq(batches.id, q.batchId));
-  if (q.coachId && isAdmin(user)) filters.push(eq(batches.coachId, q.coachId));
+  // Students currently in a batch matching a condition.
+  const inBatch = (cond: SQL) =>
+    inArray(
+      students.id,
+      db
+        .select({ id: enrollments.studentId })
+        .from(enrollments)
+        .innerJoin(batches, eq(batches.id, enrollments.batchId))
+        .where(and(isNull(enrollments.effectiveTo), cond)),
+    );
+  if (q.feePlanId) filters.push(inBatch(eq(batches.feePlanId, q.feePlanId)));
+  if (q.batchId) filters.push(inBatch(eq(batches.id, q.batchId)));
+  if (q.coachId && isAdmin(user)) filters.push(inBatch(eq(batches.coachId, q.coachId)));
   if (q.search) {
     const term = `%${q.search}%`;
     filters.push(
@@ -147,6 +149,38 @@ studentsRouter.get('/', async (req, res) => {
           ? [desc(students.createdAt)]
           : [asc(students.fullName)];
 
+  // Each student's current batches (coaches see only their own), with each one's monthly fee.
+  const fee = sql<number>`greatest(coalesce(${enrollments.customMonthlyFee}, ${feePlans.monthlyFee}) - ${enrollments.monthlyDiscount}, 0)`;
+  const memberships = db
+    .select({
+      studentId: enrollments.studentId,
+      batches: sql<
+        {
+          id: string;
+          name: string;
+          coachId: string;
+          coachName: string;
+          planName: string;
+          fee: number;
+        }[]
+      >`json_agg(json_build_object('id', ${batches.id}, 'name', ${batches.name}, 'coachId', ${batches.coachId}, 'coachName', ${users.name}, 'planName', ${feePlans.name}, 'fee', ${fee}) order by ${enrollments.effectiveFrom})`.as(
+        'batches',
+      ),
+      monthlyFee: sql<number>`sum(${fee})::int`.as('monthly_fee'),
+    })
+    .from(enrollments)
+    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    .innerJoin(users, eq(users.id, batches.coachId))
+    .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
+    .where(
+      and(
+        isNull(enrollments.effectiveTo),
+        isAdmin(user) ? undefined : eq(batches.coachId, user.id),
+      ),
+    )
+    .groupBy(enrollments.studentId)
+    .as('memberships');
+
   const [rows, [{ total } = { total: 0 }]] = await Promise.all([
     db
       .select({
@@ -158,48 +192,31 @@ studentsRouter.get('/', async (req, res) => {
         status: students.status,
         joiningDate: students.joiningDate,
         leftOn: students.leftOn,
-        feePlan: { id: feePlans.id, name: feePlans.name, monthlyFee: feePlans.monthlyFee },
-        customMonthlyFee: students.customMonthlyFee,
-        monthlyDiscount: students.monthlyDiscount,
-        batch: { id: batches.id, name: batches.name },
-        coach: { id: users.id, name: users.name },
-        trainingDays: enrollments.trainingDays,
+        batches: sql<
+          {
+            id: string;
+            name: string;
+            coachId: string;
+            coachName: string;
+            planName: string;
+            fee: number;
+          }[]
+        >`coalesce(${memberships.batches}, '[]'::json)`,
+        effectiveFee: sql<number>`coalesce(${memberships.monthlyFee}, 0)::int`,
         outstanding: sql<number>`coalesce(${outstanding.due}, 0)::int`,
         overdue: sql<number>`coalesce(${outstanding.overdue}, 0)::int`,
       })
       .from(students)
-      .innerJoin(feePlans, eq(feePlans.id, students.feePlanId))
-      .leftJoin(
-        enrollments,
-        and(eq(enrollments.studentId, students.id), isNull(enrollments.effectiveTo)),
-      )
-      .leftJoin(batches, eq(batches.id, enrollments.batchId))
-      .leftJoin(users, eq(users.id, batches.coachId))
+      .leftJoin(memberships, eq(memberships.studentId, students.id))
       .leftJoin(outstanding, eq(outstanding.studentId, students.id))
       .where(where)
       .orderBy(...order)
       .limit(q.pageSize)
       .offset((q.page - 1) * q.pageSize),
-    db
-      .select({ total: count() })
-      .from(students)
-      .leftJoin(
-        enrollments,
-        and(eq(enrollments.studentId, students.id), isNull(enrollments.effectiveTo)),
-      )
-      .leftJoin(batches, eq(batches.id, enrollments.batchId))
-      .where(where),
+    db.select({ total: count() }).from(students).where(where),
   ]);
 
-  ok(
-    res,
-    rows.map((r) => ({
-      ...r,
-      effectiveFee: effectiveMonthlyFee(r.feePlan.monthlyFee, r.customMonthlyFee, r.monthlyDiscount)
-        .total,
-    })),
-    pageMeta(q.page, q.pageSize, total),
-  );
+  ok(res, rows, pageMeta(q.page, q.pageSize, total));
 });
 
 studentsRouter.get('/:id', async (req, res) => {
@@ -223,18 +240,25 @@ const ProfileFields = {
   notes: zOptionalText(2000),
 };
 
-const FeeFields = {
-  feePlanId: zId,
+/** A batch to join, with this student's own price adjustments (the plan comes from the batch). */
+const BatchJoin = z.object({
+  batchId: zId,
   customMonthlyFee: zPaise.nullable().optional(),
   monthlyDiscount: zPaise.default(0),
-};
+});
+const BatchList = z
+  .array(BatchJoin)
+  .min(1, 'Pick at least one batch')
+  .max(10)
+  .refine(
+    (l) => new Set(l.map((b) => b.batchId)).size === l.length,
+    'Each batch can be picked once',
+  );
 
 const CreateBody = z.object({
   ...ProfileFields,
-  ...FeeFields,
   joiningDate: zIsoDate,
-  batchId: zId,
-  trainingDays: zTrainingDays,
+  batches: BatchList,
   /**
    * Acceptance date for prepaid billing: the first invoice is issued on this date and months that
    * started earlier are not billed. Defaults to the earlier of today and the joining date; set it
@@ -255,7 +279,7 @@ studentsRouter.post('/', requireAdmin, async (req, res) => {
         action: 'student.created',
         entityType: 'student',
         entityId: s.id,
-        metadata: { code: s.code, batchId: body.batchId },
+        metadata: { code: s.code, batchIds: body.batches.map((b) => b.batchId) },
       },
       tx,
     );
@@ -267,8 +291,9 @@ studentsRouter.post('/', requireAdmin, async (req, res) => {
   created(res, await getStudentDetail(student.id));
 });
 
-const UpdateBody = z.object({ ...ProfileFields, ...FeeFields, joiningDate: zIsoDate }).partial();
+const UpdateBody = z.object({ ...ProfileFields, joiningDate: zIsoDate }).partial();
 
+/** Profile details. Fees are per batch (see the batch membership routes below). */
 studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(UpdateBody, req.body);
@@ -277,72 +302,59 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
   await db.transaction(async (tx) => {
     const existing = await tx.query.students.findFirst({ where: eq(students.id, id) });
     if (!existing) throw AppError.notFound('Student');
-    if (body.feePlanId && body.feePlanId !== existing.feePlanId)
-      await assertActivePlan(body.feePlanId, tx);
 
-    let billing: Partial<typeof students.$inferInsert> = {};
     if (body.joiningDate && body.joiningDate !== existing.joiningDate) {
-      // The joining date anchors prepaid billing. It can be corrected until money has changed
-      // hands: unpaid invoices are cancelled and billing restarts from the corrected date.
-      const rows = await tx
-        .select({ status: invoices.status, cycle: invoices.cycleNumber })
-        .from(invoices)
-        .where(eq(invoices.studentId, id));
-      if (rows.some((r) => r.status === 'paid' || r.status === 'refunded')) {
-        throw AppError.unprocessable(
-          'Joining date cannot change after a payment has been recorded (it anchors the billing cycle).',
+      // The joining date anchors the billing of the batches joined that day. It can be corrected
+      // until money has changed hands: their unpaid invoices are cancelled and billing restarts.
+      const firsts = await tx
+        .select()
+        .from(enrollments)
+        .where(
+          and(eq(enrollments.studentId, id), eq(enrollments.effectiveFrom, existing.joiningDate)),
         );
-      }
-      if (rows.length) {
-        await tx
-          .update(invoices)
-          .set({ status: 'cancelled', cancelledReason: 'Joining date corrected' })
-          .where(and(eq(invoices.studentId, id), eq(invoices.status, 'due')));
-        billing = {
-          billingAnchorDate: body.joiningDate,
-          cycleOffset: Math.max(...rows.map((r) => r.cycle)),
+      if (firsts.some((e) => e.effectiveTo !== null && e.effectiveTo < body.joiningDate!))
+        throw AppError.unprocessable('Joining date conflicts with the batch history.');
+      for (const e of firsts) {
+        const rows = await tx
+          .select({ status: invoices.status, cycle: invoices.cycleNumber })
+          .from(invoices)
+          .where(eq(invoices.enrollmentId, e.id));
+        if (rows.some((r) => r.status === 'paid' || r.status === 'refunded')) {
+          throw AppError.unprocessable(
+            'Joining date cannot change after a payment has been recorded (it anchors the billing cycle).',
+          );
+        }
+        let billing: Partial<typeof enrollments.$inferInsert> = {
           billingStartsOn: minDate(todayInAppTz(), body.joiningDate),
         };
-        rebill = true;
-      } else {
-        billing = { billingStartsOn: minDate(todayInAppTz(), body.joiningDate) };
-      }
-      // Keep the initial enrollment aligned with the new joining date.
-      const first = await tx.query.enrollments.findFirst({
-        where: eq(enrollments.studentId, id),
-        orderBy: asc(enrollments.effectiveFrom),
-      });
-      if (first && (first.effectiveTo === null || first.effectiveTo >= body.joiningDate)) {
+        if (rows.length) {
+          await tx
+            .update(invoices)
+            .set({ status: 'cancelled', cancelledReason: 'Joining date corrected' })
+            .where(and(eq(invoices.enrollmentId, e.id), eq(invoices.status, 'due')));
+          billing = {
+            ...billing,
+            billingAnchorDate: body.joiningDate,
+            cycleOffset: Math.max(...rows.map((r) => r.cycle)),
+          };
+          rebill = true;
+        }
         await tx
           .update(enrollments)
-          .set({ effectiveFrom: body.joiningDate })
-          .where(eq(enrollments.id, first.id));
-      } else if (first) {
-        throw AppError.unprocessable('Joining date conflicts with the enrollment history.');
+          .set({ ...billing, effectiveFrom: body.joiningDate })
+          .where(eq(enrollments.id, e.id));
       }
     }
 
-    await tx
-      .update(students)
-      .set({ ...body, ...billing })
-      .where(eq(students.id, id));
-    const feeChanged = ['feePlanId', 'customMonthlyFee', 'monthlyDiscount'].some((k) => k in body);
+    // Nothing to change (e.g. only fields that now live on batch memberships) is a no-op.
+    if (Object.keys(body).length) await tx.update(students).set(body).where(eq(students.id, id));
     await audit(
       {
         ...auditCtx(req),
-        action: feeChanged ? 'student.fee_changed' : 'student.updated',
+        action: 'student.updated',
         entityType: 'student',
         entityId: id,
-        metadata: feeChanged
-          ? {
-              before: {
-                feePlanId: existing.feePlanId,
-                customMonthlyFee: existing.customMonthlyFee,
-                monthlyDiscount: existing.monthlyDiscount,
-              },
-              changes: body,
-            }
-          : { changes: Object.keys(body) },
+        metadata: { changes: Object.keys(body) },
       },
       tx,
     );
@@ -352,91 +364,222 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
   ok(res, await getStudentDetail(id));
 });
 
-// ─── Admin: transfer / leave ─────────────────────────────────────────────────
+// ─── Admin: batch memberships ────────────────────────────────────────────────
 
-const TransferBody = z.object({
-  batchId: zId,
-  trainingDays: zTrainingDays,
-  effectiveFrom: zIsoDate,
-  reason: zOptionalText(500),
-});
+async function activeStudent(tx: Parameters<Parameters<typeof db.transaction>[0]>[0], id: string) {
+  const [s] = await tx.select().from(students).where(eq(students.id, id)).for('update');
+  if (!s) throw AppError.notFound('Student');
+  if (s.status === 'left') throw AppError.unprocessable('Student has left the academy');
+  return s;
+}
 
-/** Permanent move to another batch, or a change of training days, from a given date. */
-studentsRouter.post('/:id/transfer', requireAdmin, async (req, res) => {
+async function openMembership(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  studentId: string,
+  enrollmentId: string,
+) {
+  const [e] = await tx
+    .select()
+    .from(enrollments)
+    .where(and(eq(enrollments.id, enrollmentId), eq(enrollments.studentId, studentId)))
+    .for('update');
+  if (!e) throw AppError.notFound('Batch membership');
+  if (e.effectiveTo !== null) throw AppError.unprocessable('That membership has already ended');
+  return e;
+}
+
+const JoinBody = BatchJoin.extend({ effectiveFrom: zIsoDate, reason: zOptionalText(500) });
+
+/** Adds a student to another batch (billed separately, from the day they join it). */
+studentsRouter.post('/:id/batches', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const body = parse(TransferBody, req.body);
-
-  const moved = await db.transaction(async (tx) => {
-    const s = await tx.query.students.findFirst({ where: eq(students.id, id) });
-    if (!s) throw AppError.notFound('Student');
-    if (s.status === 'left') throw AppError.unprocessable('Student has left the academy');
-    const { previous, current } = await transferStudent(tx, {
-      studentId: id,
+  const body = parse(JoinBody, req.body);
+  const actor = currentUser(req);
+  await db.transaction(async (tx) => {
+    const s = await activeStudent(tx, id);
+    if (body.effectiveFrom < s.joiningDate)
+      throw AppError.badRequest('A batch cannot start before the joining date');
+    const { batch } = await joinBatch(tx, {
       ...body,
-      actorId: currentUser(req).id,
+      studentId: id,
+      reason: body.reason ?? 'Added to batch',
+      actorId: actor.id,
     });
     await audit(
       {
         ...auditCtx(req),
-        action:
-          previous.batchId === current.batchId
-            ? 'student.training_days_changed'
-            : 'student.transferred',
+        action: 'student.batch_added',
+        entityType: 'student',
+        entityId: id,
+        metadata: { batchId: batch.id, effectiveFrom: body.effectiveFrom },
+      },
+      tx,
+    );
+  });
+  await billOnAcceptance(id);
+  notifyInBackground(() => noticeStudentJoined(id, body.batchId));
+  created(res, await getStudentDetail(id));
+});
+
+const FeeBody = z.object({
+  customMonthlyFee: zPaise.nullable().optional(),
+  monthlyDiscount: zPaise.optional(),
+});
+
+/** Changes one membership's custom fee / discount (applies from its next invoice). */
+studentsRouter.patch('/:id/batches/:enrollmentId', requireAdmin, async (req, res) => {
+  const { id, enrollmentId } = parse(z.object({ id: zId, enrollmentId: zId }), req.params);
+  const body = parse(FeeBody, req.body);
+  await db.transaction(async (tx) => {
+    const e = await openMembership(tx, id, enrollmentId);
+    await tx.update(enrollments).set(body).where(eq(enrollments.id, e.id));
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'student.fee_changed',
+        entityType: 'student',
+        entityId: id,
+        metadata: {
+          batchId: e.batchId,
+          before: { customMonthlyFee: e.customMonthlyFee, monthlyDiscount: e.monthlyDiscount },
+          changes: body,
+        },
+      },
+      tx,
+    );
+  });
+  ok(res, await getStudentDetail(id));
+});
+
+const MoveBody = z.object({
+  batchId: zId,
+  effectiveFrom: zIsoDate,
+  reason: zOptionalText(500),
+  customMonthlyFee: zPaise.nullable().optional(),
+  monthlyDiscount: zPaise.optional(),
+});
+
+/**
+ * Moves a membership to another batch from a date. Billing continues on the same monthly day:
+ * the new batch's plan applies from the next cycle.
+ */
+studentsRouter.post('/:id/batches/:enrollmentId/move', requireAdmin, async (req, res) => {
+  const { id, enrollmentId } = parse(z.object({ id: zId, enrollmentId: zId }), req.params);
+  const body = parse(MoveBody, req.body);
+  const moved = await db.transaction(async (tx) => {
+    await activeStudent(tx, id);
+    const { previous, current } = await moveEnrollment(tx, {
+      studentId: id,
+      enrollmentId,
+      toBatchId: body.batchId,
+      effectiveFrom: body.effectiveFrom,
+      reason: body.reason ?? null,
+      actorId: currentUser(req).id,
+      customMonthlyFee: body.customMonthlyFee,
+      monthlyDiscount: body.monthlyDiscount,
+    });
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'student.transferred',
         entityType: 'student',
         entityId: id,
         metadata: {
           fromBatchId: previous.batchId,
           toBatchId: current.batchId,
           effectiveFrom: body.effectiveFrom,
-          trainingDays: body.trainingDays,
         },
       },
       tx,
     );
-    return previous.batchId !== current.batchId
-      ? { from: previous.batchId, to: current.batchId }
-      : null;
+    return { from: previous.batchId, to: current.batchId };
   });
+  notifyInBackground(() => noticeStudentJoined(id, moved.to));
+  notifyInBackground(() => noticeStudentMovedOut(id, moved.from, moved.to, body.effectiveFrom));
+  ok(res, await getStudentDetail(id));
+});
 
-  if (moved) {
-    notifyInBackground(() => noticeStudentJoined(id));
-    notifyInBackground(() => noticeStudentMovedOut(id, moved.from, moved.to, body.effectiveFrom));
-  }
+const LeaveBatchBody = z.object({ leftOn: zIsoDate, reason: zOptionalText(500) });
+
+/**
+ * Ends one batch membership (its invoices stop; the month in progress was already billed).
+ * Leaving the only batch means leaving the academy — use /leave for that.
+ */
+studentsRouter.post('/:id/batches/:enrollmentId/leave', requireAdmin, async (req, res) => {
+  const { id, enrollmentId } = parse(z.object({ id: zId, enrollmentId: zId }), req.params);
+  const body = parse(LeaveBatchBody, req.body);
+  const batchId = await db.transaction(async (tx) => {
+    await activeStudent(tx, id);
+    const e = await openMembership(tx, id, enrollmentId);
+    const [{ n } = { n: 0 }] = await tx
+      .select({ n: count() })
+      .from(enrollments)
+      .where(and(eq(enrollments.studentId, id), isNull(enrollments.effectiveTo)));
+    if (n <= 1)
+      throw AppError.unprocessable(
+        'This is the student’s only batch. Mark them as left the academy instead.',
+      );
+    if (body.leftOn < e.effectiveFrom)
+      throw AppError.badRequest(`The last day cannot be before they joined (${e.effectiveFrom})`);
+    await tx.update(enrollments).set({ effectiveTo: body.leftOn }).where(eq(enrollments.id, e.id));
+    await tx
+      .delete(makeupSessions)
+      .where(
+        and(
+          eq(makeupSessions.studentId, id),
+          eq(makeupSessions.batchId, e.batchId),
+          gt(makeupSessions.date, body.leftOn),
+        ),
+      );
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'student.batch_left',
+        entityType: 'student',
+        entityId: id,
+        metadata: { batchId: e.batchId, ...body },
+      },
+      tx,
+    );
+    return e.batchId;
+  });
+  notifyInBackground(() => noticeStudentLeft(id, batchId, body.leftOn, false));
   ok(res, await getStudentDetail(id));
 });
 
 const LeaveBody = z.object({ leftOn: zIsoDate, reason: zOptionalText(500) });
 
 /**
- * Marks a student as left. Cycles that complete after `leftOn` are not billed; already-issued
- * invoices are untouched. Future makeups are cancelled.
+ * Marks a student as left the academy: every batch membership ends on `leftOn`, so cycles
+ * starting after it are not billed; already-issued invoices are untouched. Future makeups are
+ * cancelled.
  */
 studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(LeaveBody, req.body);
 
-  const leftBatchId = await db.transaction(async (tx) => {
+  const leftBatchIds = await db.transaction(async (tx) => {
     const s = await tx.query.students.findFirst({ where: eq(students.id, id) });
     if (!s) throw AppError.notFound('Student');
     if (s.status === 'left') throw AppError.unprocessable('Student has already left');
     if (body.leftOn < s.joiningDate)
       throw AppError.badRequest('Leaving date cannot be before the joining date');
 
-    const [current] = await tx
+    const open = await tx
       .select()
       .from(enrollments)
       .where(and(eq(enrollments.studentId, id), isNull(enrollments.effectiveTo)));
-    if (current) {
-      if (body.leftOn < current.effectiveFrom) {
-        throw AppError.badRequest(
-          `Leaving date cannot be before the current enrollment started (${current.effectiveFrom})`,
-        );
-      }
+    const latestStart = open.reduce((m, e) => (e.effectiveFrom > m ? e.effectiveFrom : m), '');
+    if (open.length && body.leftOn < latestStart) {
+      throw AppError.badRequest(
+        `Leaving date cannot be before their latest batch started (${latestStart})`,
+      );
+    }
+    if (open.length)
       await tx
         .update(enrollments)
         .set({ effectiveTo: body.leftOn })
-        .where(eq(enrollments.id, current.id));
-    }
+        .where(and(eq(enrollments.studentId, id), isNull(enrollments.effectiveTo)));
     await tx
       .delete(makeupSessions)
       .where(and(eq(makeupSessions.studentId, id), gt(makeupSessions.date, body.leftOn)));
@@ -454,9 +597,10 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
       },
       tx,
     );
-    return current?.batchId ?? null;
+    return open.map((e) => e.batchId);
   });
-  if (leftBatchId) notifyInBackground(() => noticeStudentLeft(id, leftBatchId, body.leftOn));
+  for (const batchId of leftBatchIds)
+    notifyInBackground(() => noticeStudentLeft(id, batchId, body.leftOn));
 
   ok(res, await getStudentDetail(id));
 });
@@ -567,17 +711,13 @@ studentsRouter.delete('/:id/makeups/:makeupId', async (req, res) => {
 
 const RejoinBody = z.object({
   rejoinDate: zIsoDate,
-  batchId: zId,
-  trainingDays: zTrainingDays,
-  feePlanId: zId.optional(),
-  customMonthlyFee: zPaise.nullable().optional(),
-  monthlyDiscount: zPaise.optional(),
+  batches: BatchList,
   reason: zOptionalText(500),
 });
 
 /**
- * Re-activates a student who left. Billing restarts from the rejoin date (a fresh monthly anchor);
- * earlier invoices are untouched and cycle numbers continue so they stay unique.
+ * Re-activates a student who left, in one or more batches. Each batch's billing starts afresh
+ * from the rejoin date (its own monthly day); earlier invoices are untouched.
  */
 studentsRouter.post('/:id/rejoin', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
@@ -591,45 +731,30 @@ studentsRouter.post('/:id/rejoin', requireAdmin, async (req, res) => {
     if (s.leftOn && body.rejoinDate <= s.leftOn) {
       throw AppError.badRequest(`Rejoin date must be after the leaving date (${s.leftOn})`);
     }
-    if (body.feePlanId && body.feePlanId !== s.feePlanId)
-      await assertActivePlan(body.feePlanId, tx);
-    await assertEnrollable(body.batchId, body.trainingDays, tx);
-
-    const [{ last } = { last: 0 }] = await tx
-      .select({ last: sql<number>`coalesce(max(${invoices.cycleNumber}), 0)::int` })
-      .from(invoices)
-      .where(eq(invoices.studentId, id));
-
     await tx
       .update(students)
-      .set({
-        status: 'active',
-        leftOn: null,
-        leftReason: null,
-        billingAnchorDate: body.rejoinDate,
-        cycleOffset: last,
-        // Prepaid: the first invoice of the new run is issued at rejoin.
-        billingStartsOn: minDate(todayInAppTz(), body.rejoinDate),
-        ...(body.feePlanId ? { feePlanId: body.feePlanId } : {}),
-        ...(body.customMonthlyFee !== undefined ? { customMonthlyFee: body.customMonthlyFee } : {}),
-        ...(body.monthlyDiscount !== undefined ? { monthlyDiscount: body.monthlyDiscount } : {}),
-      })
+      .set({ status: 'active', leftOn: null, leftReason: null })
       .where(eq(students.id, id));
-    await tx.insert(enrollments).values({
-      studentId: id,
-      batchId: body.batchId,
-      trainingDays: body.trainingDays,
-      effectiveFrom: body.rejoinDate,
-      reason: body.reason ?? 'Rejoined',
-      createdById: actor.id,
-    });
+    for (const b of body.batches) {
+      await joinBatch(tx, {
+        ...b,
+        studentId: id,
+        effectiveFrom: body.rejoinDate,
+        reason: body.reason ?? 'Rejoined',
+        actorId: actor.id,
+      });
+    }
     await audit(
       {
         ...auditCtx(req),
         action: 'student.rejoined',
         entityType: 'student',
         entityId: id,
-        metadata: { rejoinDate: body.rejoinDate, batchId: body.batchId, previousLeftOn: s.leftOn },
+        metadata: {
+          rejoinDate: body.rejoinDate,
+          batchIds: body.batches.map((b) => b.batchId),
+          previousLeftOn: s.leftOn,
+        },
       },
       tx,
     );

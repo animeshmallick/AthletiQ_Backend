@@ -6,8 +6,25 @@ import { AppError } from '../../lib/errors.js';
 
 export const RATING_LABELS = ['Beginner', 'Developing', 'Competent', 'Advanced', 'Excellent'];
 
+/** The standard ladder every sport starts with (thresholds are average ratings × 100). */
+export const STANDARD_LEVELS = [
+  { code: 'A1', name: 'Novice / Absolute Beginner', minScore: 100 },
+  { code: 'A2', name: 'Advanced Beginner', minScore: 175 },
+  { code: 'B1', name: 'Lower Intermediate', minScore: 250 },
+  { code: 'B2', name: 'Upper Intermediate', minScore: 325 },
+  { code: 'C1', name: 'Advanced / Regional Competitor', minScore: 400 },
+  { code: 'C2', name: 'Elite / National & International', minScore: 460 },
+];
+
+export const BANDS: Record<string, string> = { A: 'Beginner', B: 'Intermediate', C: 'Advanced' };
+/** "B1" → "Intermediate". */
+export const bandOf = (code: string | null | undefined) =>
+  code ? (BANDS[code[0]!] ?? null) : null;
+
 export interface Level {
   id: string;
+  /** "B1": the letter is the band (A Beginner, B Intermediate, C Advanced). */
+  code: string | null;
   name: string;
   minScore: number;
   position: number;
@@ -80,7 +97,13 @@ export async function loadFrameworks(sportIds: string[], tx: DbOrTx = db): Promi
       })),
     levels: levelRows
       .filter((l) => l.sportId === s.id)
-      .map((l) => ({ id: l.id, name: l.name, minScore: l.minScore, position: l.position })),
+      .map((l) => ({
+        id: l.id,
+        code: l.code,
+        name: l.name,
+        minScore: l.minScore,
+        position: l.position,
+      })),
   }));
 }
 

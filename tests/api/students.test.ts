@@ -1,13 +1,14 @@
 import { describe, expect, it } from '@jest/globals';
 import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client';
-import { enrollments, invoices } from '../../src/db/schema';
+import { batches, invoices } from '../../src/db/schema';
+import { generateDueInvoices } from '../../src/modules/billing/invoice-generator';
 import { as, makeAcademy, makeBatch, makePlan, makeStudent, setToday } from '../helpers/factories';
 
 const UNKNOWN = '6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c';
 
 describe('student registration (admin)', () => {
-  it('registers a student with an enrollment and sequential code', async () => {
+  it('registers a student in a batch, billed by the batch’s plan, with a sequential code', async () => {
     setToday('2026-03-05');
     const { admin, batch, plan } = await makeAcademy();
     const api = await as(admin);
@@ -17,67 +18,95 @@ describe('student registration (admin)', () => {
       guardianName: 'Rohit',
       email: 'aarav@example.com',
       joiningDate: '2026-03-10',
-      batchId: batch.id,
-      trainingDays: [5, 1, 3],
-      feePlanId: plan.id,
-      monthlyDiscount: 25_000,
+      batches: [{ batchId: batch.id, monthlyDiscount: 25_000 }],
     };
     const res = await api.post('/api/v1/students', body).expect(201);
     expect(res.body.data).toMatchObject({
       code: 'ATQ-0001',
       phone: '+919876543210',
       status: 'active',
-      billingStartsOn: '2026-03-05',
       effectiveFee: { base: 250_000, discount: 25_000, total: 225_000 },
-      currentEnrollment: {
-        batchId: batch.id,
-        trainingDays: [1, 3, 5],
-        effectiveFrom: '2026-03-10',
-        effectiveTo: null,
-      },
+      memberships: [
+        {
+          batchId: batch.id,
+          since: '2026-03-10',
+          plan: { id: plan.id },
+          fee: { base: 250_000, discount: 25_000, total: 225_000 },
+          billingDay: 10,
+          // Prepaid: issued on acceptance, so the next one is a month on.
+          nextInvoice: { issueDate: '2026-04-10' },
+        },
+      ],
       // Prepaid: the first month is invoiced as soon as the student is accepted.
       billing: { outstanding: 225_000, invoiceCount: 1 },
+    });
+    expect(res.body.data.enrollmentHistory[0]).toMatchObject({
+      trainingDays: [1, 2, 3, 4, 5, 6], // every day the batch runs
+      effectiveTo: null,
     });
     const second = await api.post('/api/v1/students', { ...body, fullName: 'Second' }).expect(201);
     expect(second.body.data.code).toBe('ATQ-0002');
   });
 
-  it('validates training days, plan, batch and capacity', async () => {
-    const { admin, batch, plan, coach, location } = await makeAcademy();
+  it('registers into several batches: one invoice per batch, each at its own plan', async () => {
+    setToday('2026-03-05');
+    const { admin, coach, location, batch } = await makeAcademy();
+    const weekend = await makeBatch(coach.id, location.id, {
+      weekdays: [6, 7],
+      feePlanId: (await makePlan({ daysPerWeek: 2, monthlyFee: 150_000 })).id,
+    });
+    const res = await (
+      await as(admin)
+    )
+      .post('/api/v1/students', {
+        fullName: 'Two Batches',
+        phone: '9876543210',
+        joiningDate: '2026-03-05',
+        batches: [{ batchId: batch.id }, { batchId: weekend.id, customMonthlyFee: 120_000 }],
+      })
+      .expect(201);
+    expect(res.body.data.memberships.map((m: { fee: { total: number } }) => m.fee.total)).toEqual([
+      250_000, 120_000,
+    ]);
+    expect(res.body.data).toMatchObject({
+      effectiveFee: { total: 370_000 },
+      billing: { outstanding: 370_000, invoiceCount: 2 },
+    });
+    const rows = await db.select().from(invoices).where(eq(invoices.studentId, res.body.data.id));
+    expect(rows.map((i) => [i.batchId, i.totalAmount]).sort()).toEqual(
+      [
+        [batch.id, 250_000],
+        [weekend.id, 120_000],
+      ].sort(),
+    );
+  });
+
+  it('validates batches and capacity', async () => {
+    const { admin, batch, coach, location } = await makeAcademy();
     const api = await as(admin);
-    const base = {
-      fullName: 'X',
-      phone: '9876543210',
-      joiningDate: '2026-03-10',
-      batchId: batch.id,
-      trainingDays: [1, 3, 5],
-      feePlanId: plan.id,
-    };
+    const base = { fullName: 'X', phone: '9876543210', joiningDate: '2026-03-10' };
 
-    await api.post('/api/v1/students', { ...base, trainingDays: [] }).expect(400);
+    await api.post('/api/v1/students', { ...base, batches: [] }).expect(400);
     await api
-      .post('/api/v1/students', { ...base, trainingDays: [1, 2, 3, 4, 5, 6, 7] })
+      .post('/api/v1/students', {
+        ...base,
+        batches: [{ batchId: batch.id }, { batchId: batch.id }],
+      })
       .expect(400);
-    const sunday = await api
-      .post('/api/v1/students', { ...base, trainingDays: [1, 3, 7] })
-      .expect(400);
-    expect(sunday.body.error.details.fields[0].path).toBe('trainingDays');
-
-    const inactivePlan = await makePlan({ isActive: false });
-    await api.post('/api/v1/students', { ...base, feePlanId: inactivePlan.id }).expect(422);
-    await api.post('/api/v1/students', { ...base, feePlanId: UNKNOWN }).expect(422);
-    await api.post('/api/v1/students', { ...base, batchId: UNKNOWN }).expect(422);
+    await api.post('/api/v1/students', { ...base, batches: [{ batchId: UNKNOWN }] }).expect(422);
     const closed = await makeBatch(coach.id, location.id, { isActive: false });
-    await api.post('/api/v1/students', { ...base, batchId: closed.id }).expect(422);
+    await api.post('/api/v1/students', { ...base, batches: [{ batchId: closed.id }] }).expect(422);
 
     const tiny = await makeBatch(coach.id, location.id, { capacity: 1 });
-    await api.post('/api/v1/students', { ...base, batchId: tiny.id }).expect(201);
-    const full = await api.post('/api/v1/students', { ...base, batchId: tiny.id }).expect(422);
+    await api.post('/api/v1/students', { ...base, batches: [{ batchId: tiny.id }] }).expect(201);
+    const full = await api
+      .post('/api/v1/students', { ...base, batches: [{ batchId: tiny.id }] })
+      .expect(422);
     expect(full.body.error.message).toMatch(/is full \(capacity 1\)/);
   });
 
   it('is admin-only', async () => {
-    const { coach, batch, plan } = await makeAcademy();
+    const { coach, batch } = await makeAcademy();
     await (
       await as(coach)
     )
@@ -85,9 +114,7 @@ describe('student registration (admin)', () => {
         fullName: 'X',
         phone: '9876543210',
         joiningDate: '2026-03-10',
-        batchId: batch.id,
-        trainingDays: [1, 3, 5],
-        feePlanId: plan.id,
+        batches: [{ batchId: batch.id }],
       })
       .expect(403);
   });
@@ -108,8 +135,7 @@ describe('student listing and access', () => {
     const coachList = await (await as(coach)).get('/api/v1/students').expect(200);
     expect(coachList.body.data.map((s: { id: string }) => s.id)).toEqual([mine.id]);
     expect(coachList.body.data[0]).toMatchObject({
-      batch: { id: batch.id },
-      coach: { id: coach.id },
+      batches: [{ id: batch.id, coachId: coach.id, fee: 250_000 }],
       effectiveFee: 250_000,
       outstanding: 0,
     });
@@ -132,30 +158,28 @@ describe('student listing and access', () => {
 });
 
 describe('updating students', () => {
-  it('updates profile and fee with an audit trail', async () => {
+  it('updates the profile; fees are changed per batch with an audit trail', async () => {
     const { admin, batch, plan } = await makeAcademy();
     const s = await makeStudent({ batchId: batch.id, feePlanId: plan.id }, admin.id);
-    const newPlan = await makePlan({ monthlyFee: 400_000, daysPerWeek: 5 });
     const api = await as(admin);
-    const res = await api
-      .patch(`/api/v1/students/${s.id}`, {
-        feePlanId: newPlan.id,
-        customMonthlyFee: 380_000,
-        notes: 'Scholarship',
-      })
-      .expect(200);
-    expect(res.body.data).toMatchObject({ notes: 'Scholarship', effectiveFee: { total: 380_000 } });
+    const res = await api.patch(`/api/v1/students/${s.id}`, { notes: 'Scholarship' }).expect(200);
+    expect(res.body.data.notes).toBe('Scholarship');
+    const eid = res.body.data.memberships[0].enrollmentId as string;
 
+    const fee = await api
+      .patch(`/api/v1/students/${s.id}/batches/${eid}`, { customMonthlyFee: 380_000 })
+      .expect(200);
+    expect(fee.body.data.effectiveFee.total).toBe(380_000);
     const logs = await api
       .get(`/api/v1/admin/audit-logs?entityType=student&entityId=${s.id}`)
       .expect(200);
     expect(logs.body.data[0]).toMatchObject({
       action: 'student.fee_changed',
-      metadata: { before: { feePlanId: plan.id } },
+      metadata: { batchId: batch.id, before: { customMonthlyFee: null } },
     });
     await api
-      .patch(`/api/v1/students/${s.id}`, { feePlanId: (await makePlan({ isActive: false })).id })
-      .expect(422);
+      .patch(`/api/v1/students/${s.id}/batches/${UNKNOWN}`, { monthlyDiscount: 1 })
+      .expect(404);
     await api.patch(`/api/v1/students/${UNKNOWN}`, { notes: 'x' }).expect(404);
     await api.patch(`/api/v1/students/${s.id}`, { address: '2 Park Street' }).expect(200);
   });
@@ -170,11 +194,13 @@ describe('updating students', () => {
     const res = await api
       .patch(`/api/v1/students/${s.id}`, { joiningDate: '2026-01-12' })
       .expect(200);
-    expect(res.body.data.currentEnrollment.effectiveFrom).toBe('2026-01-12');
+    expect(res.body.data.memberships[0].since).toBe('2026-01-12');
+    const eid = res.body.data.memberships[0].enrollmentId as string;
 
     await db.insert(invoices).values({
       number: 'LEGACY-0001',
       studentId: s.id,
+      enrollmentId: eid,
       cycleNumber: 1,
       periodStart: '2026-01-12',
       periodEnd: '2026-02-11',
@@ -208,17 +234,17 @@ describe('updating students', () => {
     expect(blocked.body.error.message).toMatch(/after a payment has been recorded/);
   });
 
-  it('rejects joining-date changes that conflict with enrollment history', async () => {
+  it('rejects joining-date changes that conflict with batch history', async () => {
     const { admin, batch, otherBatch, plan } = await makeAcademy();
     const s = await makeStudent(
       { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10' },
       admin.id,
     );
     const api = await as(admin);
+    const eid = (await api.get(`/api/v1/students/${s.id}`)).body.data.memberships[0].enrollmentId;
     await api
-      .post(`/api/v1/students/${s.id}/transfer`, {
+      .post(`/api/v1/students/${s.id}/batches/${eid}/move`, {
         batchId: otherBatch.id,
-        trainingDays: [1, 3, 5],
         effectiveFrom: '2026-02-01',
       })
       .expect(200);
@@ -226,92 +252,157 @@ describe('updating students', () => {
   });
 });
 
-describe('transfers and training-day changes', () => {
-  it('moves a student permanently and keeps history', async () => {
-    const { admin, coach, otherCoach, batch, otherBatch, plan } = await makeAcademy();
+describe('batch memberships', () => {
+  async function oneStudent() {
+    setToday('2026-01-10');
+    const a = await makeAcademy();
     const s = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10' },
-      admin.id,
+      { batchId: a.batch.id, feePlanId: a.plan.id, joiningDate: '2026-01-10' },
+      a.admin.id,
     );
-    const api = await as(admin);
+    await generateDueInvoices('2026-01-10');
+    const api = await as(a.admin);
+    const eid = (await api.get(`/api/v1/students/${s.id}`)).body.data.memberships[0]
+      .enrollmentId as string;
+    return { ...a, s, api, eid };
+  }
 
+  it('moves a student to another batch: history kept, billing continues on the same day', async () => {
+    const { admin, coach, otherCoach, batch, otherBatch, s, eid } = await oneStudent();
+    const pricier = await makePlan({ monthlyFee: 300_000 });
+
+    await db.update(batches).set({ feePlanId: pricier.id }).where(eq(batches.id, otherBatch.id));
+    setToday('2026-02-20');
+    const api = await as(admin);
     const res = await api
-      .post(`/api/v1/students/${s.id}/transfer`, {
+      .post(`/api/v1/students/${s.id}/batches/${eid}/move`, {
         batchId: otherBatch.id,
-        trainingDays: [2, 4, 6],
-        effectiveFrom: '2026-03-01',
+        effectiveFrom: '2026-02-20',
         reason: 'Timing',
       })
       .expect(200);
-    expect(res.body.data.currentEnrollment).toMatchObject({
-      batchId: otherBatch.id,
-      trainingDays: [2, 4, 6],
-      effectiveFrom: '2026-03-01',
-    });
-    expect(res.body.data.enrollmentHistory).toHaveLength(2);
+    expect(res.body.data.memberships).toEqual([
+      expect.objectContaining({
+        batchId: otherBatch.id,
+        since: '2026-02-20',
+        billingDay: 10,
+        fee: expect.objectContaining({ total: 300_000 }),
+        nextInvoice: expect.objectContaining({ issueDate: '2026-03-10' }),
+      }),
+    ]);
     expect(res.body.data.enrollmentHistory[1]).toMatchObject({
       batchId: batch.id,
-      effectiveTo: '2026-02-28',
+      effectiveTo: '2026-02-19',
     });
 
+    // Billing: the old batch billed Jan 10 and Feb 10; the new batch starts on Mar 10.
+    await generateDueInvoices('2026-03-15');
+    const rows = await db
+      .select()
+      .from(invoices)
+      .where(eq(invoices.studentId, s.id))
+      .orderBy(invoices.periodStart);
+    expect(rows.map((i) => [i.periodStart, i.batchId === otherBatch.id, i.totalAmount])).toEqual([
+      ['2026-01-10', false, 250_000],
+      ['2026-02-10', false, 250_000],
+      ['2026-03-10', true, 300_000],
+    ]);
+
     // Ownership follows the move.
+    setToday('2026-03-15');
     await (await as(coach)).get(`/api/v1/students/${s.id}`).expect(404);
     await (await as(otherCoach)).get(`/api/v1/students/${s.id}`).expect(200);
   });
 
-  it('replaces a same-day enrollment and allows day changes in a full batch', async () => {
-    const { admin, coach, location, plan } = await makeAcademy();
-    const full = await makeBatch(coach.id, location.id, { capacity: 1 });
-    const s = await makeStudent(
-      { batchId: full.id, feePlanId: plan.id, joiningDate: '2026-01-10' },
-      admin.id,
-    );
-    const api = await as(admin);
-    const res = await api
-      .post(`/api/v1/students/${s.id}/transfer`, {
-        batchId: full.id,
-        trainingDays: [2, 4, 6],
-        effectiveFrom: '2026-01-10',
-      })
-      .expect(200);
-    expect(res.body.data.enrollmentHistory).toHaveLength(1);
-    expect(res.body.data.currentEnrollment.trainingDays).toEqual([2, 4, 6]);
-  });
-
-  it('rejects invalid transfers', async () => {
-    const { admin, batch, otherBatch, plan } = await makeAcademy();
-    const s = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-02-01' },
-      admin.id,
-    );
-    const api = await as(admin);
-    await api
-      .post(`/api/v1/students/${s.id}/transfer`, {
+  it('adds a second batch; each coach sees the student and only their own invoices', async () => {
+    const { coach, otherCoach, otherBatch, s, api } = await oneStudent();
+    const added = await api
+      .post(`/api/v1/students/${s.id}/batches`, {
         batchId: otherBatch.id,
-        trainingDays: [1, 3, 5],
+        effectiveFrom: '2026-01-10',
+        monthlyDiscount: 50_000,
+      })
+      .expect(201);
+    expect(added.body.data.memberships).toHaveLength(2);
+    expect(added.body.data.billing.invoiceCount).toBe(2);
+    await api
+      .post(`/api/v1/students/${s.id}/batches`, {
+        batchId: otherBatch.id,
+        effectiveFrom: '2026-01-11',
+      })
+      .expect(409);
+    await api
+      .post(`/api/v1/students/${s.id}/batches`, {
+        batchId: otherBatch.id,
         effectiveFrom: '2026-01-01',
       })
+      .expect(400);
+
+    for (const [who, total] of [
+      [coach, 250_000],
+      [otherCoach, 200_000],
+    ] as const) {
+      const c = await as(who);
+      await c.get(`/api/v1/students/${s.id}`).expect(200);
+      const list = (await c.get('/api/v1/invoices').expect(200)).body.data;
+      expect(list.map((i: { totalAmount: number }) => i.totalAmount)).toEqual([total]);
+    }
+  });
+
+  it('leaves one batch (its invoices stop), but not the only one', async () => {
+    const { otherBatch, s, api, eid } = await oneStudent();
+    const only = await api
+      .post(`/api/v1/students/${s.id}/batches/${eid}/leave`, { leftOn: '2026-01-31' })
       .expect(422);
-    await api
-      .post(`/api/v1/students/${UNKNOWN}/transfer`, {
+    expect(only.body.error.message).toMatch(/only batch/);
+    const added = await api
+      .post(`/api/v1/students/${s.id}/batches`, {
         batchId: otherBatch.id,
-        trainingDays: [1, 3, 5],
-        effectiveFrom: '2026-03-01',
+        effectiveFrom: '2026-01-10',
+      })
+      .expect(201);
+    const second = added.body.data.memberships.find(
+      (m: { batchId: string }) => m.batchId === otherBatch.id,
+    ).enrollmentId;
+    await api
+      .post(`/api/v1/students/${s.id}/batches/${second}/leave`, { leftOn: '2026-01-01' })
+      .expect(400);
+    const res = await api
+      .post(`/api/v1/students/${s.id}/batches/${second}/leave`, { leftOn: '2026-01-31' })
+      .expect(200);
+    expect(res.body.data.memberships).toHaveLength(1);
+    await api
+      .post(`/api/v1/students/${s.id}/batches/${second}/leave`, { leftOn: '2026-02-01' })
+      .expect(422);
+
+    await generateDueInvoices('2026-03-15');
+    const rows = await db.select().from(invoices).where(eq(invoices.studentId, s.id));
+    // Main batch: Jan, Feb, Mar. Second batch: only January (prepaid at acceptance).
+    expect(rows.filter((i) => i.batchId === otherBatch.id)).toHaveLength(1);
+    expect(rows.filter((i) => i.batchId !== otherBatch.id)).toHaveLength(3);
+  });
+
+  it('rejects invalid moves', async () => {
+    const { batch, otherBatch, s, api, eid } = await oneStudent();
+    const move = (id: string, body: object) =>
+      api.post(`/api/v1/students/${id}/batches/${eid}/move`, body);
+    await move(s.id, { batchId: otherBatch.id, effectiveFrom: '2026-01-10' }).expect(422); // not after start
+    await move(s.id, { batchId: batch.id, effectiveFrom: '2026-02-01' }).expect(422); // same batch
+    await move(UNKNOWN, { batchId: otherBatch.id, effectiveFrom: '2026-02-01' }).expect(404);
+    await api
+      .post(`/api/v1/students/${s.id}/batches/${UNKNOWN}/move`, {
+        batchId: otherBatch.id,
+        effectiveFrom: '2026-02-01',
       })
       .expect(404);
-    await db.delete(enrollments).where(eq(enrollments.studentId, s.id));
-    await api
-      .post(`/api/v1/students/${s.id}/transfer`, {
-        batchId: otherBatch.id,
-        trainingDays: [1, 3, 5],
-        effectiveFrom: '2026-03-01',
-      })
-      .expect(422);
+    await move(s.id, { batchId: otherBatch.id, effectiveFrom: '2026-02-01' }).expect(200);
+    // The old membership has ended.
+    await move(s.id, { batchId: otherBatch.id, effectiveFrom: '2026-03-01' }).expect(422);
   });
 });
 
 describe('leaving the academy', () => {
-  it('closes enrollment, cancels future makeups and blocks further changes', async () => {
+  it('ends every batch, cancels future makeups and blocks further changes', async () => {
     const { admin, batch, otherBatch, plan } = await makeAcademy();
     const s = await makeStudent(
       { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10' },
@@ -321,6 +412,7 @@ describe('leaving the academy', () => {
     await api
       .post(`/api/v1/students/${s.id}/makeups`, { batchId: otherBatch.id, date: '2026-04-07' })
       .expect(201);
+    const eid = (await api.get(`/api/v1/students/${s.id}`)).body.data.memberships[0].enrollmentId;
 
     await api.post(`/api/v1/students/${s.id}/leave`, { leftOn: '2026-01-01' }).expect(400);
     const res = await api
@@ -330,15 +422,20 @@ describe('leaving the academy', () => {
       status: 'left',
       leftOn: '2026-03-31',
       leftReason: 'Relocated',
-      currentEnrollment: null,
+      memberships: [],
       upcomingMakeups: [],
     });
 
     await api.post(`/api/v1/students/${s.id}/leave`, { leftOn: '2026-04-01' }).expect(422);
     await api
-      .post(`/api/v1/students/${s.id}/transfer`, {
+      .post(`/api/v1/students/${s.id}/batches/${eid}/move`, {
         batchId: otherBatch.id,
-        trainingDays: [1, 3, 5],
+        effectiveFrom: '2026-04-01',
+      })
+      .expect(422);
+    await api
+      .post(`/api/v1/students/${s.id}/batches`, {
+        batchId: otherBatch.id,
         effectiveFrom: '2026-04-01',
       })
       .expect(422);
@@ -350,17 +447,17 @@ describe('leaving the academy', () => {
     expect(left.body.data).toHaveLength(1);
   });
 
-  it('rejects a leaving date before the current enrollment started', async () => {
+  it('rejects a leaving date before the latest batch started', async () => {
     const { admin, batch, otherBatch, plan } = await makeAcademy();
     const s = await makeStudent(
       { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10' },
       admin.id,
     );
     const api = await as(admin);
+    const eid = (await api.get(`/api/v1/students/${s.id}`)).body.data.memberships[0].enrollmentId;
     await api
-      .post(`/api/v1/students/${s.id}/transfer`, {
+      .post(`/api/v1/students/${s.id}/batches/${eid}/move`, {
         batchId: otherBatch.id,
-        trainingDays: [1, 3, 5],
         effectiveFrom: '2026-03-01',
       })
       .expect(200);
@@ -430,7 +527,7 @@ describe('makeup sessions', () => {
 
   it('keeps pending makeups out of rosters until an admin approves or rejects them', async () => {
     setToday('2026-03-01');
-    const { admin, coach, otherCoach, batch, otherBatch, plan } = await makeAcademy();
+    const { admin, coach, otherCoach, batch, otherBatch, plan, location } = await makeAcademy();
     // A student of the other coach…
     const visitor = await makeStudent(
       {
@@ -441,9 +538,11 @@ describe('makeup sessions', () => {
       },
       admin.id,
     );
-    // …and one of this coach, who requests a makeup on a non-training day.
+    // …and one of this coach (in their Mon/Wed/Fri batch), who requests makeups on Tuesdays.
+    const mwf = await makeBatch(coach.id, location.id, { weekdays: [1, 3, 5] });
+
     const own = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-01-10', trainingDays: [1, 3, 5] },
+      { batchId: mwf.id, feePlanId: plan.id, joiningDate: '2026-01-10' },
       admin.id,
     );
     const coachApi = await as(coach);

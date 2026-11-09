@@ -84,10 +84,11 @@ describe('public registration', () => {
 
 describe('admin review of registrations', () => {
   it('approves a student: creates the student, enrollment and billing anchor', async () => {
-    const { admin, batch, plan } = await makeAcademy();
+    const { admin, batch, otherBatch } = await makeAcademy();
+    // Parents can pick more than one batch.
     const submitted = await request(getApp())
       .post('/api/v1/public/register/student')
-      .send({ ...studentForm, preferredBatchId: batch.id });
+      .send({ ...studentForm, preferredBatchIds: [batch.id, otherBatch.id] });
     const id = submitted.body.data.id as string;
     const api = await as(admin);
 
@@ -97,20 +98,17 @@ describe('admin review of registrations', () => {
       id,
       preferredBatch: { id: batch.id },
       preferredDays: [1, 3, 5],
-      details: { guardianName: 'Neha Kapoor' },
+      details: { guardianName: 'Neha Kapoor', preferredBatchIds: [batch.id, otherBatch.id] },
     });
     await api.get(`/api/v1/registrations/${id}`).expect(200);
 
     await api
-      .post(`/api/v1/registrations/${id}/approve`, { batchId: batch.id, trainingDays: [1, 3, 5] })
-      .expect(400);
+      .post(`/api/v1/registrations/${id}/approve`, { batches: [{ batchId: batch.id }] })
+      .expect(400); // joining date missing
     const approved = await api
       .post(`/api/v1/registrations/${id}/approve`, {
         joiningDate: '2026-03-10',
-        batchId: batch.id,
-        trainingDays: [1, 3, 5],
-        feePlanId: plan.id,
-        monthlyDiscount: 10_000,
+        batches: [{ batchId: batch.id, monthlyDiscount: 10_000 }],
         note: 'Welcome!',
       })
       .expect(200);
@@ -119,7 +117,7 @@ describe('admin review of registrations', () => {
       guardianName: 'Neha Kapoor',
       medicalNotes: 'Mild asthma',
       joiningDate: '2026-03-10',
-      currentEnrollment: { batchId: batch.id },
+      memberships: [{ batchId: batch.id }],
       effectiveFee: { total: 240_000 },
     });
 

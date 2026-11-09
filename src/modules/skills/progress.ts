@@ -12,6 +12,7 @@ export interface AssessmentView {
   month: string;
   average: number;
   levelName: string | null;
+  levelCode: string | null;
   levelPosition: number | null;
   comment: string | null;
   goals: string | null;
@@ -73,6 +74,7 @@ export async function loadProgress(studentIds: string[]): Promise<Map<string, Sp
       month: r.a.month,
       average: r.a.average,
       levelName: r.a.levelName,
+      levelCode: r.a.levelCode,
       levelPosition: r.a.levelPosition,
       comment: r.a.comment,
       goals: r.a.goals,

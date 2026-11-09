@@ -1,7 +1,7 @@
 /**
  * Admin review of makeup requests made by coaches. Mounted at /api/v1/makeups (admin only).
  */
-import { and, asc, desc, eq, isNull, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -59,7 +59,13 @@ makeupsRouter.get('/', async (req, res) => {
     .innerJoin(batchCoach, eq(batchCoach.id, batches.coachId))
     .leftJoin(
       enrollments,
-      and(eq(enrollments.studentId, students.id), isNull(enrollments.effectiveTo)),
+      eq(
+        enrollments.id,
+        sql`(select e.id from enrollments e where e.student_id = ${students.id} and e.effective_to is null
+              order by (select b2.coach_id = ${batches.coachId} from batches b2 where b2.id = e.batch_id) desc,
+                       e.effective_from asc
+              limit 1)`,
+      ),
     )
     .leftJoin(homeBatch, eq(homeBatch.id, enrollments.batchId))
     .leftJoin(homeCoach, eq(homeCoach.id, homeBatch.coachId))

@@ -206,11 +206,7 @@ export async function loadStudentReports(
     batchIds ? inArray(col, batchIds) : undefined;
 
   const [people, enrolls, marks, bills, makeups, feedback, history, progress] = await Promise.all([
-    db
-      .select({ s: students, plan: feePlans.name, planFee: feePlans.monthlyFee })
-      .from(students)
-      .innerJoin(feePlans, eq(feePlans.id, students.feePlanId))
-      .where(inArray(students.id, studentIds)),
+    db.select({ s: students }).from(students).where(inArray(students.id, studentIds)),
     db
       .select({
         studentId: enrollments.studentId,
@@ -221,10 +217,15 @@ export async function loadStudentReports(
         from: enrollments.effectiveFrom,
         to: enrollments.effectiveTo,
         reason: enrollments.reason,
+        customMonthlyFee: enrollments.customMonthlyFee,
+        monthlyDiscount: enrollments.monthlyDiscount,
+        planName: feePlans.name,
+        planFee: feePlans.monthlyFee,
       })
       .from(enrollments)
       .innerJoin(batches, eq(batches.id, enrollments.batchId))
       .innerJoin(users, eq(users.id, batches.coachId))
+      .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
       .where(inArray(enrollments.studentId, studentIds))
       .orderBy(asc(enrollments.effectiveFrom)),
     db
@@ -327,7 +328,7 @@ export async function loadStudentReports(
     historyBy.set(h.entityId, [...(historyBy.get(h.entityId) ?? []), h]);
   }
 
-  const reports = people.map(({ s, plan, planFee }) => {
+  const reports = people.map(({ s }) => {
     // ── Attendance ──
     const sMarks = marksBy.get(s.id) ?? [];
     const count = (rows: typeof sMarks) => {
@@ -426,7 +427,14 @@ export async function loadStudentReports(
 
     // ── History ──
     const sEnrolls = enrollBy.get(s.id) ?? [];
-    const current = sEnrolls.find((e) => e.to === null) ?? null;
+    const open = sEnrolls.filter((e) => e.to === null);
+    const current = open[0] ?? null;
+    // Current batches' plans and fees (each batch is billed on its own).
+    const fees = open.map((e) => {
+      const base = e.customMonthlyFee ?? e.planFee;
+      return { base, discount: Math.min(e.monthlyDiscount, base) };
+    });
+    const plan = [...new Set(open.map((e) => e.planName))].join(', ') || '-';
     const sMakeups = makeupsBy.get(s.id) ?? [];
     const timeline: TimelineEvent[] = [];
     timeline.push({
@@ -515,8 +523,8 @@ export async function loadStudentReports(
         leftReason: s.leftReason,
         tenureDays: Math.max(0, diffDays(s.joiningDate, s.leftOn ?? today)),
         feePlan: plan,
-        monthlyFee: s.customMonthlyFee ?? planFee,
-        monthlyDiscount: s.monthlyDiscount,
+        monthlyFee: fees.reduce((n, x) => n + x.base, 0),
+        monthlyDiscount: fees.reduce((n, x) => n + x.discount, 0),
       },
       current: current
         ? {

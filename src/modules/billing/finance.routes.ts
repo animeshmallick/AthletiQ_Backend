@@ -241,11 +241,11 @@ financeRouter.get('/projection', async (req, res) => {
 
   const lastCycle = db
     .select({
-      studentId: invoices.studentId,
+      enrollmentId: invoices.enrollmentId,
       last: sql<number>`max(${invoices.cycleNumber})`.as('last'),
     })
     .from(invoices)
-    .groupBy(invoices.studentId)
+    .groupBy(invoices.enrollmentId)
     .as('lc');
 
   const scope = studentScope(user, students.id);
@@ -254,26 +254,31 @@ financeRouter.get('/projection', async (req, res) => {
       id: students.id,
       code: students.code,
       fullName: students.fullName,
-      joiningDate: students.joiningDate,
-      billingAnchorDate: students.billingAnchorDate,
-      cycleOffset: students.cycleOffset,
-      billingStartsOn: students.billingStartsOn,
-      leftOn: students.leftOn,
-      customMonthlyFee: students.customMonthlyFee,
-      monthlyDiscount: students.monthlyDiscount,
+      joiningDate: enrollments.effectiveFrom,
+      billingAnchorDate: enrollments.billingAnchorDate,
+      cycleOffset: enrollments.cycleOffset,
+      billingStartsOn: enrollments.billingStartsOn,
+      leftOn: enrollments.effectiveTo,
+      customMonthlyFee: enrollments.customMonthlyFee,
+      monthlyDiscount: enrollments.monthlyDiscount,
       planFee: feePlans.monthlyFee,
       batchName: batches.name,
       lastInvoicedCycle: sql<number>`coalesce(${lastCycle.last}, 0)::int`,
     })
-    .from(students)
-    .innerJoin(feePlans, eq(feePlans.id, students.feePlanId))
-    .leftJoin(
-      enrollments,
-      and(eq(enrollments.studentId, students.id), sql`${enrollments.effectiveTo} is null`),
-    )
-    .leftJoin(batches, eq(batches.id, enrollments.batchId))
-    .leftJoin(lastCycle, eq(lastCycle.studentId, students.id))
-    .where(and(eq(students.status, 'active'), scope));
+    .from(enrollments)
+    .innerJoin(students, eq(students.id, enrollments.studentId))
+    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
+    .leftJoin(lastCycle, eq(lastCycle.enrollmentId, enrollments.id))
+    .where(
+      and(
+        eq(students.status, 'active'),
+        sql`${enrollments.effectiveTo} is null`,
+        // Coaches: only memberships of their own batches.
+        user.role === 'admin' ? undefined : eq(batches.coachId, user.id),
+        scope,
+      ),
+    );
 
   const upcoming = rows
     .map((r) => {

@@ -1,6 +1,13 @@
-import { and, asc, desc, eq, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { enrollments, invoices, payments, students, users } from '../../db/schema/index.js';
+import {
+  batches,
+  enrollments,
+  invoices,
+  payments,
+  students,
+  users,
+} from '../../db/schema/index.js';
 import { formatDisplayDate, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { formatInr } from '../../lib/money.js';
@@ -12,13 +19,18 @@ import type { InvoicePdfData } from './invoice-pdf.js';
 import { signInvoiceLink, whatsappLink } from './share-links.js';
 
 /**
- * Coaches see invoices of students they currently coach, plus invoices raised while the student
- * was in their batch (historical ownership snapshot).
+ * Admins see every invoice. Coaches see the invoices of the batches they run (a student in two
+ * batches has a separate invoice for each, seen by that batch's coach).
  */
 export function invoiceScope(user: AuthUser): SQL | undefined {
-  const current = studentScope(user, invoices.studentId);
-  if (!current) return undefined;
-  return or(current, eq(invoices.coachId, user.id));
+  if (!studentScope(user, invoices.studentId)) return undefined;
+  return or(
+    eq(invoices.coachId, user.id),
+    inArray(
+      invoices.batchId,
+      db.select({ id: batches.id }).from(batches).where(eq(batches.coachId, user.id)),
+    ),
+  );
 }
 
 /** Derived display status: "overdue" is a due invoice past its due date. */
@@ -112,7 +124,7 @@ export async function invoicePdfData(inv: InvoiceDetail): Promise<InvoicePdfData
       : Promise.resolve(undefined),
     db.query.enrollments.findFirst({
       columns: { trainingDays: true },
-      where: and(eq(enrollments.studentId, inv.student.id), isNull(enrollments.effectiveTo)),
+      where: eq(enrollments.id, inv.enrollmentId),
     }),
     db
       .select({ number: invoices.number, dueDate: invoices.dueDate, amount: invoices.totalAmount })

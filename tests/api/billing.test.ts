@@ -6,7 +6,7 @@ import { invoices, jobRuns, students } from '../../src/db/schema';
 import * as lock from '../../src/jobs/advisory-lock';
 import { runExclusive } from '../../src/jobs/job-runner';
 import { generateDueInvoices } from '../../src/modules/billing/invoice-generator';
-import { as, getApp, makeAcademy, makePlan, makeStudent, setToday } from '../helpers/factories';
+import { as, getApp, makeAcademy, makeStudent, setToday } from '../helpers/factories';
 
 async function academyWithStudent(
   overrides: Parameters<typeof makeStudent>[0] extends infer T ? Partial<T> : never = {},
@@ -84,11 +84,11 @@ describe('invoice generation', () => {
   it('keeps old invoices unchanged when the fee changes later', async () => {
     const { admin, student } = await academyWithStudent();
     await generateDueInvoices('2026-01-10');
-    const pricier = await makePlan({ monthlyFee: 400_000 });
-    await (
-      await as(admin)
-    )
-      .patch(`/api/v1/students/${student.id}`, { feePlanId: pricier.id })
+    const api = await as(admin);
+    const eid = (await api.get(`/api/v1/students/${student.id}`)).body.data.memberships[0]
+      .enrollmentId as string;
+    await api
+      .patch(`/api/v1/students/${student.id}/batches/${eid}`, { customMonthlyFee: 400_000 })
       .expect(200);
     await generateDueInvoices('2026-02-10');
     expect((await allInvoices()).map((r) => r.totalAmount)).toEqual([250_000, 400_000]);
@@ -111,20 +111,25 @@ describe('invoice generation', () => {
     expect((await allInvoices()).map((r) => r.cycleNumber)).toEqual([1, 2, 3]);
   });
 
-  it('snapshots the batch the student was in during the cycle', async () => {
-    const { admin, student, otherBatch, otherCoach } = await academyWithStudent();
-    await (
-      await as(admin)
-    )
-      .post(`/api/v1/students/${student.id}/transfer`, {
+  it('bills each cycle to its batch; after a move the new batch bills from the next cycle', async () => {
+    const { admin, student, batch, coach, otherBatch, otherCoach } = await academyWithStudent();
+    await generateDueInvoices('2026-02-10');
+    const api = await as(admin);
+    const eid = (await api.get(`/api/v1/students/${student.id}`)).body.data.memberships[0]
+      .enrollmentId as string;
+    await api
+      .post(`/api/v1/students/${student.id}/batches/${eid}/move`, {
         batchId: otherBatch.id,
-        trainingDays: [1, 3, 5],
         effectiveFrom: '2026-02-20',
       })
       .expect(200);
     await generateDueInvoices('2026-03-10');
     const rows = await allInvoices();
-    expect(rows[1]).toMatchObject({ batchId: otherBatch.id, coachId: otherCoach.id });
+    expect(rows.map((r) => [r.periodStart, r.batchId, r.coachId])).toEqual([
+      ['2026-01-10', batch.id, coach.id],
+      ['2026-02-10', batch.id, coach.id],
+      ['2026-03-10', otherBatch.id, otherCoach.id],
+    ]);
   });
 
   it('records per-student failures and continues', async () => {
@@ -140,7 +145,7 @@ describe('invoice generation', () => {
   it('treats a concurrent duplicate as already generated', async () => {
     await academyWithStudent();
     const dup = Object.assign(new Error('dup'), {
-      cause: { code: '23505', constraint: 'invoices_student_cycle_uq' },
+      cause: { code: '23505', constraint: 'invoices_enrollment_cycle_uq' },
     });
     const spy = jest.spyOn(db, 'transaction').mockRejectedValueOnce(dup);
     const stats = await generateDueInvoices('2026-01-10');

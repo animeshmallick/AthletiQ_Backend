@@ -12,6 +12,7 @@ import {
   users,
 } from '../../db/schema/index.js';
 import { addDays, minDate, todayInAppTz, type IsoDate } from '../../lib/dates.js';
+import { cycleFor, nextUpcomingCycle } from '../billing/cycle.js';
 import { AppError } from '../../lib/errors.js';
 import type { Paise } from '../../lib/money.js';
 
@@ -35,22 +36,31 @@ export async function nextStudentCode(tx: DbOrTx): Promise<string> {
   return `ATQ-${String(row!.value).padStart(4, '0')}`;
 }
 
-/** Validates the target batch and that training days fall on days the batch runs. */
-export async function assertEnrollable(
+/**
+ * A batch a student can join: it exists, is active, has room, and the student isn't already in
+ * it. `excludeStudentId` leaves that student out of the capacity count (e.g. while moving).
+ */
+export async function assertJoinable(
   batchId: string,
-  trainingDays: number[],
   tx: DbOrTx = db,
-  /** Student already counted in this batch (e.g. changing training days) — excluded from capacity. */
-  excludeStudentId?: string,
+  opts: { studentId?: string; excludeStudentId?: string } = {},
 ) {
   const batch = await tx.query.batches.findFirst({ where: eq(batches.id, batchId) });
   if (!batch) throw AppError.unprocessable('Selected batch does not exist');
-  if (!batch.isActive) throw AppError.unprocessable('Selected batch is inactive');
-  const runs = new Set(batch.weekdays);
-  if (trainingDays.some((d) => !runs.has(d))) {
-    throw new AppError('VALIDATION_ERROR', 'Training days must be days the batch runs', {
-      fields: [{ path: 'trainingDays', message: 'Pick only days the batch runs' }],
-    });
+  if (!batch.isActive) throw AppError.unprocessable(`${batch.name} is inactive`);
+  if (opts.studentId) {
+    const [already] = await tx
+      .select({ id: enrollments.id })
+      .from(enrollments)
+      .where(
+        and(
+          eq(enrollments.batchId, batchId),
+          eq(enrollments.studentId, opts.studentId),
+          isNull(enrollments.effectiveTo),
+        ),
+      )
+      .limit(1);
+    if (already) throw AppError.conflict(`Already in ${batch.name}`);
   }
   const [{ n } = { n: 0 }] = await tx
     .select({ n: sql<number>`count(*)::int` })
@@ -59,7 +69,7 @@ export async function assertEnrollable(
       and(
         eq(enrollments.batchId, batchId),
         isNull(enrollments.effectiveTo),
-        excludeStudentId ? ne(enrollments.studentId, excludeStudentId) : undefined,
+        opts.excludeStudentId ? ne(enrollments.studentId, opts.excludeStudentId) : undefined,
       ),
     );
   if (n >= batch.capacity)
@@ -74,57 +84,113 @@ export async function assertActivePlan(feePlanId: string, tx: DbOrTx = db) {
   return plan;
 }
 
+/** A batch to join, with this student's own price adjustments. */
+export interface JoinInput {
+  batchId: string;
+  customMonthlyFee?: number | null;
+  monthlyDiscount?: number;
+}
+
 /**
- * Moves a student to a batch (or changes training days) from `effectiveFrom`. The current
- * enrollment is closed the day before; if it started the same day it is replaced instead.
+ * Adds a student to a batch from `effectiveFrom` (a new membership with its own billing run:
+ * cycles anchored on that day, the first invoice issued at acceptance).
  */
-export async function transferStudent(
+export async function joinBatch(
   tx: DbOrTx,
-  input: {
+  input: JoinInput & {
     studentId: string;
-    batchId: string;
-    trainingDays: number[];
     effectiveFrom: IsoDate;
     reason: string | null;
     actorId: string;
+    billingStartsOn?: IsoDate;
+  },
+) {
+  const batch = await assertJoinable(input.batchId, tx, { studentId: input.studentId });
+  const [row] = await tx
+    .insert(enrollments)
+    .values({
+      studentId: input.studentId,
+      batchId: batch.id,
+      trainingDays: [...batch.weekdays].sort((x, y) => x - y),
+      effectiveFrom: input.effectiveFrom,
+      reason: input.reason,
+      customMonthlyFee: input.customMonthlyFee ?? null,
+      monthlyDiscount: input.monthlyDiscount ?? 0,
+      billingStartsOn: input.billingStartsOn ?? minDate(todayInAppTz(), input.effectiveFrom),
+      createdById: input.actorId,
+    })
+    .returning();
+  return { enrollment: row!, batch };
+}
+
+/** First day of the cycle (on `anchor`'s day of month) that starts on or after `date`. */
+export function nextCycleStart(anchor: IsoDate, date: IsoDate): IsoDate {
+  for (let k = 1; k < 1300; k++) {
+    const start = cycleFor(anchor, k).periodStart;
+    if (start >= date) return start;
+  }
+  return date;
+}
+
+/**
+ * Moves a membership to another batch from `effectiveFrom`. The old membership ends the day
+ * before; the new one keeps the same billing day and continues with the next cycle, priced by the
+ * new batch's plan (the month in progress was already billed by the old batch). Custom fee and
+ * discount carry over unless given.
+ */
+export async function moveEnrollment(
+  tx: DbOrTx,
+  input: {
+    studentId: string;
+    enrollmentId: string;
+    toBatchId: string;
+    effectiveFrom: IsoDate;
+    reason: string | null;
+    actorId: string;
+    customMonthlyFee?: number | null;
+    monthlyDiscount?: number;
   },
 ) {
   const [current] = await tx
     .select()
     .from(enrollments)
-    .where(and(eq(enrollments.studentId, input.studentId), isNull(enrollments.effectiveTo)))
+    .where(and(eq(enrollments.id, input.enrollmentId), eq(enrollments.studentId, input.studentId)))
     .for('update');
-
-  if (!current) throw AppError.unprocessable('Student has no active enrollment');
-  if (input.effectiveFrom < current.effectiveFrom) {
+  if (!current) throw AppError.notFound('Batch membership');
+  if (current.effectiveTo !== null) throw AppError.unprocessable('That membership has ended');
+  if (current.batchId === input.toBatchId)
+    throw AppError.unprocessable('Pick a different batch to move to');
+  if (input.effectiveFrom <= current.effectiveFrom) {
     throw AppError.unprocessable(
-      `Transfer date cannot be before the current enrollment started (${current.effectiveFrom})`,
+      `The move date must be after ${current.effectiveFrom}, when this membership started`,
     );
   }
+  const batch = await assertJoinable(input.toBatchId, tx, { studentId: input.studentId });
 
-  await assertEnrollable(input.batchId, input.trainingDays, tx, input.studentId);
-
-  if (input.effectiveFrom === current.effectiveFrom) {
-    await tx.delete(enrollments).where(eq(enrollments.id, current.id));
-  } else {
-    await tx
-      .update(enrollments)
-      .set({ effectiveTo: addDays(input.effectiveFrom, -1) })
-      .where(eq(enrollments.id, current.id));
-  }
-
+  await tx
+    .update(enrollments)
+    .set({ effectiveTo: addDays(input.effectiveFrom, -1) })
+    .where(eq(enrollments.id, current.id));
+  const anchor = current.billingAnchorDate ?? current.effectiveFrom;
   const [next] = await tx
     .insert(enrollments)
     .values({
       studentId: input.studentId,
-      batchId: input.batchId,
-      trainingDays: input.trainingDays,
+      batchId: batch.id,
+      trainingDays: [...batch.weekdays].sort((x, y) => x - y),
       effectiveFrom: input.effectiveFrom,
       reason: input.reason,
+      customMonthlyFee:
+        input.customMonthlyFee !== undefined ? input.customMonthlyFee : current.customMonthlyFee,
+      monthlyDiscount: input.monthlyDiscount ?? current.monthlyDiscount,
+      billingAnchorDate: anchor,
+      cycleOffset: current.cycleOffset,
+      // The old batch billed every cycle that started before the move.
+      billingStartsOn: nextCycleStart(anchor, input.effectiveFrom),
       createdById: input.actorId,
     })
     .returning();
-  return { previous: current, current: next! };
+  return { previous: current, current: next!, batch };
 }
 
 export interface CreateStudentInput {
@@ -138,19 +204,18 @@ export interface CreateStudentInput {
   address?: string | null;
   medicalNotes?: string | null;
   notes?: string | null;
-  feePlanId: string;
-  customMonthlyFee?: number | null;
-  monthlyDiscount?: number;
   joiningDate: IsoDate;
-  batchId: string;
-  trainingDays: number[];
+  /** One or more batches; each is billed on its own plan. */
+  batches: JoinInput[];
+  /** Acceptance date (first invoices); defaults to the earlier of today and the joining date. */
   billingStartsOn?: IsoDate;
 }
 
-/** Registers a student with their initial batch enrollment. Billing starts from the joining date. */
+/** Registers a student in one or more batches. Billing for each starts from the joining date. */
 export async function createStudent(tx: DbOrTx, input: CreateStudentInput, actorId: string) {
-  await assertActivePlan(input.feePlanId, tx);
-  await assertEnrollable(input.batchId, input.trainingDays, tx);
+  if (!input.batches.length) throw AppError.badRequest('Pick at least one batch');
+  if (new Set(input.batches.map((b) => b.batchId)).size !== input.batches.length)
+    throw AppError.badRequest('Each batch can be picked once');
   const code = await nextStudentCode(tx);
 
   const [s] = await tx
@@ -168,34 +233,37 @@ export async function createStudent(tx: DbOrTx, input: CreateStudentInput, actor
       medicalNotes: input.medicalNotes ?? null,
       notes: input.notes ?? null,
       joiningDate: input.joiningDate,
-      feePlanId: input.feePlanId,
-      customMonthlyFee: input.customMonthlyFee ?? null,
-      monthlyDiscount: input.monthlyDiscount ?? 0,
-      billingStartsOn: input.billingStartsOn ?? minDate(todayInAppTz(), input.joiningDate),
       createdById: actorId,
     })
     .returning();
 
-  await tx.insert(enrollments).values({
-    studentId: s!.id,
-    batchId: input.batchId,
-    trainingDays: input.trainingDays,
-    effectiveFrom: input.joiningDate,
-    reason: 'Initial enrollment',
-    createdById: actorId,
-  });
+  for (const b of input.batches) {
+    await joinBatch(tx, {
+      ...b,
+      studentId: s!.id,
+      effectiveFrom: input.joiningDate,
+      reason: 'Initial enrollment',
+      actorId,
+      billingStartsOn: input.billingStartsOn,
+    });
+  }
   return s!;
 }
 
 export async function getStudentDetail(studentId: string) {
-  const [row] = await db
-    .select({ student: students, plan: feePlans })
-    .from(students)
-    .innerJoin(feePlans, eq(feePlans.id, students.feePlanId))
-    .where(eq(students.id, studentId));
-  if (!row) throw AppError.notFound('Student');
+  const [student] = await db.select().from(students).where(eq(students.id, studentId));
+  if (!student) throw AppError.notFound('Student');
 
   const today = todayInAppTz();
+  const lastCycle = db
+    .select({
+      enrollmentId: invoices.enrollmentId,
+      last: sql<number>`max(${invoices.cycleNumber})`.as('last'),
+    })
+    .from(invoices)
+    .where(eq(invoices.studentId, studentId))
+    .groupBy(invoices.enrollmentId)
+    .as('last_cycle');
   const [history, upcomingMakeups, invoiceSummary] = await Promise.all([
     db
       .select({
@@ -207,15 +275,30 @@ export async function getStudentDetail(studentId: string) {
         locationName: locations.name,
         startTime: batches.startTime,
         endTime: batches.endTime,
+        weekdays: batches.weekdays,
         trainingDays: enrollments.trainingDays,
         effectiveFrom: enrollments.effectiveFrom,
         effectiveTo: enrollments.effectiveTo,
         reason: enrollments.reason,
+        customMonthlyFee: enrollments.customMonthlyFee,
+        monthlyDiscount: enrollments.monthlyDiscount,
+        billingAnchorDate: enrollments.billingAnchorDate,
+        billingStartsOn: enrollments.billingStartsOn,
+        cycleOffset: enrollments.cycleOffset,
+        lastInvoicedCycle: sql<number>`coalesce(${lastCycle.last}, 0)::int`,
+        plan: {
+          id: feePlans.id,
+          name: feePlans.name,
+          monthlyFee: feePlans.monthlyFee,
+          daysPerWeek: feePlans.daysPerWeek,
+        },
       })
       .from(enrollments)
       .innerJoin(batches, eq(batches.id, enrollments.batchId))
       .innerJoin(users, eq(users.id, batches.coachId))
       .innerJoin(locations, eq(locations.id, batches.locationId))
+      .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
+      .leftJoin(lastCycle, eq(lastCycle.enrollmentId, enrollments.id))
       .where(eq(enrollments.studentId, studentId))
       .orderBy(desc(enrollments.effectiveFrom)),
     db
@@ -250,22 +333,60 @@ export async function getStudentDetail(studentId: string) {
       .where(eq(invoices.studentId, studentId)),
   ]);
 
-  const fee = effectiveMonthlyFee(
-    row.plan.monthlyFee,
-    row.student.customMonthlyFee,
-    row.student.monthlyDiscount,
-  );
+  // Current batch memberships, each with its own price and next invoice.
+  const memberships = history
+    .filter((h) => h.effectiveTo === null)
+    .sort((x, y) => x.effectiveFrom.localeCompare(y.effectiveFrom))
+    .map((h) => {
+      const next = nextUpcomingCycle(
+        {
+          joiningDate: h.effectiveFrom,
+          billingAnchorDate: h.billingAnchorDate,
+          cycleOffset: h.cycleOffset,
+          billingStartsOn: h.billingStartsOn,
+          leftOn: h.effectiveTo,
+          lastInvoicedCycle: h.lastInvoicedCycle,
+        },
+        today,
+      );
+      return {
+        enrollmentId: h.id,
+        batchId: h.batchId,
+        batchName: h.batchName,
+        coachId: h.coachId,
+        coachName: h.coachName,
+        locationName: h.locationName,
+        weekdays: h.weekdays,
+        startTime: h.startTime,
+        endTime: h.endTime,
+        since: h.effectiveFrom,
+        plan: h.plan,
+        customMonthlyFee: h.customMonthlyFee,
+        monthlyDiscount: h.monthlyDiscount,
+        fee: effectiveMonthlyFee(h.plan.monthlyFee, h.customMonthlyFee, h.monthlyDiscount),
+        /** Day of the month invoices are issued for this batch. */
+        billingDay: Number((h.billingAnchorDate ?? h.effectiveFrom).slice(8, 10)),
+        nextInvoice: next
+          ? { issueDate: next.issueDate, periodStart: next.periodStart, periodEnd: next.periodEnd }
+          : null,
+      };
+    });
+  const sum = (k: 'base' | 'discount' | 'total') => memberships.reduce((n, m) => n + m.fee[k], 0);
+
   return {
-    ...row.student,
-    feePlan: {
-      id: row.plan.id,
-      name: row.plan.name,
-      monthlyFee: row.plan.monthlyFee,
-      daysPerWeek: row.plan.daysPerWeek,
-    },
-    effectiveFee: fee,
-    currentEnrollment: history.find((h) => h.effectiveTo === null) ?? null,
-    enrollmentHistory: history,
+    ...student,
+    memberships,
+    /** Monthly total across all current batches. */
+    effectiveFee: { base: sum('base'), discount: sum('discount'), total: sum('total') },
+    enrollmentHistory: history.map(
+      ({
+        billingAnchorDate: _a,
+        billingStartsOn: _b,
+        cycleOffset: _c,
+        lastInvoicedCycle: _l,
+        ...h
+      }) => h,
+    ),
     upcomingMakeups,
     billing: invoiceSummary[0] ?? { outstanding: 0, overdue: 0, paid: 0, invoiceCount: 0 },
   };

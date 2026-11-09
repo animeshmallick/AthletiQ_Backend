@@ -134,7 +134,7 @@ describe('session cancellations (rain, holidays)', () => {
     const api = await as(coach);
 
     const report = await api.get(`/api/v1/feedback/students/${s.id}/weeks/2026-03-09`).expect(200);
-    expect(report.body.data.attendance.scheduled).toBe(2); // Mon, Wed, Fri minus Wednesday
+    expect(report.body.data.attendance.scheduled).toBe(5); // Mon–Sat (the batch's days) minus Wednesday
     const register = await api
       .get(`/api/v1/attendance/register?batchId=${batch.id}&from=2026-03-09&to=2026-03-15`)
       .expect(200);
@@ -149,7 +149,7 @@ describe('session cancellations (rain, holidays)', () => {
 });
 
 describe('rejoining after leaving', () => {
-  it('restarts billing from the rejoin date and keeps cycle numbers unique', async () => {
+  it('restarts billing from the rejoin date as a new batch membership', async () => {
     setToday('2026-04-01');
     const a = await makeAcademy();
     const s = await makeStudent(
@@ -168,26 +168,31 @@ describe('rejoining after leaving', () => {
     await api
       .post(`/api/v1/students/${s.id}/rejoin`, {
         rejoinDate: '2026-03-20',
-        batchId: a.batch.id,
-        trainingDays: [1, 3],
+        batches: [{ batchId: a.batch.id }],
       })
+      .expect(400);
+    await api
+      .post(`/api/v1/students/${s.id}/rejoin`, { rejoinDate: '2026-05-05', batches: [] })
       .expect(400);
     const res = await api
       .post(`/api/v1/students/${s.id}/rejoin`, {
         rejoinDate: '2026-05-05',
-        batchId: a.otherBatch.id,
-        trainingDays: [2, 4],
-        monthlyDiscount: 50_000,
+        batches: [{ batchId: a.otherBatch.id, monthlyDiscount: 50_000 }],
       })
       .expect(200);
     expect(res.body.data).toMatchObject({
       status: 'active',
       leftOn: null,
-      billingAnchorDate: '2026-05-05',
-      cycleOffset: 3,
-      monthlyDiscount: 50_000,
+      memberships: [
+        {
+          batchId: a.otherBatch.id,
+          since: '2026-05-05',
+          billingDay: 5,
+          fee: { total: 200_000, discount: 50_000 },
+        },
+      ],
     });
-    expect(res.body.data.currentEnrollment).toMatchObject({
+    expect(res.body.data.enrollmentHistory[0]).toMatchObject({
       batchId: a.otherBatch.id,
       effectiveFrom: '2026-05-05',
       reason: 'Rejoined',
@@ -195,8 +200,7 @@ describe('rejoining after leaving', () => {
     await api
       .post(`/api/v1/students/${s.id}/rejoin`, {
         rejoinDate: '2026-06-01',
-        batchId: a.batch.id,
-        trainingDays: [1],
+        batches: [{ batchId: a.batch.id }],
       })
       .expect(422);
 
@@ -205,16 +209,16 @@ describe('rejoining after leaving', () => {
       .select()
       .from(invoices)
       .where(eq(invoices.studentId, s.id))
-      .orderBy(asc(invoices.cycleNumber));
-    // Prepaid: the month in progress at leaving (10 Mar) was billed; the first month of the new
-    // run was billed at rejoin (1 Apr), ahead of training restarting on 5 May.
+      .orderBy(asc(invoices.issueDate));
+    // Prepaid: the month in progress at leaving (10 Mar) was billed; the new membership's first
+    // month was billed at rejoin (1 Apr), ahead of training restarting on 5 May.
     expect(rows.map((r) => [r.cycleNumber, r.periodStart, r.issueDate, r.totalAmount])).toEqual([
       [1, '2026-01-10', '2026-01-10', 250_000],
       [2, '2026-02-10', '2026-02-10', 250_000],
       [3, '2026-03-10', '2026-03-10', 250_000],
-      [4, '2026-05-05', '2026-04-01', 200_000],
-      [5, '2026-06-05', '2026-06-05', 200_000],
-      [6, '2026-07-05', '2026-07-05', 200_000],
+      [1, '2026-05-05', '2026-04-01', 200_000],
+      [2, '2026-06-05', '2026-06-05', 200_000],
+      [3, '2026-07-05', '2026-07-05', 200_000],
     ]);
 
     setToday('2026-07-10');
@@ -236,15 +240,13 @@ describe('rejoining after leaving', () => {
     await api
       .post(`/api/v1/students/${s.id}/rejoin`, {
         rejoinDate: '2026-05-01',
-        batchId: a.batch.id,
-        trainingDays: [1],
+        batches: [{ batchId: a.batch.id }],
       })
       .expect(422);
     await api
       .post('/api/v1/students/6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c/rejoin', {
         rejoinDate: '2026-05-01',
-        batchId: a.batch.id,
-        trainingDays: [1],
+        batches: [{ batchId: a.batch.id }],
       })
       .expect(404);
     await (
@@ -252,8 +254,7 @@ describe('rejoining after leaving', () => {
     )
       .post(`/api/v1/students/${s.id}/rejoin`, {
         rejoinDate: '2026-05-01',
-        batchId: a.batch.id,
-        trainingDays: [1],
+        batches: [{ batchId: a.batch.id }],
       })
       .expect(403);
   });

@@ -314,7 +314,7 @@ feedbackRouter.put('/students/:studentId/weeks/:weekStart', requireCoach, async 
       submittedAt: submitting ? now : null,
     })
     .onConflictDoUpdate({
-      target: [weeklyFeedback.studentId, weeklyFeedback.weekStart],
+      target: [weeklyFeedback.studentId, weeklyFeedback.batchId, weeklyFeedback.weekStart],
       set: {
         answers,
         attendanceSummary: attendance,

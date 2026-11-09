@@ -26,7 +26,6 @@ import {
   zPaise,
   zPassword,
   zPhone,
-  zTrainingDays,
   zWeekdays,
 } from '../../lib/validation.js';
 import { currentUser } from '../../middleware/auth.js';
@@ -98,6 +97,8 @@ const StudentSignup = z.object({
   address: zOptionalText(500),
   medicalNotes: zOptionalText(1000),
   preferredBatchId: zId.nullable().optional(),
+  /** One or more batches (students can join several). */
+  preferredBatchIds: z.array(zId).max(10).optional(),
   preferredDays: zWeekdays.nullable().optional(),
   message: zOptionalText(1000),
   consent: z.literal(true, { message: 'Please accept the terms to continue' }),
@@ -106,11 +107,17 @@ const StudentSignup = z.object({
 publicRegistrationRouter.post('/student', registrationLimiter, async (req, res) => {
   const body = parse(StudentSignup, req.body);
 
+  const picked = [
+    ...new Set([
+      ...(body.preferredBatchIds ?? []),
+      ...(body.preferredBatchId ? [body.preferredBatchId] : []),
+    ]),
+  ];
   let preferredLocationId: string | null = null;
-  if (body.preferredBatchId) {
-    const b = await db.query.batches.findFirst({ where: eq(batches.id, body.preferredBatchId) });
+  for (const [i, batchId] of picked.entries()) {
+    const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
     if (!b?.isActive) throw AppError.unprocessable('Selected batch is not available');
-    preferredLocationId = b.locationId;
+    if (i === 0) preferredLocationId = b.locationId;
   }
 
   const details: StudentRegistrationDetails = {
@@ -120,6 +127,7 @@ publicRegistrationRouter.post('/student', registrationLimiter, async (req, res) 
     alternatePhone: body.alternatePhone ?? null,
     address: body.address,
     medicalNotes: body.medicalNotes,
+    preferredBatchIds: picked,
   };
   const [row] = await db
     .insert(registrationRequests)
@@ -130,7 +138,7 @@ publicRegistrationRouter.post('/student', registrationLimiter, async (req, res) 
       phone: body.phone,
       message: body.message,
       details,
-      preferredBatchId: body.preferredBatchId ?? null,
+      preferredBatchId: picked[0] ?? null,
       preferredLocationId,
       preferredDays: body.preferredDays ?? null,
       ipAddress: req.ip ?? null,
@@ -303,11 +311,17 @@ async function lockPending(tx: Parameters<Parameters<typeof db.transaction>[0]>[
 
 const ApproveStudentBody = z.object({
   joiningDate: zIsoDate,
-  batchId: zId,
-  trainingDays: zTrainingDays,
-  feePlanId: zId,
-  customMonthlyFee: zPaise.nullable().optional(),
-  monthlyDiscount: zPaise.default(0),
+  /** The batches to enrol in (each billed on its own plan). */
+  batches: z
+    .array(
+      z.object({
+        batchId: zId,
+        customMonthlyFee: zPaise.nullable().optional(),
+        monthlyDiscount: zPaise.default(0),
+      }),
+    )
+    .min(1, 'Pick at least one batch')
+    .max(10),
   /** Admin may correct details captured on the form. */
   fullName: zName.optional(),
   phone: zPhone.optional(),
@@ -339,11 +353,7 @@ registrationsRouter.post('/:id/approve', async (req, res) => {
           medicalNotes: d.medicalNotes,
           notes: body.notes,
           joiningDate: body.joiningDate,
-          batchId: body.batchId,
-          trainingDays: body.trainingDays,
-          feePlanId: body.feePlanId,
-          customMonthlyFee: body.customMonthlyFee ?? null,
-          monthlyDiscount: body.monthlyDiscount,
+          batches: body.batches,
         },
         actor.id,
       );

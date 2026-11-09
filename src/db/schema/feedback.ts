@@ -41,7 +41,7 @@ export const weeklyFeedback = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex('weekly_feedback_student_week_uq').on(t.studentId, t.weekStart),
+    uniqueIndex('weekly_feedback_student_batch_week_uq').on(t.studentId, t.batchId, t.weekStart),
     index('weekly_feedback_coach_week_idx').on(t.coachId, t.weekStart),
   ],
 );

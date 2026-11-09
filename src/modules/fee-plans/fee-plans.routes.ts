@@ -1,8 +1,8 @@
-import { and, asc, count, eq } from 'drizzle-orm';
+import { and, asc, count, eq, isNull } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { feePlans, students } from '../../db/schema/index.js';
+import { batches, enrollments, feePlans } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
 import { created, ok } from '../../lib/http.js';
 import { parse, zBoolQuery, zIdParam, zName, zOptionalText, zPaise } from '../../lib/validation.js';
@@ -26,10 +26,11 @@ const ListQuery = z.object({ active: zBoolQuery });
 feePlansRouter.get('/', async (req, res) => {
   const q = parse(ListQuery, req.query);
   const usage = db
-    .select({ feePlanId: students.feePlanId, n: count().as('n') })
-    .from(students)
-    .where(eq(students.status, 'active'))
-    .groupBy(students.feePlanId)
+    .select({ feePlanId: batches.feePlanId, n: count().as('n') })
+    .from(enrollments)
+    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    .where(isNull(enrollments.effectiveTo))
+    .groupBy(batches.feePlanId)
     .as('usage');
 
   const rows = await db
@@ -75,11 +76,11 @@ feePlansRouter.patch('/:id', requireAdmin, async (req, res) => {
   if (body.isActive === false) {
     const [inUse] = await db
       .select({ n: count() })
-      .from(students)
-      .where(and(eq(students.feePlanId, id), eq(students.status, 'active')));
+      .from(batches)
+      .where(and(eq(batches.feePlanId, id), eq(batches.isActive, true)));
     if ((inUse?.n ?? 0) > 0) {
       throw AppError.unprocessable(
-        'Move active students to another plan before deactivating this one.',
+        'Active batches use this plan. Give them another plan before deactivating it.',
       );
     }
   }

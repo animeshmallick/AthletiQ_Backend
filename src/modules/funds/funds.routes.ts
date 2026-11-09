@@ -83,12 +83,11 @@ async function coachPayeeIds(coachId: string): Promise<string[]> {
   const rows = await db
     .selectDistinct({ payeeId: feePlanSplits.payeeId })
     .from(feePlanSplits)
-    .innerJoin(students, eq(students.feePlanId, feePlanSplits.feePlanId))
+    .innerJoin(batches, eq(batches.feePlanId, feePlanSplits.feePlanId))
     .innerJoin(
       enrollments,
-      and(eq(enrollments.studentId, students.id), isNull(enrollments.effectiveTo)),
+      and(eq(enrollments.batchId, batches.id), isNull(enrollments.effectiveTo)),
     )
-    .innerJoin(batches, eq(batches.id, enrollments.batchId))
     .where(and(eq(batches.coachId, coachId), sql`${feePlanSplits.payeeId} is not null`));
   return rows.map((r) => r.payeeId!);
 }

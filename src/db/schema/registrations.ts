@@ -18,6 +18,8 @@ export interface StudentRegistrationDetails {
   alternatePhone: string | null;
   address: string | null;
   medicalNotes: string | null;
+  /** Every batch picked on the form, in order (the first is also `preferredBatchId`). */
+  preferredBatchIds?: string[];
 }
 
 export interface CoachRegistrationDetails {

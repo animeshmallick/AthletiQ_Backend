@@ -1,4 +1,8 @@
 import { describe, expect, it } from '@jest/globals';
+import { eq } from 'drizzle-orm';
+import { db } from '../../src/db/client';
+import { invoices } from '../../src/db/schema';
+import { generateDueInvoices } from '../../src/modules/billing/invoice-generator';
 import {
   as,
   makeAcademy,
@@ -187,7 +191,7 @@ describe('batches', () => {
   });
 
   it('creates batches with validation', async () => {
-    const { admin, coach, location, batch } = await makeAcademy();
+    const { admin, coach, location, batch, plan } = await makeAcademy();
     const api = await as(admin);
     const body = {
       name: 'Evening',
@@ -198,7 +202,18 @@ describe('batches', () => {
       endTime: '18:30',
       capacity: 12,
       sportId: batch.sportId,
+      feePlanId: plan.id, // 3 days a week, like the batch
     };
+    // A fee plan is required, active, and for as many days as the batch runs.
+    const { feePlanId: _p, ...noPlan } = body;
+    await api.post('/api/v1/batches', { ...noPlan, name: 'E0' }).expect(400);
+    const twoDay = await makePlan({ daysPerWeek: 2 });
+    const mismatch = await api
+      .post('/api/v1/batches', { ...body, name: 'E0', feePlanId: twoDay.id })
+      .expect(400);
+    expect(mismatch.body.error.details.fields[0]).toMatchObject({ path: 'feePlanId' });
+    const retired = await makePlan({ isActive: false });
+    await api.post('/api/v1/batches', { ...body, name: 'E0', feePlanId: retired.id }).expect(422);
     // A sport is required, and must exist and be active.
     const { sportId: _s, ...noSport } = body;
     await api.post('/api/v1/batches', { ...noSport, name: 'E0' }).expect(400);
@@ -214,6 +229,7 @@ describe('batches', () => {
       weekdays: [1, 3, 6],
       startTime: '17:00:00',
       capacity: 12,
+      feePlanId: plan.id,
     });
 
     // Capacity is required and must be a positive number.
@@ -246,10 +262,11 @@ describe('batches', () => {
     );
     const api = await as(admin);
 
-    const conflict = await api
-      .patch(`/api/v1/batches/${batch.id}`, { weekdays: [1, 2, 3] })
-      .expect(422);
-    expect(conflict.body.error.details.students[0].id).toBe(s.id);
+    // The 3-day plan doesn't fit 2 days; 3 days fit, and students follow the batch's days.
+    await api.patch(`/api/v1/batches/${batch.id}`, { weekdays: [1, 2] }).expect(400);
+    await api.patch(`/api/v1/batches/${batch.id}`, { weekdays: [2, 4, 6] }).expect(200);
+    const detail = await api.get(`/api/v1/students/${s.id}`).expect(200);
+    expect(detail.body.data.enrollmentHistory[0].trainingDays).toEqual([2, 4, 6]);
     await api.patch(`/api/v1/batches/${batch.id}`, { isActive: false }).expect(422);
     await api.patch(`/api/v1/batches/${batch.id}`, { endTime: '05:00' }).expect(400);
     // Capacity can't drop below the students already in the batch, or be cleared.
@@ -273,58 +290,44 @@ describe('batches', () => {
     await api.patch(`/api/v1/batches/${batch.id}`, { locationId: loc.id }).expect(200);
   });
 
-  it('can apply new batch days to every student in one step', async () => {
+  it('prices the next invoices with a new batch plan', async () => {
     setToday('2026-03-09');
     const { admin, batch, plan } = await makeAcademy();
-    const a = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, trainingDays: [1, 3, 5], joiningDate: '2026-02-01' },
+    const s = await makeStudent(
+      { batchId: batch.id, feePlanId: plan.id, joiningDate: '2026-03-09' },
       admin.id,
     );
-    const b = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, trainingDays: [2, 4], joiningDate: '2026-02-01' },
-      admin.id,
-    );
+    await generateDueInvoices('2026-03-09');
     const api = await as(admin);
-
-    // Up to 6 days can be applied (students train at most 6 days a week).
-    await api
-      .patch(`/api/v1/batches/${batch.id}`, {
-        weekdays: [1, 2, 3, 4, 5, 6, 7],
-        applyDaysToStudents: true,
-      })
-      .expect(422);
-
-    const res = await api
-      .patch(`/api/v1/batches/${batch.id}`, { weekdays: [2, 4, 6], applyDaysToStudents: true })
+    const dearer = await makePlan({ monthlyFee: 300_000, daysPerWeek: 6 });
+    // The batch runs 6 days, so a 6-day plan fits.
+    await api.patch(`/api/v1/batches/${batch.id}`, { feePlanId: dearer.id }).expect(200);
+    const detail = await api.get(`/api/v1/students/${s.id}`).expect(200);
+    expect(detail.body.data.memberships[0].fee.total).toBe(300_000);
+    await generateDueInvoices('2026-04-09');
+    const rows = await db
+      .select()
+      .from(invoices)
+      .where(eq(invoices.studentId, s.id))
+      .orderBy(invoices.periodStart);
+    expect(rows.map((i) => [i.totalAmount, i.feePlanId])).toEqual([
+      [250_000, plan.id], // already issued: unchanged
+      [300_000, dearer.id],
+    ]);
+    const log = await api
+      .get(`/api/v1/admin/audit-logs?entityType=batch&entityId=${batch.id}`)
       .expect(200);
-    expect(res.body.data.weekdays).toEqual([2, 4, 6]);
-    for (const s of [a, b]) {
-      const detail = await api.get(`/api/v1/students/${s.id}`).expect(200);
-      expect(detail.body.data.currentEnrollment).toMatchObject({
-        batchId: batch.id,
-        trainingDays: [2, 4, 6],
-        effectiveFrom: '2026-03-09',
-      });
-    }
-    // History is kept: the previous enrollment ended the day before.
-    const hist = await api.get(`/api/v1/students/${a.id}`).expect(200);
-    expect(hist.body.data.enrollmentHistory).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ trainingDays: [1, 3, 5], effectiveTo: '2026-03-08' }),
-      ]),
-    );
+    expect(log.body.data[0].metadata).toMatchObject({
+      previousFeePlanId: plan.id,
+      studentsAffected: 1,
+    });
   });
 
   it('returns the expected roster including makeups', async () => {
-    const { admin, coach, batch, otherBatch, plan } = await makeAcademy();
-    const regular = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, trainingDays: [1, 3, 5] },
-      admin.id,
-    );
-    const visitor = await makeStudent(
-      { batchId: otherBatch.id, feePlanId: plan.id, trainingDays: [1, 3, 5] },
-      admin.id,
-    );
+    const { admin, coach, location, otherBatch } = await makeAcademy();
+    const batch = await makeBatch(coach.id, location.id, { weekdays: [1, 2, 3, 5] });
+    const regular = await makeStudent({ batchId: batch.id }, admin.id);
+    const visitor = await makeStudent({ batchId: otherBatch.id }, admin.id);
     await (
       await as(admin)
     )
@@ -337,9 +340,14 @@ describe('batches', () => {
 
     const api = await as(coach);
     const tue = await api.get(`/api/v1/batches/${batch.id}/roster?date=2026-03-10`).expect(200); // Tuesday
-    expect(tue.body.data.students).toEqual([
-      expect.objectContaining({ studentId: visitor.id, isMakeup: true, makeupReason: 'Exam' }),
-    ]);
+    // The regular student trains every day the batch runs; the visitor is a makeup.
+    expect(tue.body.data.students).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ studentId: regular.id, isMakeup: false }),
+        expect.objectContaining({ studentId: visitor.id, isMakeup: true, makeupReason: 'Exam' }),
+      ]),
+    );
+    expect(tue.body.data.students).toHaveLength(2);
     const mon = await api.get(`/api/v1/batches/${batch.id}/roster?date=2026-03-09`).expect(200);
     expect(mon.body.data.students.map((r: { studentId: string }) => r.studentId)).toEqual([
       regular.id,

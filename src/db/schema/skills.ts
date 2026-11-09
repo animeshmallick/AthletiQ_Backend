@@ -67,6 +67,8 @@ export const sportLevels = pgTable(
       .notNull()
       .references(() => sports.id, { onDelete: 'cascade' }),
     name: text().notNull(),
+    /** Short code shown on badges, e.g. "B1". The letter is the band: A Beginner, B Intermediate, C Advanced. */
+    code: text(),
     /** Minimum average rating × 100 (e.g. 250 = 2.5). */
     minScore: smallint().notNull(),
     position: smallint().notNull(),
@@ -101,6 +103,7 @@ export const skillAssessments = pgTable(
     average: smallint().notNull(),
     /** The level this average reached (a snapshot, so later ladder edits don't rewrite history). */
     levelName: text(),
+    levelCode: text(),
     levelPosition: smallint(),
     comment: text(),
     goals: text(),

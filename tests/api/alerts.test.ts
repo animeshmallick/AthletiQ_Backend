@@ -215,7 +215,7 @@ describe('coach notices', () => {
   it('tells coaches about new, changed and reassigned batches', async () => {
     const sent = capture();
     setToday(MON, at('12:00'));
-    const { admin, coach, otherCoach, location, batch } = await makeAcademy();
+    const { admin, coach, otherCoach, location, batch, plan } = await makeAcademy();
     await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
     await device(otherCoach.id, 'other-coach-token-xxxxxxxxxxxx');
     const api = await as(admin);
@@ -230,6 +230,7 @@ describe('coach notices', () => {
         endTime: '18:30',
         capacity: 10,
         sportId: batch.sportId,
+        feePlanId: plan.id,
       })
       .expect(201);
     await settle(sent, 1);
@@ -272,9 +273,7 @@ describe('coach notices', () => {
         fullName: 'Diya Kapoor',
         phone: '98765 43210',
         joiningDate: '2026-03-10',
-        batchId: batch.id,
-        trainingDays: [1, 3, 5],
-        feePlanId: plan.id,
+        batches: [{ batchId: batch.id }],
       })
       .expect(201);
     await settle(sent, 1);
@@ -282,27 +281,16 @@ describe('coach notices', () => {
       userToken: 'coach-device-token-xxxxxxxxxxxx',
       message: {
         title: `New student in ${batch.name}`,
-        body: 'Diya Kapoor · Mon · Wed · Fri from Tuesday',
+        body: expect.stringMatching(/^Diya Kapoor · .* from Tuesday$/),
       },
     });
-
-    // Changing only the days in the same batch is not a "new student".
-    await api
-      .post(`/api/v1/students/${res.body.data.id}/transfer`, {
-        batchId: batch.id,
-        trainingDays: [1, 3],
-        effectiveFrom: '2026-03-10',
-      })
-      .expect(200);
-    await new Promise((r) => setTimeout(r, 50));
-    expect(sent).toHaveLength(1);
+    void plan;
 
     await api
-      .post(`/api/v1/students/${res.body.data.id}/transfer`, {
-        batchId: otherBatch.id,
-        trainingDays: [2, 4],
-        effectiveFrom: '2026-03-12',
-      })
+      .post(
+        `/api/v1/students/${res.body.data.id}/batches/${res.body.data.memberships[0].enrollmentId}/move`,
+        { batchId: otherBatch.id, effectiveFrom: '2026-03-12' },
+      )
       .expect(200);
     await settle(sent, 3);
     const byToken = Object.fromEntries(sent.slice(1).map((m) => [m.userToken, m.message]));

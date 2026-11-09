@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  type AnyPgColumn,
   boolean,
   check,
   doublePrecision,
@@ -65,6 +66,13 @@ export const batches = pgTable(
     startTime: time().notNull(),
     endTime: time().notNull(),
     capacity: integer().notNull(),
+    /**
+     * The batch's price: every student in the batch is billed this plan (their enrollment can
+     * add a custom fee or discount). Its days per week must match the batch's days.
+     */
+    feePlanId: uuid()
+      .notNull()
+      .references((): AnyPgColumn => feePlans.id, { onDelete: 'restrict' }),
     /** What the batch trains; decides which skills its students are assessed on. */
     sportId: uuid()
       .notNull()
@@ -76,6 +84,7 @@ export const batches = pgTable(
     uniqueIndex('batches_name_lower_uq').on(sql`lower(${t.name})`),
     index('batches_coach_idx').on(t.coachId),
     index('batches_location_idx').on(t.locationId),
+    index('batches_fee_plan_idx').on(t.feePlanId),
     check('batches_time_chk', sql`${t.endTime} > ${t.startTime}`),
     check('batches_weekdays_chk', sql`cardinality(${t.weekdays}) between 1 and 7`),
   ],

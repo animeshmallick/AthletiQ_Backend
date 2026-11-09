@@ -1,4 +1,4 @@
-import { and, eq, lte, max, sql } from 'drizzle-orm';
+import { eq, lte, max, sql } from 'drizzle-orm';
 import { INVOICE_DUE_DAYS, INVOICE_PREFIX } from '../../config/constants.js';
 import { db, type DbOrTx } from '../../db/client.js';
 import {
@@ -31,78 +31,94 @@ export async function nextInvoiceNumber(tx: DbOrTx, issueDate: IsoDate): Promise
 
 export interface GenerationStats {
   runDate: IsoDate;
+  /** Batch memberships looked at. */
   studentsScanned: number;
   invoicesCreated: number;
   skippedExisting: number;
-  failures: { studentId: string; cycleNumber: number; error: string }[];
+  failures: { studentId: string; enrollmentId: string; cycleNumber: number; error: string }[];
 }
 
 /**
- * Generates every (prepaid) invoice due to be issued by `today`: the first one at acceptance, then
- * one at the start of each month. Idempotent and self-healing: if the server was down for days,
- * the next run catches up; re-running never duplicates (unique student+cycle). Each invoice is
- * its own transaction so one bad record cannot block the rest.
+ * Generates every (prepaid) invoice due to be issued by `today`, for every batch membership
+ * (enrollment): the first one at acceptance, then one at the start of each month. A student in two
+ * batches gets two invoices, each priced by its own batch's plan. Idempotent and self-healing: if
+ * the server was down for days, the next run catches up; re-running never duplicates (unique
+ * enrollment + cycle). Each invoice is its own transaction so one bad record cannot block the rest.
  *
- * Pass `studentId` to bill a single student immediately (e.g. right after they are accepted).
+ * Pass `studentId` to bill one student's memberships immediately (e.g. right after acceptance).
  */
 export async function generateDueInvoices(
   today: IsoDate = todayInAppTz(),
   opts: { studentId?: string } = {},
 ): Promise<GenerationStats> {
   const lastCycle = db
-    .select({ studentId: invoices.studentId, last: max(invoices.cycleNumber).as('last') })
+    .select({ enrollmentId: invoices.enrollmentId, last: max(invoices.cycleNumber).as('last') })
     .from(invoices)
-    .groupBy(invoices.studentId)
+    .groupBy(invoices.enrollmentId)
     .as('last_cycle');
 
-  const candidates = await db
+  const rows = await db
     .select({
-      id: students.id,
+      id: enrollments.id,
+      studentId: students.id,
       code: students.code,
-      joiningDate: students.joiningDate,
-      billingAnchorDate: students.billingAnchorDate,
-      cycleOffset: students.cycleOffset,
-      billingStartsOn: students.billingStartsOn,
-      leftOn: students.leftOn,
-      customMonthlyFee: students.customMonthlyFee,
-      monthlyDiscount: students.monthlyDiscount,
+      joiningDate: enrollments.effectiveFrom,
+      billingAnchorDate: enrollments.billingAnchorDate,
+      cycleOffset: enrollments.cycleOffset,
+      billingStartsOn: enrollments.billingStartsOn,
+      leftOn: enrollments.effectiveTo,
+      customMonthlyFee: enrollments.customMonthlyFee,
+      monthlyDiscount: enrollments.monthlyDiscount,
+      batch: { id: batches.id, name: batches.name, coachId: batches.coachId },
       plan: { id: feePlans.id, name: feePlans.name, monthlyFee: feePlans.monthlyFee },
       lastInvoicedCycle: sql<number>`coalesce(${lastCycle.last}, 0)::int`,
     })
-    .from(students)
-    .innerJoin(feePlans, eq(feePlans.id, students.feePlanId))
-    .leftJoin(lastCycle, eq(lastCycle.studentId, students.id))
-    .where(opts.studentId ? eq(students.id, opts.studentId) : lte(students.billingStartsOn, today));
+    .from(enrollments)
+    .innerJoin(students, eq(students.id, enrollments.studentId))
+    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
+    .leftJoin(lastCycle, eq(lastCycle.enrollmentId, enrollments.id))
+    .where(
+      opts.studentId
+        ? eq(enrollments.studentId, opts.studentId)
+        : lte(enrollments.billingStartsOn, today),
+    );
 
   const stats: GenerationStats = {
     runDate: today,
-    studentsScanned: candidates.length,
+    studentsScanned: rows.length,
     invoicesCreated: 0,
     skippedExisting: 0,
     failures: [],
   };
 
   // Process in chronological order so invoice numbers follow issue dates (then student code).
-  const work = candidates
-    .flatMap((s) => cyclesDue(s, today).map((cycle) => ({ s, cycle })))
+  const work = rows
+    .flatMap((e) => cyclesDue(e, today).map((cycle) => ({ e, cycle })))
     .sort(
       (a, b) =>
-        a.cycle.issueDate.localeCompare(b.cycle.issueDate) || a.s.code.localeCompare(b.s.code),
+        a.cycle.issueDate.localeCompare(b.cycle.issueDate) ||
+        a.e.code.localeCompare(b.e.code) ||
+        a.e.batch.name.localeCompare(b.e.batch.name),
     );
 
-  const failedStudents = new Set<string>();
-  for (const { s, cycle } of work) {
-    // Keep each student's cycles in order: after a failure, retry the rest on the next run.
-    if (failedStudents.has(s.id)) continue;
+  const failed = new Set<string>();
+  for (const { e, cycle } of work) {
+    // Keep each membership's cycles in order: after a failure, retry the rest on the next run.
+    if (failed.has(e.id)) continue;
     try {
-      const createdInvoice = await createCycleInvoice(s, cycle);
+      const createdInvoice = await createCycleInvoice(e, cycle);
       if (createdInvoice) stats.invoicesCreated++;
       else stats.skippedExisting++;
     } catch (err) {
-      logger.error({ err, studentId: s.id, cycle: cycle.cycleNumber }, 'Invoice generation failed');
-      failedStudents.add(s.id);
+      logger.error(
+        { err, studentId: e.studentId, enrollmentId: e.id, cycle: cycle.cycleNumber },
+        'Invoice generation failed',
+      );
+      failed.add(e.id);
       stats.failures.push({
-        studentId: s.id,
+        studentId: e.studentId,
+        enrollmentId: e.id,
         cycleNumber: cycle.cycleNumber,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -113,42 +129,34 @@ export async function generateDueInvoices(
 }
 
 async function createCycleInvoice(
-  s: {
+  e: {
     id: string;
+    studentId: string;
     customMonthlyFee: number | null;
     monthlyDiscount: number;
+    batch: { id: string; name: string; coachId: string };
     plan: { id: string; name: string; monthlyFee: number };
   },
   cycle: Cycle,
 ): Promise<boolean> {
   try {
     return await db.transaction(async (tx) => {
-      // Batch/coach responsible during the cycle (latest enrollment that started within it).
-      const [owner] = await tx
-        .select({ batchId: batches.id, batchName: batches.name, coachId: batches.coachId })
-        .from(enrollments)
-        .innerJoin(batches, eq(batches.id, enrollments.batchId))
-        .where(
-          and(eq(enrollments.studentId, s.id), lte(enrollments.effectiveFrom, cycle.periodEnd)),
-        )
-        .orderBy(sql`${enrollments.effectiveFrom} desc`)
-        .limit(1);
-
-      const fee = effectiveMonthlyFee(s.plan.monthlyFee, s.customMonthlyFee, s.monthlyDiscount);
+      const fee = effectiveMonthlyFee(e.plan.monthlyFee, e.customMonthlyFee, e.monthlyDiscount);
       const number = await nextInvoiceNumber(tx, cycle.issueDate);
       await tx.insert(invoices).values({
         number,
-        studentId: s.id,
+        studentId: e.studentId,
+        enrollmentId: e.id,
         cycleNumber: cycle.cycleNumber,
         periodStart: cycle.periodStart,
         periodEnd: cycle.periodEnd,
         issueDate: cycle.issueDate,
         dueDate: addDays(cycle.issueDate, INVOICE_DUE_DAYS),
-        feePlanId: s.plan.id,
-        feePlanName: s.plan.name,
-        batchId: owner?.batchId ?? null,
-        batchName: owner?.batchName ?? null,
-        coachId: owner?.coachId ?? null,
+        feePlanId: e.plan.id,
+        feePlanName: e.plan.name,
+        batchId: e.batch.id,
+        batchName: e.batch.name,
+        coachId: e.batch.coachId,
         baseAmount: fee.base,
         discountAmount: fee.discount,
         totalAmount: fee.total,

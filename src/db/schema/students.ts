@@ -13,7 +13,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import { gender, id, studentStatus, timestamps, tz } from './_shared.js';
-import { batches, feePlans } from './academy.js';
+import { batches } from './academy.js';
 import { users } from './users.js';
 
 /** Registration numbers: 1001, 1002, … in the order students are added. */
@@ -48,25 +48,6 @@ export const students = pgTable(
     /** Last day the student trained; cycles that complete after this date are not billed. */
     leftOn: date({ mode: 'string' }),
     leftReason: text(),
-    feePlanId: uuid()
-      .notNull()
-      .references(() => feePlans.id, { onDelete: 'restrict' }),
-    /** Replaces the plan's monthly fee when set (paise). */
-    customMonthlyFee: integer(),
-    /** Flat monthly discount applied after plan/custom fee (paise). */
-    monthlyDiscount: integer().notNull().default(0),
-    /**
-     * Cycles that ended before this date are never auto-billed. Set to the record creation day so
-     * that importing a student with a historic joining date does not back-bill old months.
-     */
-    billingStartsOn: date({ mode: 'string' }).notNull(),
-    /**
-     * Day the current billing cycles are anchored on. Null means the joining date. Set to the
-     * rejoin date when a student who left comes back, so billing restarts from that day.
-     */
-    billingAnchorDate: date({ mode: 'string' }),
-    /** Cycles invoiced before the current anchor (keeps invoice cycle numbers unique after a rejoin). */
-    cycleOffset: integer().notNull().default(0),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
     ...timestamps,
   },
@@ -75,17 +56,15 @@ export const students = pgTable(
     uniqueIndex('students_registration_no_uq').on(t.registrationNo),
     index('students_status_idx').on(t.status),
     index('students_name_idx').on(sql`lower(${t.fullName})`),
-    check(
-      'students_custom_fee_chk',
-      sql`${t.customMonthlyFee} is null or ${t.customMonthlyFee} >= 0`,
-    ),
-    check('students_discount_chk', sql`${t.monthlyDiscount} >= 0`),
   ],
 );
 
 /**
- * A student's home-batch membership over time. Exactly one open row (effectiveTo is null) exists
- * for an active student; a permanent transfer closes the current row and opens a new one.
+ * A student's membership of one batch, over time. A student can be in several batches at once
+ * (one open row per batch). Each membership is billed on its own: the batch's fee plan, with this
+ * row's custom fee / discount, in monthly cycles anchored on `billingAnchorDate` (default: the
+ * day they joined the batch). Moving to another batch closes this row and opens a new one that
+ * keeps the same billing day.
  */
 export const enrollments = pgTable(
   'enrollments',
@@ -97,21 +76,39 @@ export const enrollments = pgTable(
     batchId: uuid()
       .notNull()
       .references(() => batches.id, { onDelete: 'restrict' }),
-    /** ISO weekdays this student attends within the batch (subset of the batch's weekdays). */
+    /** ISO weekdays the student attends: always every day the batch runs (kept in step with it). */
     trainingDays: smallint().array().notNull(),
     effectiveFrom: date({ mode: 'string' }).notNull(),
     /** Inclusive last day; null while current. */
     effectiveTo: date({ mode: 'string' }),
     reason: text(),
+    /** Replaces the batch plan's monthly fee for this student when set (paise). */
+    customMonthlyFee: integer(),
+    /** Flat monthly discount after the plan / custom fee (paise). */
+    monthlyDiscount: integer().notNull().default(0),
+    /**
+     * Prepaid: the first invoice is issued on this date (acceptance); cycles that started before
+     * it are never billed (e.g. settled before the move, or outside the system).
+     */
+    billingStartsOn: date({ mode: 'string' }).notNull(),
+    /** Day the monthly cycles are anchored on. Null means `effectiveFrom`. */
+    billingAnchorDate: date({ mode: 'string' }),
+    /** Added to local cycle numbers so a continued billing run keeps counting. */
+    cycleOffset: integer().notNull().default(0),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
     ...timestamps,
   },
   (t) => [
     index('enrollments_student_idx').on(t.studentId, t.effectiveFrom),
     index('enrollments_batch_idx').on(t.batchId),
-    uniqueIndex('enrollments_one_open_per_student_uq')
-      .on(t.studentId)
+    uniqueIndex('enrollments_one_open_per_batch_uq')
+      .on(t.studentId, t.batchId)
       .where(sql`${t.effectiveTo} is null`),
+    check(
+      'enrollments_custom_fee_chk',
+      sql`${t.customMonthlyFee} is null or ${t.customMonthlyFee} >= 0`,
+    ),
+    check('enrollments_discount_chk', sql`${t.monthlyDiscount} >= 0`),
     check(
       'enrollments_range_chk',
       sql`${t.effectiveTo} is null or ${t.effectiveTo} >= ${t.effectiveFrom}`,

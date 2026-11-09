@@ -68,7 +68,15 @@ describe('sports and frameworks', () => {
 
     const football = (await admin.post('/api/v1/sports', { name: 'Football' }).expect(201)).body
       .data;
-    expect(football.levels).toHaveLength(5); // the standard ladder
+    // New sports start on the standard A1–C2 ladder.
+    expect(football.levels.map((l: { code: string }) => l.code)).toEqual([
+      'A1',
+      'A2',
+      'B1',
+      'B2',
+      'C1',
+      'C2',
+    ]);
     await admin.post('/api/v1/sports', { name: 'football' }).expect(409);
 
     // Rate once so the first skill has history, then remove it from the framework.
@@ -147,7 +155,7 @@ describe('monthly assessments', () => {
       goals: 'Net play',
     });
     expect(saved.status).toBe(200);
-    expect(saved.body.data).toMatchObject({ average: 250, levelName: 'Bronze' });
+    expect(saved.body.data).toMatchObject({ average: 250, levelName: 'Bronze', levelCode: 'B1' });
     // Editing within the month updates the same assessment; the level can go down.
     const again = (await s.rate(s.asha.id, [2, 2, 2, 2]).expect(200)).body.data;
     expect(again).toMatchObject({ id: saved.body.data.id, average: 200, levelName: 'Foundation' });
@@ -233,9 +241,9 @@ describe('monthly assessments', () => {
       expect.objectContaining({ name: 'Strokes', average: 350 }),
     ]);
     expect(mine.levels[0].levels).toEqual([
-      { name: 'Foundation', n: 0 },
-      { name: 'Bronze', n: 1 },
-      { name: 'Gold', n: 1 },
+      { code: 'A1', name: 'Foundation', n: 0 },
+      { code: 'B1', name: 'Bronze', n: 1 },
+      { code: 'C1', name: 'Gold', n: 1 },
     ]);
     expect(mine.coaches).toEqual([]);
     expect(mine.trend.at(-1)).toMatchObject({ month: '2026-04-01', assessed: 1 });

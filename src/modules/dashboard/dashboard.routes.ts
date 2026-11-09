@@ -2,7 +2,18 @@
  * GET /api/v1/dashboard — insights for the Today screen, scoped to the user
  * (coaches: their batches; admins: the whole academy). A handful of aggregate queries.
  */
-import { and, count, eq, gte, inArray, isNull, lte, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  count,
+  countDistinct,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import { Router } from 'express';
 import { db } from '../../db/client.js';
 import {
@@ -135,7 +146,7 @@ export async function dashboardFor(user: AuthUser, today: IsoDate = todayInAppTz
         .where(and(inScope(coachSessions.batchId), gte(coachSessions.date, monthStart)))
         .groupBy(coachSessions.coachId),
       db
-        .select({ n: count() })
+        .select({ n: countDistinct(students.id) })
         .from(students)
         .innerJoin(
           enrollments,

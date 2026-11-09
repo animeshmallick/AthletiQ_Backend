@@ -4,7 +4,7 @@ import { db } from '../../src/db/client';
 import { coachSessions } from '../../src/db/schema';
 import { as, makeAcademy, makeBatch, makeStudent, setToday, checkIn } from '../helpers/factories';
 
-// 2026-03-09 is a Monday. Batches run Mon–Sat; students train Mon/Wed/Fri by default.
+// 2026-03-09 is a Monday. Batches run Mon–Sat; students train every day their batch runs.
 const MON = '2026-03-09';
 const TUE = '2026-03-10';
 
@@ -119,7 +119,11 @@ describe('student attendance', () => {
 
   it('enforces session rules', async () => {
     setToday(TUE);
-    const { coach, otherCoach, batch, s1, admin, location } = await setup();
+    const { coach, otherCoach, batch, otherBatch, plan, s1, admin, location } = await setup();
+    const outsider = await makeStudent(
+      { batchId: otherBatch.id, feePlanId: plan.id, joiningDate: '2026-02-01' },
+      admin.id,
+    );
     const api = await as(coach);
     await checkIn(coach.id, batch.id, MON, TUE);
     const mark = (date: string, studentId = s1.id) => ({
@@ -131,7 +135,7 @@ describe('student attendance', () => {
     await api.put('/api/v1/attendance/session', mark('2026-03-11')).expect(422); // future
     const old = await api.put('/api/v1/attendance/session', mark('2026-03-02')).expect(422); // beyond coach window
     expect(old.body.error.message).toMatch(/Ask an admin/);
-    await api.put('/api/v1/attendance/session', mark(TUE)).expect(422); // s1 doesn't train Tuesdays
+    await api.put('/api/v1/attendance/session', mark(TUE, outsider.id)).expect(422); // not in this batch
     const sunBatch = await makeBatch(coach.id, location.id, { weekdays: [1, 3] });
     await api.put('/api/v1/attendance/session', { ...mark(TUE), batchId: sunBatch.id }).expect(422); // batch not running
     await (await as(otherCoach)).put('/api/v1/attendance/session', mark(MON)).expect(404);
@@ -161,12 +165,12 @@ describe('student attendance', () => {
         records: [{ studentId: s1.id, status: 'present' }],
       })
       .expect(200);
-    await (
-      await as(admin)
-    )
-      .post(`/api/v1/students/${s1.id}/transfer`, {
+    const adminApi = await as(admin);
+    const eid = (await adminApi.get(`/api/v1/students/${s1.id}`)).body.data.memberships[0]
+      .enrollmentId as string;
+    await adminApi
+      .post(`/api/v1/students/${s1.id}/batches/${eid}/move`, {
         batchId: otherBatch.id,
-        trainingDays: [1, 3, 5],
         effectiveFrom: MON,
       })
       .expect(200);
@@ -210,9 +214,11 @@ describe('student attendance', () => {
     const sheet = await api
       .get(`/api/v1/attendance/session?batchId=${batch.id}&date=${TUE}`)
       .expect(200);
-    expect(sheet.body.data.students).toEqual([
-      expect.objectContaining({ studentId: visitor.id, isMakeup: true, status: 'present' }),
-    ]);
+    // The batch's own students are there every day it runs; the visitor is a makeup.
+    expect(sheet.body.data.students).toHaveLength(3);
+    expect(
+      sheet.body.data.students.find((r: { studentId: string }) => r.studentId === visitor.id),
+    ).toMatchObject({ isMakeup: true, status: 'present' });
   });
 
   it('summarises a day across batches', async () => {

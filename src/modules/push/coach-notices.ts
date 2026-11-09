@@ -85,9 +85,9 @@ export async function noticeBatchChanged(
   });
 }
 
-/** A student joined (or moved into) one of the coach's batches. */
-export async function noticeStudentJoined(studentId: string) {
-  const [row] = await db
+/** A student joined (or moved into) batches → each batch's coach. Pass `batchId` for just one. */
+export async function noticeStudentJoined(studentId: string, batchId?: string) {
+  const rows = await db
     .select({
       name: students.fullName,
       batchId: batches.id,
@@ -99,14 +99,21 @@ export async function noticeStudentJoined(studentId: string) {
     .from(enrollments)
     .innerJoin(students, eq(students.id, enrollments.studentId))
     .innerJoin(batches, eq(batches.id, enrollments.batchId))
-    .where(and(eq(enrollments.studentId, studentId), isNull(enrollments.effectiveTo)));
-  if (!row) return;
-  await notifyUsers([row.coachId], {
-    title: `New student in ${row.batchName}`,
-    body: `${row.name} · ${daysLabel(row.days)} from ${dayPhrase(row.from)}`,
-    link: `/students/${studentId}`,
-    tag: `student-${studentId}`,
-  });
+    .where(
+      and(
+        eq(enrollments.studentId, studentId),
+        isNull(enrollments.effectiveTo),
+        batchId ? eq(enrollments.batchId, batchId) : undefined,
+      ),
+    );
+  for (const row of rows) {
+    await notifyUsers([row.coachId], {
+      title: `New student in ${row.batchName}`,
+      body: `${row.name} · ${daysLabel(row.days)} from ${dayPhrase(row.from)}`,
+      link: `/students/${studentId}`,
+      tag: `student-${studentId}-${row.batchId}`,
+    });
+  }
 }
 
 async function studentName(studentId: string) {
@@ -114,12 +121,17 @@ async function studentName(studentId: string) {
   return s?.fullName ?? 'A student';
 }
 
-/** A student left the academy → the coach of the batch they were in. */
-export async function noticeStudentLeft(studentId: string, batchId: string, leftOn: string) {
+/** A student left a batch (or the academy) → that batch's coach. */
+export async function noticeStudentLeft(
+  studentId: string,
+  batchId: string,
+  leftOn: string,
+  academy = true,
+) {
   const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
   if (!b) return;
   await notifyUsers([b.coachId], {
-    title: `${await studentName(studentId)} left the academy`,
+    title: `${await studentName(studentId)} left ${academy ? 'the academy' : b.name}`,
     body: `${b.name} · last day ${dayPhrase(leftOn)}`,
     link: `/students/${studentId}`,
     tag: `student-${studentId}`,

@@ -3,9 +3,8 @@ import { alias } from 'drizzle-orm/pg-core';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { batches, enrollments, locations, sports, users } from '../../db/schema/index.js';
+import { batches, enrollments, feePlans, locations, sports, users } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
-import { MAX_TRAINING_DAYS_PER_WEEK } from '../../config/constants.js';
 import { todayInAppTz } from '../../lib/dates.js';
 import { created, ok } from '../../lib/http.js';
 import {
@@ -22,7 +21,6 @@ import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
 import { coveringNowOrLater, myCoverage } from '../substitutions/coverage.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
-import { transferStudent } from '../students/students.service.js';
 import { currentMembers, expectedRoster } from './roster.js';
 import { noticeBatchAssigned, noticeBatchChanged } from '../push/coach-notices.js';
 import { notifyInBackground } from '../push/push.service.js';
@@ -50,6 +48,12 @@ function batchSelect(members: ReturnType<typeof memberCounts>) {
     isActive: batches.isActive,
     createdAt: batches.createdAt,
     sport: { id: sports.id, name: sports.name },
+    feePlan: {
+      id: feePlans.id,
+      name: feePlans.name,
+      monthlyFee: feePlans.monthlyFee,
+      daysPerWeek: feePlans.daysPerWeek,
+    },
     coach: { id: coach.id, name: coach.name, phone: coach.phone },
     location: {
       id: locations.id,
@@ -85,6 +89,7 @@ batchesRouter.get('/', async (req, res) => {
     .innerJoin(coach, eq(coach.id, batches.coachId))
     .innerJoin(locations, eq(locations.id, batches.locationId))
     .innerJoin(sports, eq(sports.id, batches.sportId))
+    .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
     .leftJoin(members, eq(members.batchId, batches.id))
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(asc(batches.startTime), asc(batches.name));
@@ -110,6 +115,7 @@ batchesRouter.get('/:id', async (req, res) => {
     .innerJoin(coach, eq(coach.id, batches.coachId))
     .innerJoin(locations, eq(locations.id, batches.locationId))
     .innerJoin(sports, eq(sports.id, batches.sportId))
+    .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
     .leftJoin(members, eq(members.batchId, batches.id))
     .where(eq(batches.id, id));
   ok(res, { ...row, members: await currentMembers(id) });
@@ -135,6 +141,7 @@ const BatchBody = z.object({
   endTime: zTime,
   capacity: z.number().int().min(1).max(1000),
   sportId: zId,
+  feePlanId: zId,
   isActive: z.boolean().default(true),
 });
 
@@ -148,6 +155,20 @@ async function assertSport(sportId: string) {
   const s = await db.query.sports.findFirst({ where: eq(sports.id, sportId) });
   if (!s) throw AppError.unprocessable('Selected sport does not exist');
   if (!s.isActive) throw AppError.unprocessable('Selected sport is inactive');
+}
+
+/** The batch's fee plan: active, and priced for as many days a week as the batch runs. */
+async function assertPlanFits(feePlanId: string, weekdays: number[]) {
+  const p = await db.query.feePlans.findFirst({ where: eq(feePlans.id, feePlanId) });
+  if (!p) throw AppError.unprocessable('Selected fee plan does not exist');
+  if (!p.isActive) throw AppError.unprocessable('Selected fee plan is inactive');
+  if (p.daysPerWeek !== weekdays.length)
+    throw new AppError(
+      'VALIDATION_ERROR',
+      `${p.name} is for ${p.daysPerWeek} day${p.daysPerWeek === 1 ? '' : 's'} a week, but the batch runs ${weekdays.length}.`,
+      { fields: [{ path: 'feePlanId', message: `Pick a ${weekdays.length}-day plan` }] },
+    );
+  return p;
 }
 
 async function assertLocation(locationId: string) {
@@ -164,6 +185,7 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
     assertCoach(body.coachId),
     assertLocation(body.locationId),
     assertSport(body.sportId),
+    assertPlanFits(body.feePlanId, body.weekdays),
   ]);
   const [batch] = await db.insert(batches).values(body).returning();
   await audit({
@@ -179,13 +201,7 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
 
 batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const { applyDaysToStudents, ...body } = parse(
-    BatchBody.partial().extend({
-      /** Also set every current student's training days to the batch's new days (from today). */
-      applyDaysToStudents: z.boolean().optional(),
-    }),
-    req.body,
-  );
+  const body = parse(BatchBody.partial(), req.body);
   const existing = await assertBatchAccess(currentUser(req), id);
 
   const start = body.startTime ?? existing.startTime;
@@ -195,6 +211,11 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
   if (body.locationId && body.locationId !== existing.locationId)
     await assertLocation(body.locationId);
   if (body.sportId && body.sportId !== existing.sportId) await assertSport(body.sportId);
+  const weekdays = body.weekdays ?? existing.weekdays;
+  const daysChanged =
+    !!body.weekdays && [...body.weekdays].sort().join() !== [...existing.weekdays].sort().join();
+  if (body.feePlanId || daysChanged)
+    await assertPlanFits(body.feePlanId ?? existing.feePlanId, weekdays);
 
   const members = await currentMembers(id);
   if (body.capacity !== undefined && body.capacity < members.length) {
@@ -203,51 +224,18 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
       { fields: [{ path: 'capacity', message: `At least ${members.length}` }] },
     );
   }
-  const applyToStudents = !!(applyDaysToStudents && body.weekdays && members.length);
-  if (applyToStudents && body.weekdays!.length > MAX_TRAINING_DAYS_PER_WEEK) {
-    throw AppError.unprocessable(
-      `Students train at most ${MAX_TRAINING_DAYS_PER_WEEK} days a week. Pick ${MAX_TRAINING_DAYS_PER_WEEK} or fewer days to apply them to every student.`,
-    );
-  }
-  if (body.weekdays && !applyToStudents) {
-    const allowed = new Set(body.weekdays);
-    const conflicts = members.filter((m) => m.trainingDays.some((d) => !allowed.has(d)));
-    if (conflicts.length) {
-      throw AppError.unprocessable(
-        'Some students train on days this batch would no longer run. Tick “Also update all students” or change their training days first.',
-        {
-          students: conflicts.map((c) => ({
-            id: c.studentId,
-            name: c.fullName,
-            trainingDays: c.trainingDays,
-          })),
-        },
-      );
-    }
-  }
   if (body.isActive === false && members.length) {
-    throw AppError.unprocessable('Transfer all students out of this batch before deactivating it.');
+    throw AppError.unprocessable('Move all students out of this batch before deactivating it.');
   }
 
-  const user = currentUser(req);
   const batch = await db.transaction(async (tx) => {
     const [updated] = await tx.update(batches).set(body).where(eq(batches.id, id)).returning();
-    if (applyToStudents) {
-      const today = todayInAppTz();
-      const days = [...body.weekdays!].sort((a, b) => a - b);
-      for (const m of members) {
-        if (m.trainingDays.join() === days.join()) continue;
-        await transferStudent(tx, {
-          studentId: m.studentId,
-          batchId: id,
-          trainingDays: days,
-          // A student joining in the future keeps their start date.
-          effectiveFrom: m.effectiveFrom > today ? m.effectiveFrom : today,
-          reason: 'Batch days changed',
-          actorId: user.id,
-        });
-      }
-    }
+    // Students train on every day the batch runs.
+    if (daysChanged)
+      await tx
+        .update(enrollments)
+        .set({ trainingDays: [...weekdays].sort((a, b) => a - b) })
+        .where(and(eq(enrollments.batchId, id), isNull(enrollments.effectiveTo)));
     return updated!;
   });
   await audit({
@@ -261,13 +249,14 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
     metadata: {
       changes: body,
       previousCoachId: existing.coachId,
-      appliedDaysToStudents: applyToStudents ? members.length : 0,
+      previousFeePlanId: body.feePlanId ? existing.feePlanId : undefined,
+      studentsAffected: daysChanged || body.feePlanId ? members.length : 0,
     },
   });
   notifyInBackground(() =>
     body.coachId && body.coachId !== existing.coachId
       ? noticeBatchAssigned(id, existing.coachId)
-      : noticeBatchChanged(existing, id, { studentsUpdated: applyToStudents }),
+      : noticeBatchChanged(existing, id, { studentsUpdated: daysChanged && members.length > 0 }),
   );
   ok(res, batch);
 });

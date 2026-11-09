@@ -399,7 +399,8 @@ describe('weekly feedback', () => {
     expect(blank.body.data).toMatchObject({
       feedback: null,
       editable: true,
-      attendance: { scheduled: 3, present: 1, absent: 1, unmarked: 1 },
+      // Students train every day their batch runs (Mon–Sat).
+      attendance: { scheduled: 6, present: 1, absent: 1, unmarked: 4 },
       template: { key: 'weekly' },
     });
 
@@ -412,7 +413,7 @@ describe('weekly feedback', () => {
     expect(saved.body.data).toMatchObject({
       status: 'submitted',
       batchId: batch.id,
-      attendanceSummary: { scheduled: 3 },
+      attendanceSummary: { scheduled: 6 },
     });
 
     // Edit within grace: stays submitted, keeps original submittedAt.

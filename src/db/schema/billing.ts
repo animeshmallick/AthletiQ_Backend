@@ -2,11 +2,11 @@ import { sql } from 'drizzle-orm';
 import { check, date, index, integer, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { id, invoiceStatus, paymentMode, paymentStatus, timestamps, tz } from './_shared.js';
 import { batches, feePlans } from './academy.js';
-import { students } from './students.js';
+import { enrollments, students } from './students.js';
 import { users } from './users.js';
 
 /**
- * One invoice per student per completed billing cycle. Pricing and ownership (plan, batch,
+ * One invoice per batch membership (enrollment) per billing cycle. Pricing and ownership (plan, batch,
  * coach) are snapshotted at generation so later changes never rewrite history.
  * Amounts are integer paise.
  */
@@ -18,7 +18,11 @@ export const invoices = pgTable(
     studentId: uuid()
       .notNull()
       .references(() => students.id, { onDelete: 'restrict' }),
-    /** 1-based cycle index counted from the joining date. */
+    /** The batch membership this invoice bills. */
+    enrollmentId: uuid()
+      .notNull()
+      .references(() => enrollments.id, { onDelete: 'restrict' }),
+    /** 1-based cycle index of the enrollment's billing run. */
     cycleNumber: integer().notNull(),
     periodStart: date({ mode: 'string' }).notNull(),
     periodEnd: date({ mode: 'string' }).notNull(),
@@ -43,7 +47,8 @@ export const invoices = pgTable(
   },
   (t) => [
     uniqueIndex('invoices_number_uq').on(t.number),
-    uniqueIndex('invoices_student_cycle_uq').on(t.studentId, t.cycleNumber),
+    uniqueIndex('invoices_enrollment_cycle_uq').on(t.enrollmentId, t.cycleNumber),
+    index('invoices_student_idx').on(t.studentId),
     index('invoices_status_due_idx').on(t.status, t.dueDate),
     index('invoices_issue_date_idx').on(t.issueDate),
     index('invoices_coach_idx').on(t.coachId),

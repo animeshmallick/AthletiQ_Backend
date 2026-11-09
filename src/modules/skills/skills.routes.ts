@@ -113,6 +113,7 @@ skillsRouter.get('/batches/:id', async (req, res) => {
     month: a.month,
     average: a.average,
     levelName: a.levelName,
+    levelCode: a.levelCode,
     comment: a.comment,
     goals: a.goals,
     updatedAt: a.updatedAt,
@@ -199,6 +200,7 @@ skillsRouter.put('/assessments', async (req, res) => {
         month,
         average,
         levelName: level?.name ?? null,
+        levelCode: level?.code ?? null,
         levelPosition: level?.position ?? null,
         comment: body.comment ?? null,
         goals: body.goals ?? null,
@@ -210,6 +212,7 @@ skillsRouter.put('/assessments', async (req, res) => {
           coachId: user.id,
           average,
           levelName: level?.name ?? null,
+          levelCode: level?.code ?? null,
           levelPosition: level?.position ?? null,
           comment: body.comment ?? null,
           goals: body.goals ?? null,
@@ -252,6 +255,7 @@ skillsRouter.get('/students/:id', async (req, res) => {
           month: latest.month,
           average: latest.average,
           levelName: latest.levelName,
+          levelCode: latest.levelCode,
           levelPosition: latest.levelPosition,
           change: prev ? latest.average - prev.average : null,
         },
@@ -402,6 +406,7 @@ skillsRouter.get('/insights', async (req, res) => {
     average: number;
     change: number;
     levelName: string | null;
+    levelCode: string | null;
     levelChange: number;
   };
   const movers: Mover[] = [];
@@ -429,6 +434,7 @@ skillsRouter.get('/insights', async (req, res) => {
         average: now.average,
         change: now.average - before.average,
         levelName: now.levelName,
+        levelCode: now.levelCode,
         levelChange: (now.levelPosition ?? 0) - (before.levelPosition ?? 0),
       });
   }
@@ -452,6 +458,7 @@ skillsRouter.get('/insights', async (req, res) => {
       sportId: f.sport.id,
       sportName: f.sport.name,
       levels: f.levels.map((l) => ({
+        code: l.code,
         name: l.name,
         n: unique.filter((a) => a.levelName === l.name).length,
       })),

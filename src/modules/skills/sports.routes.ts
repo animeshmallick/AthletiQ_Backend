@@ -23,17 +23,12 @@ import { created, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zName, zOptionalText } from '../../lib/validation.js';
 import { requireAdmin } from '../../middleware/auth.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
-import { loadFramework, loadFrameworks } from './framework.js';
+import { loadFramework, loadFrameworks, STANDARD_LEVELS } from './framework.js';
 
 export const sportsRouter = Router();
 
-const DEFAULT_LEVELS = [
-  { name: 'Foundation', minScore: 100 },
-  { name: 'Bronze', minScore: 200 },
-  { name: 'Silver', minScore: 275 },
-  { name: 'Gold', minScore: 350 },
-  { name: 'Elite', minScore: 425 },
-];
+/** New sports start on the standard A1–C2 ladder. */
+const DEFAULT_LEVELS = STANDARD_LEVELS;
 
 sportsRouter.get('/', async (_req, res) => {
   const rows = await db.select({ id: sports.id }).from(sports).orderBy(sports.name);
@@ -117,7 +112,19 @@ const FrameworkBody = z.object({
     .min(1, 'Add at least one skill area')
     .max(15),
   levels: z
-    .array(z.object({ name: zName.max(40), minScore: z.number().int().min(100).max(500) }))
+    .array(
+      z.object({
+        code: z
+          .string()
+          .trim()
+          .toUpperCase()
+          .regex(/^[A-Z][0-9]?$/, 'A letter and a digit, e.g. B1')
+          .nullable()
+          .optional(),
+        name: zName.max(60),
+        minScore: z.number().int().min(100).max(500),
+      }),
+    )
     .max(10),
 });
 
@@ -221,6 +228,7 @@ sportsRouter.put('/:id/framework', requireAdmin, async (req, res) => {
       await tx.insert(sportLevels).values(
         levels.map((l, i) => ({
           sportId: id,
+          code: l.code ?? null,
           name: l.name,
           minScore: l.minScore,
           position: i + 1,
