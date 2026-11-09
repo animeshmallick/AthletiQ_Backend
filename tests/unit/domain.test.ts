@@ -54,9 +54,7 @@ describe('share links', () => {
   it('signs links that verify until expiry', () => {
     const now = Date.UTC(2026, 0, 1);
     const { url, expiresAt } = signInvoiceLink(id, now);
-    expect(url).toMatch(
-      new RegExp(`^https://api.test/api/v1/public/invoices/${id}/pdf\\?e=\\d+&s=[\\w-]+$`),
-    );
+    expect(url).toMatch(new RegExp(`^https://app.test/share/invoice/${id}\\?e=\\d+&s=[\\w-]+$`));
     const params = new URL(url).searchParams;
     expect(verifyInvoiceLink(id, params.get('e')!, params.get('s')!, now)).toBe(true);
     expect(

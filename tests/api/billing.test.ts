@@ -371,16 +371,36 @@ describe('invoices API', () => {
     expect(share.body.data.message).toContain('which was due on 17 Jan 2026');
     expect(share.body.data.message).toContain('Pay via UPI: smash@okicici');
     expect(share.body.data.message).toContain('– Smash Academy');
+    expect(share.body.data.message).toContain('registration number');
 
+    // The link opens a page in the app that asks for the student's registration number.
     const publicUrl = new URL(share.body.data.pdfUrl as string);
+    expect(publicUrl.pathname).toBe(`/share/invoice/${inv1.id}`);
+    const e = publicUrl.searchParams.get('e')!;
+    const s = publicUrl.searchParams.get('s')!;
+    const info = await request(getApp())
+      .get(`/api/v1/public/invoices/${inv1.id}?e=${e}&s=${s}`)
+      .expect(200);
+    expect(info.body.data).toMatchObject({ kind: 'invoice', academy: 'Smash Academy' });
+    const student = await db.query.students.findFirst({ where: eq(students.id, inv1.studentId) });
+    const regNo = String(student!.registrationNo);
+    const pdfPath = `/api/v1/public/invoices/${inv1.id}/pdf`;
+    const wrong = await request(getApp())
+      .post(pdfPath)
+      .send({ e, s, registrationNo: regNo === '9999' ? '9998' : '9999' })
+      .expect(403);
+    expect(wrong.body.error.message).toBe("That registration number doesn't match. 4 tries left.");
     const open = await request(getApp())
-      .get(publicUrl.pathname + publicUrl.search)
+      .post(pdfPath)
+      .send({ e, s, registrationNo: regNo })
       .buffer(true)
       .parse(binary)
       .expect(200);
     expect(open.headers['x-robots-tag']).toBe('noindex, nofollow');
+    expect((open.body as Buffer).subarray(0, 5).toString()).toBe('%PDF-');
     await request(getApp())
-      .get(publicUrl.pathname + publicUrl.search.replace(/s=[^&]+/, 's=forged'))
+      .post(pdfPath)
+      .send({ e, s: 'forged', registrationNo: regNo })
       .expect(403);
 
     // Upcoming (not overdue) wording, then receipt wording once paid.
@@ -398,9 +418,7 @@ describe('invoices API', () => {
     )
       .post(`/api/v1/invoices/${inv1.id}/cancel`, { reason: 'Waived fee' })
       .expect(200);
-    await request(getApp())
-      .get(publicUrl.pathname + publicUrl.search)
-      .expect(404);
+    await request(getApp()).post(pdfPath).send({ e, s, registrationNo: regNo }).expect(404);
   });
 });
 

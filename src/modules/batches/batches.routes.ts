@@ -3,7 +3,7 @@ import { alias } from 'drizzle-orm/pg-core';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { batches, enrollments, locations, users } from '../../db/schema/index.js';
+import { batches, enrollments, locations, sports, users } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
 import { MAX_TRAINING_DAYS_PER_WEEK } from '../../config/constants.js';
 import { todayInAppTz } from '../../lib/dates.js';
@@ -49,6 +49,7 @@ function batchSelect(members: ReturnType<typeof memberCounts>) {
     capacity: batches.capacity,
     isActive: batches.isActive,
     createdAt: batches.createdAt,
+    sport: { id: sports.id, name: sports.name },
     coach: { id: coach.id, name: coach.name, phone: coach.phone },
     location: {
       id: locations.id,
@@ -83,6 +84,7 @@ batchesRouter.get('/', async (req, res) => {
     .from(batches)
     .innerJoin(coach, eq(coach.id, batches.coachId))
     .innerJoin(locations, eq(locations.id, batches.locationId))
+    .innerJoin(sports, eq(sports.id, batches.sportId))
     .leftJoin(members, eq(members.batchId, batches.id))
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(asc(batches.startTime), asc(batches.name));
@@ -107,6 +109,7 @@ batchesRouter.get('/:id', async (req, res) => {
     .from(batches)
     .innerJoin(coach, eq(coach.id, batches.coachId))
     .innerJoin(locations, eq(locations.id, batches.locationId))
+    .innerJoin(sports, eq(sports.id, batches.sportId))
     .leftJoin(members, eq(members.batchId, batches.id))
     .where(eq(batches.id, id));
   ok(res, { ...row, members: await currentMembers(id) });
@@ -131,6 +134,7 @@ const BatchBody = z.object({
   startTime: zTime,
   endTime: zTime,
   capacity: z.number().int().min(1).max(1000),
+  sportId: zId,
   isActive: z.boolean().default(true),
 });
 
@@ -138,6 +142,12 @@ async function assertCoach(coachId: string) {
   const u = await db.query.users.findFirst({ where: eq(users.id, coachId) });
   if (u?.role !== 'coach') throw AppError.unprocessable('Selected coach does not exist');
   if (u.status === 'disabled') throw AppError.unprocessable('Selected coach is disabled');
+}
+
+async function assertSport(sportId: string) {
+  const s = await db.query.sports.findFirst({ where: eq(sports.id, sportId) });
+  if (!s) throw AppError.unprocessable('Selected sport does not exist');
+  if (!s.isActive) throw AppError.unprocessable('Selected sport is inactive');
 }
 
 async function assertLocation(locationId: string) {
@@ -150,7 +160,11 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
   const body = parse(BatchBody, req.body);
   if (body.endTime <= body.startTime)
     throw AppError.badRequest('End time must be after start time');
-  await Promise.all([assertCoach(body.coachId), assertLocation(body.locationId)]);
+  await Promise.all([
+    assertCoach(body.coachId),
+    assertLocation(body.locationId),
+    assertSport(body.sportId),
+  ]);
   const [batch] = await db.insert(batches).values(body).returning();
   await audit({
     ...auditCtx(req),
@@ -180,6 +194,7 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
   if (body.coachId && body.coachId !== existing.coachId) await assertCoach(body.coachId);
   if (body.locationId && body.locationId !== existing.locationId)
     await assertLocation(body.locationId);
+  if (body.sportId && body.sportId !== existing.sportId) await assertSport(body.sportId);
 
   const members = await currentMembers(id);
   if (body.capacity !== undefined && body.capacity < members.length) {

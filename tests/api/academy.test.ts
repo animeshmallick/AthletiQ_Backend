@@ -187,7 +187,7 @@ describe('batches', () => {
   });
 
   it('creates batches with validation', async () => {
-    const { admin, coach, location } = await makeAcademy();
+    const { admin, coach, location, batch } = await makeAcademy();
     const api = await as(admin);
     const body = {
       name: 'Evening',
@@ -197,7 +197,18 @@ describe('batches', () => {
       startTime: '17:00',
       endTime: '18:30',
       capacity: 12,
+      sportId: batch.sportId,
     };
+    // A sport is required, and must exist and be active.
+    const { sportId: _s, ...noSport } = body;
+    await api.post('/api/v1/batches', { ...noSport, name: 'E0' }).expect(400);
+    await api
+      .post('/api/v1/batches', {
+        ...body,
+        name: 'E0',
+        sportId: '6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c',
+      })
+      .expect(422);
     const res = await api.post('/api/v1/batches', body).expect(201);
     expect(res.body.data).toMatchObject({
       weekdays: [1, 3, 6],

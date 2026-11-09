@@ -11,3 +11,4 @@ export * from './registrations.js';
 export * from './push.js';
 export * from './funds.js';
 export * from './substitutions.js';
+export * from './skills.js';

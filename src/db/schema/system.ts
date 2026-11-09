@@ -90,3 +90,14 @@ export const apiRequests = pgTable(
     index('api_requests_user_idx').on(t.userId, t.createdAt),
   ],
 );
+
+/**
+ * Wrong registration numbers typed on a shared link (key: "report:<linkId>" or
+ * "invoice:<invoiceId>"). Too many in a row locks the link for a while.
+ */
+export const shareLinkAttempts = pgTable('share_link_attempts', {
+  key: text().primaryKey(),
+  failures: integer().notNull().default(0),
+  lockedUntil: tz(),
+  updatedAt: tz().notNull().defaultNow(),
+});

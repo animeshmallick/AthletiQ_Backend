@@ -171,7 +171,13 @@ export async function buildShare(inv: InvoiceDetail) {
           `Invoice ${inv.number}: ${link.url}`,
           ...(academy.upiId ? [`Pay via UPI: ${academy.upiId}`] : []),
         ];
-  const message = [...lines, '', `– ${academy.name}`].join('\n');
+  const message = [
+    ...lines,
+    '',
+    `Open the link with ${inv.student.fullName}'s registration number.`,
+    '',
+    `– ${academy.name}`,
+  ].join('\n');
 
   return {
     message,

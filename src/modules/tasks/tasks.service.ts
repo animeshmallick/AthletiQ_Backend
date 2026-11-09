@@ -12,10 +12,13 @@ import {
   makeupSessions,
   registrationRequests,
 } from '../../db/schema/index.js';
-import { todayInAppTz } from '../../lib/dates.js';
+import { endOfMonth, todayInAppTz } from '../../lib/dates.js';
+
+const endOfMonthDay = (d: string) => Number(endOfMonth(d).slice(8, 10));
 import { dayOverview } from '../attendance/attendance.routes.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { lastCompletedWeek, weekBoard } from '../feedback/feedback.routes.js';
+import { pendingAssessments } from '../skills/reminders.js';
 
 export type TaskSeverity = 'critical' | 'warning' | 'info';
 
@@ -33,7 +36,8 @@ export interface Task {
     | 'flagged-check-ins'
     | 'overdue-fees'
     | 'makeup-requests'
-    | 'substitute-requests';
+    | 'substitute-requests'
+    | 'skill-assessments';
   severity: TaskSeverity;
   title: string;
   detail: string;
@@ -169,6 +173,27 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
         screen: '/feedback',
         count: open,
       });
+    }
+    // Monthly skill assessments: a reminder from the 15th until they're all done.
+    const day = Number(today.slice(8, 10));
+    if (day >= 15) {
+      const pending = await pendingAssessments(user.id, today);
+      if (pending > 0) {
+        const daysLeft = endOfMonthDay(today) - day;
+        tasks.push({
+          id: `skills:${today.slice(0, 7)}`,
+          kind: 'skill-assessments',
+          severity: daysLeft <= 4 ? 'warning' : 'info',
+          title: `${pending} student${pending === 1 ? '' : 's'} to assess this month`,
+          detail:
+            daysLeft === 0
+              ? 'Last day of the month'
+              : `${daysLeft} day${daysLeft === 1 ? '' : 's'} left this month`,
+          link: '/skills',
+          screen: '/skills',
+          count: pending,
+        });
+      }
     }
   } else {
     const [[regs], [flags], [overdue], [makeups], [subs]] = await Promise.all([

@@ -519,6 +519,68 @@ describe('cash handovers, purchases, payouts and income', () => {
     await expectBalanced();
   });
 
+  it('coaches pay their batches’ payees from the cash they hold, never more', async () => {
+    const a = await makeAcademy();
+    await coachHolding(a); // coach holds ₹1,250; Society is owed ₹437.50
+    const coach = await as(a.coach);
+    const other = await as(a.otherCoach);
+
+    const mine = (await coach.get('/api/v1/funds/payable').expect(200)).body.data;
+    expect(mine.cash).toBe(125_000);
+    expect(mine.payees).toEqual([expect.objectContaining({ name: 'Society', owed: 43_750 })]);
+    const society = mine.payees[0].id as string;
+    // A coach with no students on that plan can't see or pay it.
+    expect((await other.get('/api/v1/funds/payable').expect(200)).body.data.payees).toEqual([]);
+    await other
+      .post('/api/v1/funds/payouts', { amount: 100, occurredOn: '2026-01-14', payeeId: society })
+      .expect(403);
+
+    // Only payees, only from their own cash, never more than owed.
+    await coach
+      .post('/api/v1/funds/payouts', { amount: 100, occurredOn: '2026-01-14', userId: a.coach.id })
+      .expect(403);
+    await coach
+      .post('/api/v1/funds/payouts', {
+        amount: 100,
+        occurredOn: '2026-01-14',
+        payeeId: society,
+        fromUserId: a.otherCoach.id,
+      })
+      .expect(403);
+    const over = await coach
+      .post('/api/v1/funds/payouts', { amount: 50_000, occurredOn: '2026-01-14', payeeId: society })
+      .expect(422);
+    expect(over.body.error.message).toBe('Only ₹437.50 is owed to Society.');
+
+    const paid = await coach
+      .post('/api/v1/funds/payouts', { amount: 43_750, occurredOn: '2026-01-14', payeeId: society })
+      .expect(201);
+    expect(paid.body.data.title).toBe(`Paid to Society from ${a.coach.name}’s cash`);
+    expect((await overview(a.coach)).cash).toBe(125_000 - 43_750);
+    expect((await overview(a.admin)).balances.owedToPayees).toBe(0);
+    await expectBalanced();
+  });
+
+  it('a coach cannot pay more than the cash they hold', async () => {
+    const a = await makeAcademy();
+    await coachHolding(a);
+    const admin = await as(a.admin);
+    const coach = await as(a.coach);
+    const society = (await coach.get('/api/v1/funds/payable')).body.data.payees[0].id;
+    // The coach hands most of the cash over, leaving ₹50.
+    await admin
+      .post('/api/v1/funds/handovers', {
+        amount: 120_000,
+        occurredOn: '2026-01-14',
+        userId: a.coach.id,
+      })
+      .expect(201);
+    const short = await coach
+      .post('/api/v1/funds/payouts', { amount: 43_750, occurredOn: '2026-01-14', payeeId: society })
+      .expect(422);
+    expect(short.body.error.message).toBe('Only ₹50.00 in hand with this person.');
+  });
+
   it('admins reverse wrong entries; fee splits are undone from the invoice', async () => {
     const a = await makeAcademy();
     await coachHolding(a);

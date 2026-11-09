@@ -12,7 +12,8 @@ export function signInvoiceLink(
   const exp = Math.floor(now / 1000) + env.SHARE_LINK_TTL_DAYS * 86_400;
   const sig = hmac(env.SHARE_LINK_SECRET, `invoice:${invoiceId}:${exp}`);
   return {
-    url: `${env.PUBLIC_API_URL}/api/v1/public/invoices/${invoiceId}/pdf?e=${exp}&s=${sig}`,
+    // The app's page asks for the student's registration number before showing the PDF.
+    url: `${env.APP_URL}/share/invoice/${invoiceId}?e=${exp}&s=${sig}`,
     expiresAt: new Date(exp * 1000),
   };
 }

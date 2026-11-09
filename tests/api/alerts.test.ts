@@ -215,7 +215,7 @@ describe('coach notices', () => {
   it('tells coaches about new, changed and reassigned batches', async () => {
     const sent = capture();
     setToday(MON, at('12:00'));
-    const { admin, coach, otherCoach, location } = await makeAcademy();
+    const { admin, coach, otherCoach, location, batch } = await makeAcademy();
     await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
     await device(otherCoach.id, 'other-coach-token-xxxxxxxxxxxx');
     const api = await as(admin);
@@ -229,6 +229,7 @@ describe('coach notices', () => {
         startTime: '17:00',
         endTime: '18:30',
         capacity: 10,
+        sportId: batch.sportId,
       })
       .expect(201);
     await settle(sent, 1);

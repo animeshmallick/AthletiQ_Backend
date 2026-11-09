@@ -36,6 +36,18 @@ export const locations = pgTable(
   ],
 );
 
+/** A sport the academy teaches. Each has its own skills and level ladder (see skills.ts). */
+export const sports = pgTable(
+  'sports',
+  {
+    id: id(),
+    name: text().notNull(),
+    isActive: boolean().notNull().default(true),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('sports_name_lower_uq').on(sql`lower(${t.name})`)],
+);
+
 /** A recurring training group, e.g. "Morning U-12", owned by exactly one coach at one location. */
 export const batches = pgTable(
   'batches',
@@ -53,6 +65,10 @@ export const batches = pgTable(
     startTime: time().notNull(),
     endTime: time().notNull(),
     capacity: integer().notNull(),
+    /** What the batch trains; decides which skills its students are assessed on. */
+    sportId: uuid()
+      .notNull()
+      .references(() => sports.id, { onDelete: 'restrict' }),
     isActive: boolean().notNull().default(true),
     ...timestamps,
   },

@@ -18,6 +18,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import {
+  batches,
+  enrollments,
+  feePlanSplits,
   fundEntries,
   fundTxns,
   invoices,
@@ -72,6 +75,24 @@ async function staffMember(id: string) {
   return u;
 }
 
+/**
+ * Payees a coach may pay from the cash they hold: those named in the fee split of a plan used by
+ * a current student of a batch the coach is in charge of.
+ */
+async function coachPayeeIds(coachId: string): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ payeeId: feePlanSplits.payeeId })
+    .from(feePlanSplits)
+    .innerJoin(students, eq(students.feePlanId, feePlanSplits.feePlanId))
+    .innerJoin(
+      enrollments,
+      and(eq(enrollments.studentId, students.id), isNull(enrollments.effectiveTo)),
+    )
+    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    .where(and(eq(batches.coachId, coachId), sql`${feePlanSplits.payeeId} is not null`));
+  return rows.map((r) => r.payeeId!);
+}
+
 // ─── Payees ──────────────────────────────────────────────────────────────────
 
 const PayeeBody = z.object({
@@ -82,6 +103,24 @@ const PayeeBody = z.object({
 
 fundsRouter.get('/payees', requireAdmin, async (_req, res) => {
   ok(res, await db.select().from(payees).orderBy(desc(payees.isActive), asc(payees.name)));
+});
+
+fundsRouter.get('/payable', async (req, res) => {
+  const user = currentUser(req);
+  const ids = isAdminUser(user) ? null : await coachPayeeIds(user.id);
+  const list =
+    ids && !ids.length
+      ? []
+      : await db
+          .select({ id: payees.id, name: payees.name })
+          .from(payees)
+          .where(and(eq(payees.isActive, true), ids ? inArray(payees.id, ids) : undefined))
+          .orderBy(asc(payees.name));
+  const owed = await Promise.all(list.map((p) => balanceOf(db, 'payee_due', { payeeId: p.id })));
+  ok(res, {
+    cash: isAdminUser(user) ? null : await balanceOf(db, 'cash', { userId: user.id }),
+    payees: list.map((p, i) => ({ ...p, owed: owed[i]! })),
+  });
 });
 
 fundsRouter.post('/payees', requireAdmin, async (req, res) => {
@@ -666,10 +705,21 @@ const PayoutBody = z
     path: ['userId'],
   });
 
-/** Admin: settles what the academy owes a staff member or a payee. */
-fundsRouter.post('/payouts', requireAdmin, async (req, res) => {
+/**
+ * Settles what the academy owes a staff member or a payee. Admins pay anyone from any wallet;
+ * coaches pay only their batches' payees, from the cash they hold.
+ */
+fundsRouter.post('/payouts', async (req, res) => {
   const user = currentUser(req);
   const body = parse(PayoutBody, req.body);
+  if (!isAdminUser(user)) {
+    if (!body.payeeId) throw AppError.forbidden('Coaches can only pay payees');
+    if (body.fromUserId && body.fromUserId !== user.id)
+      throw AppError.forbidden('You can only pay from the cash you hold');
+    if (!(await coachPayeeIds(user.id)).includes(body.payeeId))
+      throw AppError.forbidden('This payee is not linked to your batches');
+    body.fromUserId = user.id;
+  }
   const to = body.userId
     ? { kind: 'staff' as const, ...(await staffMember(body.userId)) }
     : await (async () => {

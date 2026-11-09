@@ -5,6 +5,7 @@ import {
   index,
   integer,
   pgEnum,
+  pgSequence,
   pgTable,
   smallint,
   text,
@@ -15,12 +16,22 @@ import { gender, id, studentStatus, timestamps, tz } from './_shared.js';
 import { batches, feePlans } from './academy.js';
 import { users } from './users.js';
 
+/** Registration numbers: 1001, 1002, … in the order students are added. */
+export const studentRegistrationSeq = pgSequence('student_registration_seq', { startWith: 1001 });
+
 export const students = pgTable(
   'students',
   {
     id: id(),
     /** Human-friendly code, e.g. ATQ-0042. */
     code: text().notNull(),
+    /**
+     * Registration number (1001…). Shown only on the student's profile; parents type it to open
+     * a shared report or invoice, so it works like a simple PIN.
+     */
+    registrationNo: integer()
+      .notNull()
+      .default(sql`nextval('student_registration_seq')`),
     fullName: text().notNull(),
     dateOfBirth: date({ mode: 'string' }),
     gender: gender(),
@@ -61,6 +72,7 @@ export const students = pgTable(
   },
   (t) => [
     uniqueIndex('students_code_uq').on(t.code),
+    uniqueIndex('students_registration_no_uq').on(t.registrationNo),
     index('students_status_idx').on(t.status),
     index('students_name_idx').on(sql`lower(${t.fullName})`),
     check(

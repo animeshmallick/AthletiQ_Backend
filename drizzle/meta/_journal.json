@@ -85,6 +85,13 @@
       "when": 1794224105104,
       "tag": "0011_batch_capacity_required",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794239021087,
+      "tag": "0012_skills_and_sharing",
+      "breakpoints": true
     }
   ]
 }

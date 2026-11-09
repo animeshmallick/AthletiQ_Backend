@@ -698,17 +698,6 @@ function empty(doc: Doc, text: string) {
   doc.moveDown(0.3);
 }
 
-export async function renderStudentReportPdf(
-  r: StudentReport,
-  academy: AcademySettings,
-  opts: { scope: string; generated: string },
-) {
-  const title = `Student report - ${r.student.fullName}`;
-  const doc = newDoc(title, academy);
-  studentSection(doc, r, academy, opts.scope);
-  return finish(doc, academy, `${r.student.fullName} (${r.student.code})`, opts.generated);
-}
-
 // ─── A batch / the whole academy ────────────────────────────────────────────
 
 export async function renderGroupReportPdf(

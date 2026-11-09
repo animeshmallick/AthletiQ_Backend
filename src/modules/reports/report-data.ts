@@ -19,6 +19,7 @@ import {
 } from '../../db/schema/index.js';
 import { addDays, diffDays, formatDisplayDate, isoWeekday, type IsoDate } from '../../lib/dates.js';
 import { getTemplate } from '../feedback/templates/index.js';
+import { loadProgress, type SportProgress } from '../skills/progress.js';
 
 const ATTENDED = new Set(['present', 'late']);
 const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : null);
@@ -129,6 +130,8 @@ export interface StudentReport {
     }[];
   };
   makeups: { date: string; batchName: string; missedDate: string | null; reason: string | null }[];
+  /** Monthly skill assessments, per sport (oldest first). */
+  skills: SportProgress[];
   timeline: TimelineEvent[];
   insights: string[];
 }
@@ -202,7 +205,7 @@ export async function loadStudentReports(
   const inBatches = (col: Parameters<typeof inArray>[0]): SQL | undefined =>
     batchIds ? inArray(col, batchIds) : undefined;
 
-  const [people, enrolls, marks, bills, makeups, feedback, history] = await Promise.all([
+  const [people, enrolls, marks, bills, makeups, feedback, history, progress] = await Promise.all([
     db
       .select({ s: students, plan: feePlans.name, planFee: feePlans.monthlyFee })
       .from(students)
@@ -305,6 +308,7 @@ export async function loadStudentReports(
       .leftJoin(users, eq(users.id, auditLogs.actorId))
       .where(and(eq(auditLogs.entityType, 'student'), inArray(auditLogs.entityId, studentIds)))
       .orderBy(asc(auditLogs.createdAt)),
+    loadProgress(studentIds),
   ]);
 
   const group = <T extends { studentId: string }>(rows: T[]) => {
@@ -571,6 +575,15 @@ export async function loadStudentReports(
         missedDate: m.missedDate,
         reason: m.reason,
       })),
+      // Within a batch scope, only assessments made in those batches.
+      skills: (progress.get(s.id) ?? [])
+        .map((p) => ({
+          ...p,
+          assessments: batchIds
+            ? p.assessments.filter((x) => batchIds.includes(x.batchId))
+            : p.assessments,
+        }))
+        .filter((p) => p.assessments.length),
       timeline,
       insights: [],
     };

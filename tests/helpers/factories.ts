@@ -4,7 +4,17 @@ import type { Express } from 'express';
 import { createApp } from '../../src/app';
 import { db } from '../../src/db/client';
 import { eq } from 'drizzle-orm';
-import { batches, coachSessions, feePlans, locations, users } from '../../src/db/schema';
+import {
+  batches,
+  coachSessions,
+  feePlans,
+  locations,
+  skillAreas,
+  skills,
+  sportLevels,
+  sports,
+  users,
+} from '../../src/db/schema';
 import { hashPassword } from '../../src/modules/auth/password';
 import { signAccessToken } from '../../src/modules/auth/tokens';
 import {
@@ -108,6 +118,40 @@ export async function makeLocation(overrides: Partial<typeof locations.$inferIns
   return l!;
 }
 
+/**
+ * A sport with two areas of two skills each and a three-step ladder:
+ * Foundation (1.0), Bronze (2.5), Gold (4.0). Reuses the first sport if one exists.
+ */
+export async function makeSport(name?: string) {
+  if (!name) {
+    const existing = await db.query.sports.findFirst();
+    if (existing) return existing;
+  }
+  const [sport] = await db
+    .insert(sports)
+    .values({ name: name ?? 'Badminton' })
+    .returning();
+  const areas = await db
+    .insert(skillAreas)
+    .values([
+      { sportId: sport!.id, name: 'Footwork', position: 1 },
+      { sportId: sport!.id, name: 'Strokes', position: 2 },
+    ])
+    .returning();
+  await db.insert(skills).values([
+    { areaId: areas[0]!.id, name: 'Split step', position: 1 },
+    { areaId: areas[0]!.id, name: 'Recovery', position: 2 },
+    { areaId: areas[1]!.id, name: 'Smash', position: 1 },
+    { areaId: areas[1]!.id, name: 'Net shot', position: 2 },
+  ]);
+  await db.insert(sportLevels).values([
+    { sportId: sport!.id, name: 'Foundation', minScore: 100, position: 1 },
+    { sportId: sport!.id, name: 'Bronze', minScore: 250, position: 2 },
+    { sportId: sport!.id, name: 'Gold', minScore: 400, position: 3 },
+  ]);
+  return sport!;
+}
+
 export async function makeBatch(
   coachId: string,
   locationId: string,
@@ -123,6 +167,7 @@ export async function makeBatch(
       startTime: '06:00:00',
       endTime: '08:00:00',
       capacity: 50,
+      sportId: overrides.sportId ?? (await makeSport()).id,
       ...overrides,
     })
     .returning();
