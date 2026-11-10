@@ -98,12 +98,12 @@ describe('coach session tasks over a day', () => {
       detail: `${a.coach.name} · ${a.batch.name} · 0 of 1 marked`,
     });
 
-    // Checked out: attendance is locked for the coach, but stays an admin follow-up.
+    // Checked out: the coach can still mark it today, so the to-do stays; also an admin follow-up.
     await db
       .update(coachSessions)
       .set({ checkOutAt: new Date() })
       .where(and(eq(coachSessions.coachId, a.coach.id), eq(coachSessions.date, MON)));
-    expect(kinds(await tasksFor(a.coachUser))).toEqual([]);
+    expect(kinds(await tasksFor(a.coachUser))).toEqual(['attendance']);
     expect(kinds(await tasksFor(a.adminUser))).toEqual(['attendance']);
   });
 

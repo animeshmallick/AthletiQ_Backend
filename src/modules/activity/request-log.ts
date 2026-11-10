@@ -11,6 +11,7 @@ import { lt, sql } from 'drizzle-orm';
 import type { RequestHandler, Request } from 'express';
 import { db } from '../../db/client.js';
 import { apiRequests } from '../../db/schema/index.js';
+import { env } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
 
 const FLUSH_MS = 3_000;
@@ -35,7 +36,9 @@ export function routeOf(url: string): string {
 }
 
 /** Expected, harmless failures that would only drown the real ones. */
-function isNoise(req: Request, status: number) {
+function isNoise(req: Request, status: number, locals: Record<string, unknown>) {
+  // An expired access token: the app renews it and retries by itself.
+  if (status === 401 && locals.accessTokenExpired) return true;
   // Session keep-alive (and a signed-out browser checking for a session): constant and not
   // a change anyone made. Server errors on it are still recorded.
   return status < 500 && req.originalUrl.startsWith('/api/v1/auth/refresh');
@@ -92,12 +95,14 @@ function schedule() {
 
 /** Notes writes and failures after the response is sent; never blocks or fails a request. */
 export const requestLog: RequestHandler = (req, res, next) => {
+  // A developer's local server may point at the shared database: keep its traffic out of the log.
+  if (env.NODE_ENV === 'development') return next();
   const started = process.hrtime.bigint();
   res.on('finish', () => {
     try {
       const status = res.statusCode;
       if (READS.has(req.method) && status < 400) return;
-      if (req.method === 'OPTIONS' || isNoise(req, status)) return;
+      if (req.method === 'OPTIONS' || isNoise(req, status, res.locals)) return;
       if (buffer.length >= MAX_BUFFER) return;
       const error = res.locals.apiError as { code: string; message: string } | undefined;
       buffer.push({

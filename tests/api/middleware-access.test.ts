@@ -84,7 +84,7 @@ describe('requireAuth', () => {
     const r = req({ headers: authorization ? { authorization } : {} });
     const next = jest.fn();
     try {
-      await requireAuth(r, {} as Response, next);
+      await requireAuth(r, { locals: {} } as unknown as Response, next);
       return { next, user: r.user, error: undefined as AppError | undefined };
     } catch (error) {
       return { next, user: undefined, error: error as AppError };
@@ -107,7 +107,9 @@ describe('requireAuth', () => {
     expect(okCall.user).toMatchObject({ id: coach.id, role: 'coach' });
 
     await db.update(users).set({ tokenVersion: 5 }).where(eq(users.id, coach.id));
-    expect((await call(`Bearer ${token}`)).error?.message).toBe('Your session has expired');
+    expect((await call(`Bearer ${token}`)).error?.message).toBe(
+      'Your session has ended. Please sign in again.',
+    );
 
     await db
       .update(users)

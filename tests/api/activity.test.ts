@@ -247,3 +247,20 @@ describe('activity within the last few hours', () => {
     await admin$.get('/api/v1/activity/logs?since=yesterday').expect(400);
   });
 });
+
+describe('request log noise', () => {
+  it('skips expired access tokens (the app renews them) but keeps other failures', async () => {
+    const a = await makeAcademy();
+    await flushRequestLog();
+    await db.delete(apiRequests);
+    const app = (await import('../helpers/factories')).getApp();
+    const request = (await import('supertest')).default;
+    // An expired / garbled access token: routine, the client refreshes and retries.
+    await request(app).get('/api/v1/batches').set('Authorization', 'Bearer expired').expect(401);
+    // A real failure is still recorded.
+    await (await as(a.coach)).get('/api/v1/users').expect(403);
+    await flushRequestLog();
+    const rows = await db.select().from(apiRequests);
+    expect(rows.map((r) => r.status)).toEqual([403]);
+  });
+});

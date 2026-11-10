@@ -113,10 +113,10 @@ async function sessionTasks(user: AuthUser, now: Date): Promise<Task[]> {
         });
       }
     }
-    // Attendance: once the session has started. Coaches can mark it only between check-in and
-    // check-out; after that it is locked for them and stays an admin follow-up.
+    // Attendance: once the session has started. Coaches can mark it once checked in, until the
+    // end of the day (even after checking out); unmarked late on, it's an admin follow-up too.
     if (mins >= start && s.expectedStudents > 0 && s.marked < s.expectedStudents) {
-      if (admin ? mins >= end + 30 : !!s.coachSession && !s.coachSession.checkOutAt) {
+      if (admin ? mins >= end + 30 : !!s.coachSession) {
         tasks.push({
           id: `attendance:${b.id}:${today}`,
           kind: 'attendance',

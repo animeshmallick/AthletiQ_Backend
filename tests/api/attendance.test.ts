@@ -22,7 +22,7 @@ async function setup() {
 }
 
 describe('student attendance', () => {
-  it('locks attendance for the coach after check-out; admins can still correct it', async () => {
+  it('lets the coach mark after check-out the same day, then locks it; admins can still correct it', async () => {
     setToday(MON);
     const { admin, coach, batch, s1 } = await setup();
     await checkIn(coach.id, batch.id, MON);
@@ -39,14 +39,24 @@ describe('student attendance', () => {
       .set({ checkOutAt: new Date(`${MON}T02:35:00Z`) })
       .where(and(eq(coachSessions.coachId, coach.id), eq(coachSessions.date, MON)));
 
-    const sheet = await api
+    // Same day, after checking out: still open (e.g. to fix a mark on the way home).
+    const sameDay = await api
+      .get(`/api/v1/attendance/session?batchId=${batch.id}&date=${MON}`)
+      .expect(200);
+    expect(sameDay.body.data).toMatchObject({ editable: true, lockedReason: null });
+    await api.put('/api/v1/attendance/session', mark('late')).expect(200);
+
+    // Next day: locked for the coach.
+    setToday('2026-03-10');
+    const nextDay = await as(coach);
+    const sheet = await nextDay
       .get(`/api/v1/attendance/session?batchId=${batch.id}&date=${MON}`)
       .expect(200);
     expect(sheet.body.data).toMatchObject({
       editable: false,
-      lockedReason: expect.stringMatching(/locked after you check out/),
+      lockedReason: expect.stringMatching(/checked out of this session and the day is over/),
     });
-    const refused = await api.put('/api/v1/attendance/session', mark('absent')).expect(422);
+    const refused = await nextDay.put('/api/v1/attendance/session', mark('absent')).expect(422);
     expect(refused.body.error.message).toMatch(/Ask an admin/);
 
     const adminApi = await as(admin);

@@ -18,14 +18,19 @@ function extractBearer(req: Request): string | undefined {
  */
 export const requireAuth: RequestHandler = async (
   req: Request,
-  _res: Response,
+  res: Response,
   next: NextFunction,
 ) => {
   const token = extractBearer(req);
   if (!token) throw AppError.unauthenticated();
 
   const claims = await verifyAccessToken(token);
-  if (!claims) throw AppError.unauthenticated('Your session has expired');
+  if (!claims) {
+    // The short-lived access token ran out: the app renews it and retries on its own, so this
+    // is routine (not logged as a failure).
+    res.locals.accessTokenExpired = true;
+    throw AppError.unauthenticated('Your session has expired');
+  }
 
   const [user] = await db
     .select({
@@ -40,13 +45,13 @@ export const requireAuth: RequestHandler = async (
     .where(eq(users.id, claims.sub))
     .limit(1);
 
-  // The token's role must still be one the person holds (an admin may have removed it).
+  // Ended for real: disabled, password changed / signed out everywhere, or the role taken away.
   if (
     user?.status !== 'active' ||
     user.tokenVersion !== claims.tv ||
     !user.roles.includes(claims.role)
   ) {
-    throw AppError.unauthenticated('Your session has expired');
+    throw AppError.unauthenticated('Your session has ended. Please sign in again.');
   }
 
   req.user = {
