@@ -102,7 +102,17 @@ authRouter.post('/logout', async (req, res) => {
 });
 
 authRouter.get('/me', requireAuth, async (req, res) => {
-  ok(res, await auth.getMe(currentUser(req).id));
+  ok(res, await auth.getMe(currentUser(req).id, currentUser(req).role));
+});
+
+const SwitchRoleBody = z.object({ role: z.enum(['admin', 'coach']) });
+
+/** People with several roles (admin and coach) switch which one this sign-in uses. */
+authRouter.post('/switch-role', async (req, res) => {
+  const { role } = parse(SwitchRoleBody, req.body);
+  const token = readRefreshToken(req);
+  if (!token) throw AppError.unauthenticated('Session expired. Please sign in again.');
+  sendAuth(req, res, await auth.switchRole(token, role, client(req)));
 });
 
 const TokenQuery = z.object({ token: z.string().min(10).max(200) });
@@ -138,6 +148,12 @@ authRouter.post('/change-password', requireAuth, authLimiter, async (req, res) =
   sendAuth(
     req,
     res,
-    await auth.changePassword(currentUser(req).id, currentPassword, newPassword, client(req)),
+    await auth.changePassword(
+      currentUser(req).id,
+      currentPassword,
+      newPassword,
+      client(req),
+      currentUser(req).role,
+    ),
   );
 });

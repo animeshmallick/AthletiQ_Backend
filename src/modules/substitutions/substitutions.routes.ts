@@ -4,7 +4,20 @@
  * access.ts); fees and income never move.
  */
 import { timesOn, type DayTimes } from '../../lib/batch-times.js';
-import { aliasedTable, and, desc, eq, gte, inArray, lte, ne, or, sql, type SQL } from 'drizzle-orm';
+import {
+  arrayContains,
+  aliasedTable,
+  and,
+  desc,
+  eq,
+  gte,
+  inArray,
+  lte,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, type DbOrTx } from '../../db/client.js';
@@ -220,7 +233,7 @@ async function conflict(
 
 async function assertSubstituteCoach(id: string) {
   const u = await db.query.users.findFirst({ where: eq(users.id, id) });
-  if (!u || u.role !== 'coach' || u.status !== 'active')
+  if (!u?.roles.includes('coach') || u.status !== 'active')
     throw AppError.badRequest('Choose an active coach as the substitute');
   return u;
 }
@@ -256,7 +269,7 @@ substitutionsRouter.get('/coaches', async (_req, res) => {
   const rows = await db
     .select({ id: users.id, name: users.name })
     .from(users)
-    .where(and(eq(users.role, 'coach'), eq(users.status, 'active')))
+    .where(and(arrayContains(users.roles, ['coach']), eq(users.status, 'active')))
     .orderBy(users.name);
   ok(res, rows);
 });

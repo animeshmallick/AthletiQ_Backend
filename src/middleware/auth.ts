@@ -30,7 +30,7 @@ export const requireAuth: RequestHandler = async (
   const [user] = await db
     .select({
       id: users.id,
-      role: users.role,
+      roles: users.roles,
       name: users.name,
       email: users.email,
       status: users.status,
@@ -40,11 +40,22 @@ export const requireAuth: RequestHandler = async (
     .where(eq(users.id, claims.sub))
     .limit(1);
 
-  if (user?.status !== 'active' || user.tokenVersion !== claims.tv) {
+  // The token's role must still be one the person holds (an admin may have removed it).
+  if (
+    user?.status !== 'active' ||
+    user.tokenVersion !== claims.tv ||
+    !user.roles.includes(claims.role)
+  ) {
     throw AppError.unauthenticated('Your session has expired');
   }
 
-  req.user = { id: user.id, role: user.role, name: user.name, email: user.email };
+  req.user = {
+    id: user.id,
+    role: claims.role,
+    roles: user.roles,
+    name: user.name,
+    email: user.email,
+  };
   next();
 };
 

@@ -127,6 +127,13 @@
       "when": 1794315155845,
       "tag": "0017_lesson_library",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794319688379,
+      "tag": "0018_user_roles",
+      "breakpoints": true
     }
   ]
 }

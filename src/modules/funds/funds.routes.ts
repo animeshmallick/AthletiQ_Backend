@@ -977,7 +977,9 @@ fundsRouter.post('/resplit', requireAdmin, async (req, res) => {
         title: txn.title,
         feePlanId: invoice.feePlanId,
         batchCoachId: invoice.coachId,
-        collector,
+        // Whoever held the cash keeps holding it — decided by the ledger, not by the role the
+        // collector happens to use now (someone can be both admin and coach).
+        collector: { id: collector.id, role: held?.userId ? 'coach' : 'admin' },
         heldBy: held?.userId ? 'collector' : 'academy',
       });
     }

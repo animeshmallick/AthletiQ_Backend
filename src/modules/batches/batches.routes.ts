@@ -204,7 +204,7 @@ function timings(weekdays: number[], startTime: string, endTime: string, dayTime
 
 async function assertCoach(coachId: string) {
   const u = await db.query.users.findFirst({ where: eq(users.id, coachId) });
-  if (u?.role !== 'coach') throw AppError.unprocessable('Selected coach does not exist');
+  if (!u?.roles.includes('coach')) throw AppError.unprocessable('Selected coach does not exist');
   if (u.status === 'disabled') throw AppError.unprocessable('Selected coach is disabled');
 }
 

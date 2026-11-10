@@ -5,7 +5,7 @@
  *  - admins get one evening digest instead of a stream of small updates,
  *  - coaches get one weekly feedback nudge, only if reports are still open.
  */
-import { and, count, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
+import { arrayContains, and, count, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import {
   batches,
@@ -158,7 +158,7 @@ export async function sendFeedbackReminders() {
   const coaches = await db
     .select({ id: users.id, name: users.name, email: users.email })
     .from(users)
-    .where(and(eq(users.role, 'coach'), eq(users.status, 'active')));
+    .where(and(arrayContains(users.roles, ['coach']), eq(users.status, 'active')));
   let nudged = 0;
   for (const c of coaches) {
     const board = await weekBoard({ ...c, role: 'coach' }, weekStart);

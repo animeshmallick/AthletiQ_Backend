@@ -18,6 +18,7 @@ function asPgError(err: unknown): PgError | undefined {
 /** Friendly messages for known unique constraints. */
 const UNIQUE_MESSAGES: Record<string, string> = {
   users_email_lower_uq: 'A user with this email already exists',
+  users_phone_uq: 'Another account already uses this phone number',
   locations_name_lower_uq: 'A location with this name already exists',
   batches_name_lower_uq: 'A batch with this name already exists',
   fee_plans_name_lower_uq:

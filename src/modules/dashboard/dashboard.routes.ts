@@ -3,6 +3,7 @@
  * (coaches: their batches; admins: the whole academy). A handful of aggregate queries.
  */
 import {
+  arrayContains,
   and,
   count,
   countDistinct,
@@ -160,7 +161,7 @@ export async function dashboardFor(user: AuthUser, today: IsoDate = todayInAppTz
         ? db
             .select({ n: count() })
             .from(users)
-            .where(and(eq(users.role, 'coach'), eq(users.status, 'active')))
+            .where(and(arrayContains(users.roles, ['coach']), eq(users.status, 'active')))
         : Promise.resolve([{ n: 0 }]),
     ]);
 

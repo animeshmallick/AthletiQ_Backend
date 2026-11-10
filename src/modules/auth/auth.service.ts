@@ -13,19 +13,29 @@ import { randomToken, sha256 } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
 import { audit } from '../audit/audit.service.js';
-import type { PublicUser } from './auth.types.js';
+import type { PublicUser, Role } from './auth.types.js';
 import { getDummyHash, hashPassword, verifyPassword } from './password.js';
 import { signAccessToken } from './tokens.js';
 
 type UserRow = typeof users.$inferSelect;
 
-export function toPublicUser(u: UserRow): PublicUser {
+/**
+ * The role a sign-in uses: the one asked for if the user holds it, else the one they used last.
+ */
+export function activeRoleOf(u: Pick<UserRow, 'role' | 'roles'>, wanted?: Role | null): Role {
+  if (wanted && u.roles.includes(wanted)) return wanted;
+  return u.roles.includes(u.role) ? u.role : u.roles[0]!;
+}
+
+/** `role` is the role in use (defaults to the one they used last); `roles` all they hold. */
+export function toPublicUser(u: UserRow, role: Role = u.role): PublicUser {
   return {
     id: u.id,
     email: u.email,
     name: u.name,
     phone: u.phone,
-    role: u.role,
+    role,
+    roles: u.roles,
     status: u.status,
     lastLoginAt: u.lastLoginAt,
     createdAt: u.createdAt,
@@ -54,7 +64,8 @@ async function issueSession(
   client: ClientInfo,
   familyId: string = randomUUID(),
   tx: DbOrTx = db,
-): Promise<{ sessionId: string; refreshToken: string; expiresAt: Date }> {
+  role: Role = activeRoleOf(user),
+): Promise<{ sessionId: string; refreshToken: string; expiresAt: Date; role: Role }> {
   const refreshToken = randomToken(48);
   const expiresAt = new Date(Date.now() + env.REFRESH_TOKEN_TTL_DAYS * 86_400_000);
   const [row] = await tx
@@ -62,26 +73,27 @@ async function issueSession(
     .values({
       userId: user.id,
       familyId,
+      role,
       tokenHash: sha256(refreshToken),
       expiresAt,
       userAgent: client.userAgent?.slice(0, 300) ?? null,
       ipAddress: client.ip,
     })
     .returning({ id: sessions.id });
-  return { sessionId: row!.id, refreshToken, expiresAt };
+  return { sessionId: row!.id, refreshToken, expiresAt, role };
 }
 
 async function buildAuthResult(
   user: UserRow,
-  session: { refreshToken: string; expiresAt: Date },
+  session: { refreshToken: string; expiresAt: Date; role: Role },
 ): Promise<AuthResult> {
   const { token, expiresIn } = await signAccessToken({
     sub: user.id,
-    role: user.role,
+    role: session.role,
     tv: user.tokenVersion,
   });
   return {
-    user: toPublicUser(user),
+    user: toPublicUser(user, session.role),
     accessToken: token,
     accessTokenExpiresIn: expiresIn,
     refreshToken: session.refreshToken,
@@ -196,7 +208,14 @@ export async function refresh(refreshToken: string, client: ClientInfo): Promise
     const user = await tx.query.users.findFirst({ where: eq(users.id, session.userId) });
     if (user?.status !== 'active') return { kind: 'invalid' as const };
 
-    const next = await issueSession(user, client, session.familyId, tx);
+    // Keep the role this sign-in was using (if they still hold it).
+    const next = await issueSession(
+      user,
+      client,
+      session.familyId,
+      tx,
+      activeRoleOf(user, session.role),
+    );
     // On a benign retry the token keeps its first revocation time, so the grace window can't be
     // stretched by replaying it.
     await tx
@@ -232,6 +251,42 @@ export async function refresh(refreshToken: string, client: ClientInfo): Promise
     });
   }
   throw expired();
+}
+
+/**
+ * Switches the role a sign-in uses (for people who are, say, both admin and coach). The refresh
+ * session keeps going with the new role, and it becomes their default next time.
+ */
+export async function switchRole(
+  refreshToken: string,
+  role: Role,
+  client: ClientInfo,
+): Promise<AuthResult> {
+  const [session] = await db
+    .select()
+    .from(sessions)
+    .where(and(eq(sessions.tokenHash, sha256(refreshToken)), isNull(sessions.revokedAt)));
+  if (!session || session.expiresAt <= new Date())
+    throw AppError.unauthenticated('Session expired. Please sign in again.');
+  const user = await db.query.users.findFirst({ where: eq(users.id, session.userId) });
+  if (user?.status !== 'active')
+    throw AppError.unauthenticated('Session expired. Please sign in again.');
+  if (!user.roles.includes(role)) throw AppError.forbidden(`You don't have the ${role} role`);
+
+  await db
+    .update(sessions)
+    .set({ role, lastUsedAt: new Date() })
+    .where(eq(sessions.id, session.id));
+  const [updated] = await db.update(users).set({ role }).where(eq(users.id, user.id)).returning();
+  await audit({
+    actorId: user.id,
+    action: 'auth.role_switched',
+    entityType: 'user',
+    entityId: user.id,
+    metadata: { from: session.role ?? user.role, to: role },
+    ipAddress: client.ip,
+  });
+  return buildAuthResult(updated!, { refreshToken, expiresAt: session.expiresAt, role });
 }
 
 export async function logout(refreshToken: string | undefined): Promise<void> {
@@ -364,6 +419,8 @@ export async function changePassword(
   currentPassword: string,
   newPassword: string,
   client: ClientInfo,
+  /** The role this device is using; it stays signed in with it. */
+  role?: Role,
 ): Promise<AuthResult> {
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user?.passwordHash) throw AppError.unauthenticated();
@@ -398,12 +455,12 @@ export async function changePassword(
   });
 
   // Keep the current device signed in with a fresh session.
-  const session = await issueSession(updated, client);
+  const session = await issueSession(updated, client, undefined, db, activeRoleOf(updated, role));
   return buildAuthResult(updated, session);
 }
 
-export async function getMe(userId: string): Promise<PublicUser> {
+export async function getMe(userId: string, role?: Role): Promise<PublicUser> {
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user) throw AppError.unauthenticated();
-  return toPublicUser(user);
+  return toPublicUser(user, activeRoleOf(user, role));
 }

@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { arrayContains, and, eq, inArray } from 'drizzle-orm';
 import { env } from '../../config/env.js';
 import { db } from '../../db/client.js';
 import { deviceTokens, notificationLog, users } from '../../db/schema/index.js';
@@ -88,7 +88,7 @@ export async function activeAdminIds(): Promise<string[]> {
   const rows = await db
     .select({ id: users.id })
     .from(users)
-    .where(and(eq(users.role, 'admin'), eq(users.status, 'active')));
+    .where(and(arrayContains(users.roles, ['admin']), eq(users.status, 'active')));
   return rows.map((r) => r.id);
 }
 
@@ -113,7 +113,7 @@ export async function notifyAdmins(message: PushMessage) {
   const admins = await db
     .select({ id: users.id })
     .from(users)
-    .where(and(eq(users.role, 'admin'), eq(users.status, 'active')));
+    .where(and(arrayContains(users.roles, ['admin']), eq(users.status, 'active')));
   return notifyUsers(
     admins.map((a) => a.id),
     message,

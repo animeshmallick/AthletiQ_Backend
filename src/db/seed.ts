@@ -31,6 +31,7 @@ try {
       email: cfg.SEED_ADMIN_EMAIL,
       name: cfg.SEED_ADMIN_NAME,
       role: 'admin',
+      roles: ['admin'],
       status: 'active',
       passwordHash: await hashPassword(cfg.SEED_ADMIN_PASSWORD),
     });

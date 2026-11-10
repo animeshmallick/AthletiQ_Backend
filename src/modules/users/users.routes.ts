@@ -1,5 +1,18 @@
 import { balanceOf } from '../funds/ledger.js';
-import { and, asc, count, eq, gte, ilike, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  arrayContains,
+  asc,
+  count,
+  eq,
+  gte,
+  ilike,
+  inArray,
+  isNull,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -25,8 +38,17 @@ usersRouter.patch('/me', async (req, res) => {
   const me = currentUser(req);
   const body = parse(ProfileBody, req.body);
   const [u] = await db.update(users).set(body).where(eq(users.id, me.id)).returning();
-  ok(res, toPublicUser(u!));
+  ok(res, toPublicUser(u!, me.role));
 });
+
+/** Coach, admin, or both — each at most once. */
+const zRoles = z
+  .array(z.enum(['admin', 'coach']))
+  .min(1, 'Pick at least one role')
+  .max(2)
+  .refine((r) => new Set(r).size === r.length, 'A role can only be given once')
+  // Stored in a fixed order so "admin + coach" is always the same value.
+  .transform((r) => (['admin', 'coach'] as const).filter((x) => r.includes(x)));
 
 // ─── Admin: manage coaches and admins ────────────────────────────────────────
 
@@ -39,7 +61,7 @@ const ListQuery = zPagination.extend({
 usersRouter.get('/', requireAdmin, async (req, res) => {
   const q = parse(ListQuery, req.query);
   const filters: SQL[] = [];
-  if (q.role) filters.push(eq(users.role, q.role));
+  if (q.role) filters.push(arrayContains(users.roles, [q.role]));
   if (q.status) filters.push(eq(users.status, q.status));
   if (q.search) {
     const term = `%${q.search}%`;
@@ -125,15 +147,24 @@ const CreateBody = z.object({
   email: zEmail,
   phone: zPhone.nullable().optional(),
   role: z.enum(['admin', 'coach']).default('coach'),
+  /** Every role they hold; defaults to just `role`. */
+  roles: zRoles.optional(),
 });
 
 /** Creates the account and returns a one-time invite link the admin can share (e.g. WhatsApp). */
 usersRouter.post('/', requireAdmin, async (req, res) => {
   const body = parse(CreateBody, req.body);
   const result = await db.transaction(async (tx) => {
+    const roles = body.roles ?? [body.role];
     const [u] = await tx
       .insert(users)
-      .values({ ...body, phone: body.phone ?? null, status: 'invited' })
+      .values({
+        ...body,
+        roles,
+        role: roles.includes(body.role) ? body.role : roles[0]!,
+        phone: body.phone ?? null,
+        status: 'invited',
+      })
       .returning();
     const invite = await createOneTimeToken(u!.id, 'invite', req.user!.id, tx);
     await audit(
@@ -142,7 +173,7 @@ usersRouter.post('/', requireAdmin, async (req, res) => {
         action: 'user.invited',
         entityType: 'user',
         entityId: u!.id,
-        metadata: { role: body.role },
+        metadata: { roles: body.roles ?? [body.role] },
       },
       tx,
     );
@@ -162,12 +193,24 @@ const UpdateBody = z.object({
   name: zName.optional(),
   email: zEmail.optional(),
   phone: zPhone.nullable().optional(),
+  roles: zRoles.optional(),
 });
 
 usersRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(UpdateBody, req.body);
-  const [u] = await db.update(users).set(body).where(eq(users.id, id)).returning();
+  const current = await db.query.users.findFirst({ where: eq(users.id, id) });
+  if (!current) throw AppError.notFound('User');
+  if (body.roles && !body.roles.includes('admin') && id === currentUser(req).id)
+    throw AppError.unprocessable('You can’t remove your own admin role');
+  const changes = body.roles
+    ? {
+        ...body,
+        // Their default role must stay one they hold.
+        role: body.roles.includes(current.role) ? current.role : body.roles[0]!,
+      }
+    : body;
+  const [u] = await db.update(users).set(changes).where(eq(users.id, id)).returning();
   if (!u) throw AppError.notFound('User');
   await audit({
     ...auditCtx(req),

@@ -69,6 +69,7 @@ export async function makeUser(
       email: `${role}-${uniq()}@example.com`,
       name: role === 'admin' ? 'Admin User' : `Coach ${uniq()}`,
       role,
+      roles: [role],
       status: 'active',
       passwordHash: withPassword ? await hashPassword(PASSWORD) : null,
       ...rest,
