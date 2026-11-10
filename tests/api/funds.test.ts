@@ -830,3 +830,43 @@ describe('migration backfill', () => {
     await expectBalanced();
   });
 });
+
+describe('people who are both admin and coach', () => {
+  it('counts a payment received as coach with them, and as admin with the academy', async () => {
+    const a = await makeAcademy();
+    const both = await makeUser('admin', { roles: ['admin', 'coach'] });
+    const holderIds = async () =>
+      ((await overview(a.admin)).balances.holders as { userId: string }[]).map((h) => h.userId);
+
+    // Signed in as admin, but receiving this one as coach: the money is with them.
+    const first = await dueInvoice(a);
+    await pay(both, first.id, { receivedAs: 'coach' });
+    expect(await holderIds()).toContain(both.id);
+    const [log] = await db
+      .select({ metadata: sql<{ receivedAs?: string }>`metadata` })
+      .from(sql`audit_logs`)
+      .where(sql`action = 'invoice.marked_paid' and entity_id = ${first.id}`);
+    expect(log!.metadata.receivedAs).toBe('coach');
+
+    // As admin (the default when signed in as admin), it goes to the academy.
+    const second = await dueInvoice(a);
+    await pay(both, second.id);
+    const holders = (await overview(a.admin)).balances.holders as {
+      userId: string;
+      amount: number;
+    }[];
+    expect(holders.find((h) => h.userId === both.id)!.amount).toBe(first.totalAmount);
+    await expectBalanced();
+
+    // Nobody can receive in a role they don't hold.
+    const third = await dueInvoice(a);
+    const res = await (
+      await as(a.coach)
+    ).post(`/api/v1/invoices/${third.id}/payments`, {
+      mode: 'cash',
+      paidOn: '2026-01-12',
+      receivedAs: 'admin',
+    });
+    expect(res.status).toBe(403);
+  });
+});

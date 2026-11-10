@@ -196,6 +196,11 @@ const PaymentBody = z.object({
   note: zOptionalText(500),
   /** Coaches only: the money is with them (default) or went straight to the academy's account. */
   heldBy: z.enum(['collector', 'academy']).default('collector'),
+  /**
+   * People who are both admin and coach: which role they're receiving this payment in, whatever
+   * role they're signed in as. As coach, the money is counted with them (like any coach).
+   */
+  receivedAs: z.enum(['admin', 'coach']).optional(),
 });
 
 /**
@@ -205,8 +210,12 @@ const PaymentBody = z.object({
 invoicesRouter.post('/:id/payments', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(PaymentBody, req.body);
-  const user = currentUser(req);
-  const inv = await getInvoiceForUser(user, id); // access check
+  const signedIn = currentUser(req);
+  if (body.receivedAs && !(signedIn.roles ?? [signedIn.role]).includes(body.receivedAs))
+    throw AppError.forbidden(`You don't have the ${body.receivedAs} role`);
+  // Who received it, and in which role (decides whether the money is counted with them).
+  const user = { ...signedIn, role: body.receivedAs ?? signedIn.role };
+  const inv = await getInvoiceForUser(signedIn, id); // access check
   if (body.paidOn > todayInAppTz())
     throw AppError.badRequest('Payment date cannot be in the future');
   if (body.paidOn < inv.periodStart)
@@ -253,13 +262,18 @@ invoicesRouter.post('/:id/payments', async (req, res) => {
         action: 'invoice.marked_paid',
         entityType: 'invoice',
         entityId: id,
-        metadata: { amount: locked.totalAmount, mode: body.mode, paidOn: body.paidOn },
+        metadata: {
+          amount: locked.totalAmount,
+          mode: body.mode,
+          paidOn: body.paidOn,
+          ...(body.receivedAs ? { receivedAs: body.receivedAs } : {}),
+        },
       },
       tx,
     );
   });
 
-  const paid = await getInvoiceForUser(user, id);
+  const paid = await getInvoiceForUser(signedIn, id);
   const completed = paid.payments.find((p) => p.status === 'completed');
   if (completed)
     noticeFeeShares(completed.id, user, paid.student.fullName, body.heldBy === 'academy');
