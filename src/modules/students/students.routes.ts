@@ -69,6 +69,9 @@ const ListQuery = zPagination.extend({
   batchId: zId.optional(),
   coachId: zId.optional(),
   feePlanId: zId.optional(),
+  /** Students in a batch at this place, or of this sport. */
+  locationId: zId.optional(),
+  sportId: zId.optional(),
   /** Only students with unpaid ("outstanding") or past-due ("overdue") invoices. */
   /** outstanding/overdue: has unpaid invoices. paying: leaves out students whose every current
    *  batch is free (₹0 after their own fee and discount). */
@@ -96,6 +99,8 @@ studentsRouter.get('/', async (req, res) => {
     );
   if (q.feePlanId) filters.push(inBatch(eq(batches.feePlanId, q.feePlanId)));
   if (q.batchId) filters.push(inBatch(eq(batches.id, q.batchId)));
+  if (q.locationId) filters.push(inBatch(eq(batches.locationId, q.locationId)));
+  if (q.sportId) filters.push(inBatch(eq(batches.sportId, q.sportId)));
   if (q.coachId && isAdmin(user)) filters.push(inBatch(eq(batches.coachId, q.coachId)));
   if (q.search) {
     const term = `%${q.search}%`;

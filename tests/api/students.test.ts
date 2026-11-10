@@ -1,9 +1,17 @@
 import { describe, expect, it } from '@jest/globals';
 import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client';
-import { batches, invoices } from '../../src/db/schema';
+import { batches, invoices, sports } from '../../src/db/schema';
 import { generateDueInvoices } from '../../src/modules/billing/invoice-generator';
-import { as, makeAcademy, makeBatch, makePlan, makeStudent, setToday } from '../helpers/factories';
+import {
+  as,
+  makeAcademy,
+  makeBatch,
+  makeLocation,
+  makePlan,
+  makeStudent,
+  setToday,
+} from '../helpers/factories';
 
 const UNKNOWN = '6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c';
 
@@ -153,6 +161,23 @@ describe('student listing and access', () => {
       .get(`/api/v1/students?batchId=${batch.id}&feePlanId=${plan.id}&sort=joiningDate`)
       .expect(200);
     expect(byBatch.body.data.map((s: { id: string }) => s.id)).toEqual([mine.id]);
+
+    // By the place a batch meets, and by its sport.
+    const lake = await makeLocation();
+    const [tennis] = await db.insert(sports).values({ name: 'Tennis' }).returning();
+    await db
+      .update(batches)
+      .set({ locationId: lake.id, sportId: tennis!.id })
+      .where(eq(batches.id, otherBatch.id));
+    const ids = async (q: string) =>
+      (await api.get(`/api/v1/students?${q}`).expect(200)).body.data.map(
+        (s: { id: string }) => s.id,
+      );
+    expect(await ids(`locationId=${lake.id}`)).toEqual([theirs.id]);
+    expect(await ids(`sportId=${tennis!.id}`)).toEqual([theirs.id]);
+    expect(await ids(`locationId=${lake.id}&sportId=${tennis!.id}&coachId=${coach.id}`)).toEqual(
+      [],
+    );
     await api.get(`/api/v1/students/${UNKNOWN}`).expect(404);
   });
 });
