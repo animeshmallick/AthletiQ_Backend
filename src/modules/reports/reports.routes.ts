@@ -13,14 +13,7 @@ import { Router, type Response } from 'express';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
 import { db } from '../../db/client.js';
-import {
-  batches,
-  enrollments,
-  reportLinks,
-  studentPhotos,
-  students,
-  users,
-} from '../../db/schema/index.js';
+import { batches, enrollments, reportLinks, students, users } from '../../db/schema/index.js';
 import { randomToken, sha256 } from '../../lib/crypto.js';
 import { formatDisplayDate, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
@@ -82,14 +75,9 @@ export async function buildStudentPdf(
   }
   const [report] = await loadStudentReports([id], batchId === 'all' ? null : [batchId], today);
   if (!report) throw AppError.notFound('Student');
-  const photo = await db.query.studentPhotos.findFirst({
-    columns: { data: true },
-    where: eq(studentPhotos.studentId, id),
-  });
   const pdf = await renderParentReportPdf(report, await getAcademySettings(), {
     scope,
     generated: formatDisplayDate(today),
-    photo: photo ?? null,
   });
   return { pdf, filename: `${slug(report.student.fullName)}-${report.student.code}-report.pdf` };
 }

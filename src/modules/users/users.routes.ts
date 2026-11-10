@@ -1,8 +1,10 @@
-import { and, asc, count, eq, ilike, or, sql, type SQL } from 'drizzle-orm';
+import { balanceOf } from '../funds/ledger.js';
+import { and, asc, count, eq, gte, ilike, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { batches, users } from '../../db/schema/index.js';
+import { batches, coachSessions, enrollments, users } from '../../db/schema/index.js';
+import { addDays, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, ok, pageMeta } from '../../lib/http.js';
 import { parse, zEmail, zIdParam, zName, zPagination, zPhone } from '../../lib/validation.js';
@@ -64,12 +66,59 @@ usersRouter.get('/', requireAdmin, async (req, res) => {
     db.select({ total: count() }).from(users).where(where),
   ]);
 
-  ok(
-    res,
-    rows.map((r) => ({ ...toPublicUser(r.user), activeBatches: r.activeBatches })),
-    pageMeta(q.page, q.pageSize, total),
-  );
+  ok(res, await withTeamStats(rows), pageMeta(q.page, q.pageSize, total));
 });
+
+/**
+ * For the team cards: students in their active batches, check-ins and on-time rate over the last
+ * 30 days, cash they hold and what the academy owes them.
+ */
+async function withTeamStats(rows: { user: typeof users.$inferSelect; activeBatches: number }[]) {
+  const ids = rows.map((r) => r.user.id);
+  if (!ids.length) return [];
+  const from = addDays(todayInAppTz(), -29);
+  const [students, sessions] = await Promise.all([
+    db
+      .select({ coachId: batches.coachId, n: sql<number>`count(*)::int` })
+      .from(enrollments)
+      .innerJoin(batches, eq(batches.id, enrollments.batchId))
+      .where(
+        and(
+          inArray(batches.coachId, ids),
+          eq(batches.isActive, true),
+          isNull(enrollments.effectiveTo),
+        ),
+      )
+      .groupBy(batches.coachId),
+    db
+      .select({
+        coachId: coachSessions.coachId,
+        n: sql<number>`count(*)::int`,
+        onTime: sql<number>`count(*) filter (where (${coachSessions.checkInAt} at time zone 'Asia/Kolkata')::time <= ${coachSessions.scheduledStart} + interval '10 minutes')::int`,
+      })
+      .from(coachSessions)
+      .where(and(inArray(coachSessions.coachId, ids), gte(coachSessions.date, from)))
+      .groupBy(coachSessions.coachId),
+  ]);
+  return Promise.all(
+    rows.map(async (r) => {
+      const s = sessions.find((x) => x.coachId === r.user.id);
+      const [cash, owed] = await Promise.all([
+        balanceOf(db, 'cash', { userId: r.user.id }),
+        balanceOf(db, 'staff_due', { userId: r.user.id }),
+      ]);
+      return {
+        ...toPublicUser(r.user),
+        activeBatches: r.activeBatches,
+        students: students.find((x) => x.coachId === r.user.id)?.n ?? 0,
+        checkIns30: s?.n ?? 0,
+        onTimeRate: s?.n ? Math.round((s.onTime * 100) / s.n) : null,
+        cashHeld: cash,
+        owed,
+      };
+    }),
+  );
+}
 
 const CreateBody = z.object({
   name: zName,

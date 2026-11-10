@@ -64,7 +64,12 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
       endTime: batches.endTime,
       dayTimes: batches.dayTimes,
       coach: { id: users.id, name: users.name },
-      location: { id: locations.id, name: locations.name },
+      location: {
+        id: locations.id,
+        name: locations.name,
+        latitude: locations.latitude,
+        longitude: locations.longitude,
+      },
     })
     .from(batches)
     .innerJoin(users, eq(users.id, batches.coachId))

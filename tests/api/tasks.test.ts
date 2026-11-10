@@ -10,7 +10,7 @@ import {
 } from '../../src/db/schema';
 import { billOnAcceptance } from '../../src/modules/billing/invoice-generator';
 import { clockLabel, tasksFor, toMinutes, type Task } from '../../src/modules/tasks/tasks.service';
-import { checkIn, makeAcademy, makeStudent, setToday } from '../helpers/factories';
+import { checkIn, makeAcademy, makeBatch, makeStudent, setToday } from '../helpers/factories';
 
 const MON = '2026-03-09';
 // IST = UTC+5:30. The factory batch runs 06:00–08:00 IST.
@@ -48,8 +48,10 @@ describe('coach session tasks over a day', () => {
   it('moves from planning to check-in, attendance and check-out', async () => {
     const a = await academyToday();
 
+    // Every session today has its own check-in to-do: "later today" until 15 min before.
     setToday(MON, at('05:30'));
-    expect(kinds(await tasksFor(a.coachUser))).toEqual(['lesson-plan']);
+    expect(kinds(await tasksFor(a.coachUser)).sort()).toEqual(['check-in', 'lesson-plan']);
+    expect(find(await tasksFor(a.coachUser), 'check-in')).toMatchObject({ severity: 'info' });
 
     setToday(MON, at('05:50'));
     expect(find(await tasksFor(a.coachUser), 'check-in')).toMatchObject({
@@ -229,5 +231,33 @@ describe('admin academy-wide tasks', () => {
     expect(severities).toEqual(
       [...severities].sort((x, y) => (x === 'critical' ? -1 : y === 'critical' ? 1 : 0)),
     );
+  });
+});
+
+describe('check-ins for every session of the day', () => {
+  it('lists a separate check-in for each of the coach’s batches today', async () => {
+    const a = await academyToday();
+    // Two more batches for the same coach today, later in the day.
+    const evening = await makeBatch(a.coach.id, a.location.id, {
+      feePlanId: a.plan.id,
+      startTime: '17:00:00',
+      endTime: '18:00:00',
+    });
+    await makeBatch(a.coach.id, a.location.id, {
+      feePlanId: a.plan.id,
+      startTime: '19:00:00',
+      endTime: '20:00:00',
+    });
+    setToday(MON, at('05:50'));
+    const checkIns = (await tasksFor(a.coachUser)).items.filter((t) => t.kind === 'check-in');
+    expect(checkIns).toHaveLength(3);
+    // The one starting now is urgent; the later ones are for later today.
+    expect(checkIns.map((t) => t.severity).sort()).toEqual(['info', 'info', 'warning']);
+    expect(checkIns.find((t) => t.id.includes(evening.id))!.detail).toMatch(/^Starts at 5:00 pm/);
+
+    // Checking in to one removes only that one.
+    await checkIn(a.coach.id, a.batch.id, MON);
+    const left = (await tasksFor(a.coachUser)).items.filter((t) => t.kind === 'check-in');
+    expect(left).toHaveLength(2);
   });
 });

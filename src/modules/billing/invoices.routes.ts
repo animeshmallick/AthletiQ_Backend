@@ -1,9 +1,9 @@
-import { and, count, eq, gte, ilike, lt, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, count, eq, gte, ilike, inArray, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { invoices, payments, students } from '../../db/schema/index.js';
-import { todayInAppTz } from '../../lib/dates.js';
+import { batches, invoices, payments, students } from '../../db/schema/index.js';
+import { addDays, addMonthsClamped, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok, pageMeta } from '../../lib/http.js';
 import {
@@ -25,6 +25,7 @@ import {
   invoiceScope,
   invoiceSortSql,
   invoicePdfData,
+  type InvoiceSort,
 } from './invoices.service.js';
 import { activeAdminIds, notifyInBackground, notifyUsers } from '../push/push.service.js';
 import { formatInr } from '../../lib/money.js';
@@ -41,7 +42,23 @@ const ListQuery = zPagination.extend({
   from: zIsoDate.optional(),
   to: zIsoDate.optional(),
   search: z.string().trim().max(100).optional(),
-  sort: z.enum(['issueDateDesc', 'dueDateAsc', 'amountDesc']).default('issueDateDesc'),
+  /** Of the invoice's batch. */
+  sportId: zId.optional(),
+  locationId: zId.optional(),
+  feePlanId: zId.optional(),
+  /** Billing month: invoices whose period starts in it ("2026-10"). */
+  month: z
+    .string()
+    .regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Use YYYY-MM')
+    .optional(),
+  /** Unpaid and past due by this many days. */
+  overdueBy: z.enum(['1-30', '31-60', '60+']).optional(),
+  /** Paise. */
+  amountMin: z.coerce.number().int().min(0).optional(),
+  amountMax: z.coerce.number().int().min(0).optional(),
+  sort: z
+    .enum(Object.keys(invoiceSortSql) as [InvoiceSort, ...InvoiceSort[]])
+    .default('issueDateDesc'),
 });
 
 invoicesRouter.get('/', async (req, res) => {
@@ -62,6 +79,36 @@ invoicesRouter.get('/', async (req, res) => {
   if (q.coachId) filters.push(eq(invoices.coachId, q.coachId));
   if (q.from) filters.push(gte(invoices.issueDate, q.from));
   if (q.to) filters.push(lte(invoices.issueDate, q.to));
+  if (q.feePlanId) filters.push(eq(invoices.feePlanId, q.feePlanId));
+  if (q.sportId || q.locationId)
+    filters.push(
+      inArray(
+        invoices.batchId,
+        db
+          .select({ id: batches.id })
+          .from(batches)
+          .where(
+            and(
+              q.sportId ? eq(batches.sportId, q.sportId) : undefined,
+              q.locationId ? eq(batches.locationId, q.locationId) : undefined,
+            ),
+          ),
+      ),
+    );
+  if (q.month) {
+    const first = `${q.month}-01`;
+    filters.push(
+      gte(invoices.periodStart, first),
+      lt(invoices.periodStart, addMonthsClamped(first, 1)),
+    );
+  }
+  if (q.overdueBy) {
+    const [lo, hi] = { '1-30': [1, 30], '31-60': [31, 60], '60+': [61, null] }[q.overdueBy];
+    filters.push(eq(invoices.status, 'due'), lte(invoices.dueDate, addDays(today, -lo!)));
+    if (hi) filters.push(gte(invoices.dueDate, addDays(today, -hi)));
+  }
+  if (q.amountMin !== undefined) filters.push(gte(invoices.totalAmount, q.amountMin));
+  if (q.amountMax !== undefined) filters.push(lte(invoices.totalAmount, q.amountMax));
   if (q.search) {
     const term = `%${q.search}%`;
     filters.push(

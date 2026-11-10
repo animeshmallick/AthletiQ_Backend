@@ -99,11 +99,13 @@ async function sessionTasks(user: AuthUser, now: Date): Promise<Task[]> {
           link: admin ? `/calendar?date=${today}&view=day` : '/',
           screen: admin ? '/calendar' : '/',
         });
-      } else if (!admin && mins >= start - 15) {
+      } else if (!admin) {
+        // Every session today needs its own check-in: "now" from 15 minutes before it starts,
+        // "later today" before that.
         tasks.push({
           id: `check-in:${b.id}:${today}`,
           kind: 'check-in',
-          severity: 'warning',
+          severity: mins >= start - 15 ? 'warning' : 'info',
           title: `Check in to ${b.name}`,
           detail: `${mins < start ? `Starts at ${at}` : `Started at ${at}`} · ${b.location.name}`,
           link: '/',

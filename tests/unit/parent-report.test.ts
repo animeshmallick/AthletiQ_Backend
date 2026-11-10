@@ -4,11 +4,6 @@ import type { StudentReport } from '../../src/modules/reports/report-data';
 import type { Framework } from '../../src/modules/skills/framework';
 import type { AssessmentView } from '../../src/modules/skills/progress';
 
-const PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
-  'base64',
-);
-
 function framework(areas: number): Framework {
   return {
     sport: { id: 's', name: 'Badminton', isActive: true },
@@ -142,16 +137,12 @@ const academy = {
   createdAt: new Date(),
   updatedAt: new Date(),
 };
-const render = (r: StudentReport, photo: Buffer | null = null) =>
-  renderParentReportPdf(r, academy, {
-    scope: 'All batches',
-    generated: '9 Nov 2026',
-    photo: photo ? { data: photo } : null,
-  });
+const render = (r: StudentReport) =>
+  renderParentReportPdf(r, academy, { scope: 'All batches', generated: '9 Nov 2026' });
 const pages = (pdf: Buffer) => (pdf.toString('latin1').match(/\/Type \/Page\b/g) ?? []).length;
 
 describe('parent report PDF', () => {
-  it('renders a full report: photo, skills over months, coach remarks, attendance and fees', async () => {
+  it('renders a full report: skills over months, coach remarks, attendance and fees', async () => {
     const f = framework(6);
     const months = ['2026-06-01', '2026-07-01', '2026-08-01', '2026-09-01'];
     const assessments = months.map((m, i) =>
@@ -227,7 +218,6 @@ describe('parent report PDF', () => {
         },
         skills: [{ framework: f, batchId: 'b', batchName: 'Evening', assessments }],
       }),
-      PNG,
     );
     expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
     expect(pages(pdf)).toBeGreaterThanOrEqual(3);
@@ -278,10 +268,9 @@ describe('parent report PDF', () => {
     );
   });
 
-  it('explains that assessments are coming when there are none, and tolerates a bad photo', async () => {
+  it('explains that assessments are coming when there are none', async () => {
     const pdf = await render(
       report({ fees: { ...report().fees, invoicesCount: 1, outstanding: 100000, invoices: [] } }),
-      Buffer.from('not an image'),
     );
     expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
   });

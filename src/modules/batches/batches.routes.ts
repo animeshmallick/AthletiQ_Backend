@@ -23,6 +23,7 @@ import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
 import { coveringNowOrLater, myCoverage } from '../substitutions/coverage.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import { batchInsights } from './insights.js';
 import { currentMembers, expectedRoster } from './roster.js';
 import { noticeBatchAssigned, noticeBatchChanged } from '../push/coach-notices.js';
 import { notifyInBackground } from '../push/push.service.js';
@@ -122,6 +123,24 @@ batchesRouter.get('/:id', async (req, res) => {
     .leftJoin(members, eq(members.batchId, batches.id))
     .where(eq(batches.id, id));
   ok(res, { ...row, members: await currentMembers(id) });
+});
+
+/**
+ * The batch details page: students with attendance, fees, level and tenure; attendance trend,
+ * sessions, coach punctuality and skills; fee totals for admins only.
+ */
+batchesRouter.get('/:id/insights', async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const user = currentUser(req);
+  const b = await assertBatchAccess(user, id);
+  const plan = await db.query.feePlans.findFirst({ where: eq(feePlans.id, b.feePlanId) });
+  ok(
+    res,
+    await batchInsights(
+      { ...b, feePlanMonthlyFee: plan?.monthlyFee ?? 0 },
+      { includeMoney: isAdmin(user) },
+    ),
+  );
 });
 
 /** Students expected at the session on `date` (defaults to today). */

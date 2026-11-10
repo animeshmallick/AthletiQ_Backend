@@ -371,7 +371,7 @@ function cover(
   r: StudentReport,
   academy: AcademySettings,
   sp: SportProgress | null,
-  opts: { scope: string; generated: string; photo?: { data: Buffer } | null },
+  opts: { scope: string; generated: string },
 ) {
   const s = r.student;
   // Header band with soft decoration.
@@ -422,20 +422,7 @@ function cover(
   const pcx = px + pr;
   const pcy = cy + ch / 2;
   doc.circle(pcx, pcy, pr + 3).fill(C.brandSoft);
-  if (opts.photo) {
-    doc.save();
-    doc.circle(pcx, pcy, pr).clip();
-    try {
-      doc.image(opts.photo.data, pcx - pr, pcy - pr, {
-        cover: [pr * 2, pr * 2],
-        align: 'center',
-        valign: 'center',
-      });
-    } catch {
-      doc.rect(pcx - pr, pcy - pr, pr * 2, pr * 2).fill(C.brand);
-    }
-    doc.restore();
-  } else {
+  {
     doc.circle(pcx, pcy, pr).fill(C.brand);
     const initials = s.fullName
       .split(/\s+/)
@@ -1159,7 +1146,7 @@ function frame(doc: Doc, academy: AcademySettings, studentName: string): Promise
 export async function renderParentReportPdf(
   r: StudentReport,
   academy: AcademySettings,
-  opts: { scope: string; generated: string; photo?: { data: Buffer } | null },
+  opts: { scope: string; generated: string },
 ) {
   const doc = new PDFDocument({
     size: 'A4',

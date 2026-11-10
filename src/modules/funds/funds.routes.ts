@@ -15,6 +15,9 @@ import {
   type SQL,
 } from 'drizzle-orm';
 import { Router } from 'express';
+import { getAcademySettings } from '../settings/settings.js';
+import { payeeInsights, payeeSummaries } from './payee-insights.js';
+import { renderPayeeStatement } from './payee-statement-pdf.js';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import {
@@ -103,6 +106,42 @@ const PayeeBody = z.object({
 
 fundsRouter.get('/payees', requireAdmin, async (_req, res) => {
   ok(res, await db.select().from(payees).orderBy(desc(payees.isActive), asc(payees.name)));
+});
+
+const PeriodQuery = z
+  .object({ from: zIsoDate.optional(), to: zIsoDate.optional() })
+  .refine((q) => !q.from || !q.to || q.from <= q.to, { message: 'From must be before to' });
+
+/** Payees with what they're owed, earned and paid (the Payees page list). */
+fundsRouter.get('/payees/summary', requireAdmin, async (req, res) => {
+  const period = parse(PeriodQuery, req.query);
+  const list = await payeeSummaries(period);
+  list.sort(
+    (a, b) =>
+      Number(b.isActive) - Number(a.isActive) ||
+      b.owedNow - a.owedNow ||
+      a.name.localeCompare(b.name),
+  );
+  ok(res, list);
+});
+
+/** Everything about one payee: totals, monthly trend, sources, plans, expected share, history. */
+fundsRouter.get('/payees/:id/insights', requireAdmin, async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  ok(res, await payeeInsights(id, parse(PeriodQuery, req.query)));
+});
+
+/** Downloadable statement for a period. */
+fundsRouter.get('/payees/:id/statement', requireAdmin, async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const data = await payeeInsights(id, parse(PeriodQuery, req.query));
+  const pdf = await renderPayeeStatement(data, await getAcademySettings());
+  const slug = data.payee.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
+  res
+    .type('application/pdf')
+    .setHeader('Content-Disposition', `inline; filename="Statement-${slug}.pdf"`)
+    .setHeader('Cache-Control', 'private, no-store')
+    .send(pdf);
 });
 
 fundsRouter.get('/payable', async (req, res) => {

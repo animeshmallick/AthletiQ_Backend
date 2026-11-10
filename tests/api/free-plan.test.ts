@@ -63,3 +63,53 @@ describe('the built-in free plan', () => {
     expect(list.find((p: { isSystem: boolean }) => p.isSystem).name).toBe('Free (no fee)');
   });
 });
+
+describe('excluding free students from the students list', () => {
+  it('leaves out students whose every current batch costs nothing', async () => {
+    const { admin, coach, location, batch, plan } = await makeAcademy();
+    const api = await as(admin);
+    const free = (await api.get('/api/v1/fee-plans?forBatch=true').expect(200)).body.data[0];
+    const freeBatch = (
+      await api
+        .post('/api/v1/batches', {
+          name: 'Free Morning',
+          coachId: coach.id,
+          locationId: location.id,
+          weekdays: [6],
+          startTime: '07:00',
+          endTime: '08:00',
+          capacity: 30,
+          sportId: batch.sportId,
+          feePlanId: free.id,
+        })
+        .expect(201)
+    ).body.data;
+    const mk = (fullName: string, batchId: string, extra = {}) =>
+      makeStudent(
+        { fullName, batchId, feePlanId: batchId === batch.id ? plan.id : undefined, ...extra },
+        admin.id,
+      );
+    await mk('Only Free', freeBatch.id);
+    await mk('Paying', batch.id);
+    // Paid batch with a 100% discount: effectively free.
+    await mk('Discounted', batch.id, { monthlyDiscount: plan.monthlyFee });
+    const both = await mk('Both', freeBatch.id);
+    await api
+      .post(`/api/v1/students/${both.id}/batches`, {
+        batchId: batch.id,
+        effectiveFrom: both.joiningDate,
+      })
+      .expect(201);
+
+    const names = async (q: string) =>
+      (
+        (await api.get(`/api/v1/students?pageSize=100${q}`).expect(200)).body.data as {
+          fullName: string;
+        }[]
+      )
+        .map((s) => s.fullName)
+        .sort();
+    expect(await names('')).toEqual(['Both', 'Discounted', 'Only Free', 'Paying']);
+    expect(await names('&dues=paying')).toEqual(['Both', 'Paying']);
+  });
+});

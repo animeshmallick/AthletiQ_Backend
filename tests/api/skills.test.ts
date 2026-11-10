@@ -270,35 +270,6 @@ describe('monthly assessments', () => {
   });
 });
 
-describe('student photos', () => {
-  it('stores a real JPEG or PNG for people who can see the student', async () => {
-    const s = await setup();
-    const png = Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
-      'base64',
-    );
-    await s.c
-      .put(`/api/v1/students/${s.asha.id}/photo`, { data: png.toString('base64') })
-      .expect(200);
-    const got = await s.c
-      .get(`/api/v1/students/${s.asha.id}/photo`)
-      .buffer(true)
-      .parse(binary)
-      .expect(200);
-    expect(got.headers['content-type']).toBe('image/png');
-    await s.c
-      .put(`/api/v1/students/${s.asha.id}/photo`, {
-        data: Buffer.from('<svg onload=alert(1)>').toString('base64'),
-      })
-      .expect(422);
-    await (await as(s.otherCoach)).get(`/api/v1/students/${s.asha.id}/photo`).expect(404);
-    const sheet = (await s.c.get(`/api/v1/skills/batches/${s.batch.id}`).expect(200)).body.data;
-    expect(sheet.students[0].hasPhoto).toBe(true);
-    await s.c.delete(`/api/v1/students/${s.asha.id}/photo`).expect(200);
-    await s.c.get(`/api/v1/students/${s.asha.id}/photo`).expect(404);
-  });
-});
-
 describe('registration numbers and report links', () => {
   it('gives every student a registration number, shown only on the profile', async () => {
     const s = await setup();
@@ -482,7 +453,7 @@ describe('framework edge cases', () => {
       .expect(422);
   });
 
-  it('limits batch reports to the coach’s own batches and checks photo size', async () => {
+  it('limits batch reports to the coach’s own batches', async () => {
     const s = await setup();
     await s.c
       .get(`/api/v1/reports/students/${s.asha.id}/pdf?batchId=${s.batch.id}`)
@@ -492,13 +463,6 @@ describe('framework edge cases', () => {
     await s.c
       .get(`/api/v1/reports/students/${s.asha.id}/pdf?batchId=${s.otherBatch.id}`)
       .expect(422);
-    const big = Buffer.alloc(450 * 1024, 0xff);
-    big[0] = 0xff;
-    big[1] = 0xd8;
-    big[2] = 0xff;
-    await s.c
-      .put(`/api/v1/students/${s.asha.id}/photo`, { data: big.toString('base64') })
-      .expect(400);
     await (
       await as(s.admin)
     )

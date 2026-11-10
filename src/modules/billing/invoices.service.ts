@@ -201,6 +201,13 @@ export async function buildShare(inv: InvoiceDetail) {
 
 export const invoiceSortSql = {
   issueDateDesc: sql`${invoices.issueDate} desc, ${invoices.number} desc`,
+  issueDateAsc: sql`${invoices.issueDate} asc, ${invoices.number} asc`,
   dueDateAsc: sql`${invoices.dueDate} asc, ${invoices.number} asc`,
-  amountDesc: sql`${invoices.totalAmount} desc`,
+  dueDateDesc: sql`${invoices.dueDate} desc, ${invoices.number} desc`,
+  amountDesc: sql`${invoices.totalAmount} desc, ${invoices.number} asc`,
+  amountAsc: sql`${invoices.totalAmount} asc, ${invoices.number} asc`,
+  studentAsc: sql`lower(${students.fullName}) asc, ${invoices.issueDate} asc`,
+  numberAsc: sql`${invoices.number} asc`,
+  numberDesc: sql`${invoices.number} desc`,
 };
+export type InvoiceSort = keyof typeof invoiceSortSql;

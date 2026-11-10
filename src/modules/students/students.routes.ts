@@ -1,3 +1,4 @@
+import type { AuthUser } from '../auth/auth.types.js';
 import {
   and,
   asc,
@@ -12,6 +13,7 @@ import {
   or,
   sql,
   type SQL,
+  gte,
 } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -26,8 +28,9 @@ import {
   students,
   users,
   weeklyFeedback,
+  skillAssessments,
 } from '../../db/schema/index.js';
-import { isoWeekday, minDate, onDay, todayInAppTz } from '../../lib/dates.js';
+import { isoWeekday, minDate, onDay, todayInAppTz, addDays } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok, pageMeta } from '../../lib/http.js';
 import {
@@ -67,7 +70,9 @@ const ListQuery = zPagination.extend({
   coachId: zId.optional(),
   feePlanId: zId.optional(),
   /** Only students with unpaid ("outstanding") or past-due ("overdue") invoices. */
-  dues: z.enum(['outstanding', 'overdue']).optional(),
+  /** outstanding/overdue: has unpaid invoices. paying: leaves out students whose every current
+   *  batch is free (₹0 after their own fee and discount). */
+  dues: z.enum(['outstanding', 'overdue', 'paying']).optional(),
   sort: z.enum(['name', 'joiningDate', 'recent', 'dues']).default('name'),
 });
 
@@ -104,7 +109,16 @@ studentsRouter.get('/', async (req, res) => {
     );
   }
   const today = todayInAppTz();
-  if (q.dues) {
+  if (q.dues === 'paying') {
+    // Only free memberships = has a current batch, and none of them costs anything.
+    const open = sql`select 1 from ${enrollments} e join ${batches} b on b.id = e.batch_id
+      join ${feePlans} f on f.id = b.fee_plan_id
+      where e.student_id = ${students.id} and e.effective_to is null`;
+    filters.push(
+      sql`not (exists (${open}) and not exists (${open}
+        and greatest(coalesce(e.custom_monthly_fee, f.monthly_fee) - e.monthly_discount, 0) > 0))`,
+    );
+  } else if (q.dues) {
     filters.push(
       inArray(
         students.id,
@@ -216,8 +230,53 @@ studentsRouter.get('/', async (req, res) => {
     db.select({ total: count() }).from(students).where(where),
   ]);
 
-  ok(res, rows, pageMeta(q.page, q.pageSize, total));
+  ok(res, await withCardStats(user, rows), pageMeta(q.page, q.pageSize, total));
 });
+
+/**
+ * For the student cards: attendance over the last 30 days (in the batches the user can see) and
+ * the latest assessed level. One query each for the page of students.
+ */
+async function withCardStats<T extends { id: string }>(user: AuthUser, rows: T[]) {
+  const ids = rows.map((r) => r.id);
+  if (!ids.length) return [];
+  const from = addDays(todayInAppTz(), -29);
+  const own = isAdmin(user)
+    ? undefined
+    : inArray(
+        studentAttendance.batchId,
+        db.select({ id: batches.id }).from(batches).where(eq(batches.coachId, user.id)),
+      );
+  const [att, lvl] = await Promise.all([
+    db
+      .select({
+        studentId: studentAttendance.studentId,
+        marked: sql<number>`count(*)::int`,
+        present: sql<number>`count(*) filter (where ${studentAttendance.status} in ('present', 'late'))::int`,
+      })
+      .from(studentAttendance)
+      .where(and(inArray(studentAttendance.studentId, ids), gte(studentAttendance.date, from), own))
+      .groupBy(studentAttendance.studentId),
+    db
+      .selectDistinctOn([skillAssessments.studentId], {
+        studentId: skillAssessments.studentId,
+        code: skillAssessments.levelCode,
+        name: skillAssessments.levelName,
+      })
+      .from(skillAssessments)
+      .where(inArray(skillAssessments.studentId, ids))
+      .orderBy(skillAssessments.studentId, desc(skillAssessments.month)),
+  ]);
+  return rows.map((r) => {
+    const a = att.find((x) => x.studentId === r.id);
+    const l = lvl.find((x) => x.studentId === r.id);
+    return {
+      ...r,
+      attendanceRate: a?.marked ? Math.round((a.present * 100) / a.marked) : null,
+      level: l ? { code: l.code, name: l.name } : null,
+    };
+  });
+}
 
 studentsRouter.get('/:id', async (req, res) => {
   const { id } = parse(zIdParam, req.params);

@@ -27,7 +27,6 @@ import { makeupsRouter } from './modules/makeups/makeups.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { reportsRouter } from './modules/reports/reports.routes.js';
 import { fundsRouter } from './modules/funds/funds.routes.js';
-import { photosRouter } from './modules/skills/photos.routes.js';
 import { skillsRouter } from './modules/skills/skills.routes.js';
 import { sportsRouter } from './modules/skills/sports.routes.js';
 
@@ -48,7 +47,6 @@ export function apiRouter(): Router {
   api.use('/batches', batchesRouter);
   api.use('/fee-plans', feePlansRouter);
   api.use('/students', studentsRouter);
-  api.use('/students', photosRouter);
   api.use('/sports', sportsRouter);
   api.use('/skills', skillsRouter);
   api.use('/attendance', attendanceRouter);

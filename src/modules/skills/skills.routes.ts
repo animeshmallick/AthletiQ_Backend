@@ -18,7 +18,6 @@ import {
   skillAssessments,
   skillRatings,
   sports,
-  studentPhotos,
   students,
   users,
 } from '../../db/schema/index.js';
@@ -76,7 +75,7 @@ skillsRouter.get('/batches/:id', async (req, res) => {
   );
   const ids = roster.map((s) => s.id);
 
-  const [assessments, photos] = await Promise.all([
+  const [assessments] = await Promise.all([
     ids.length
       ? db
           .select()
@@ -89,12 +88,6 @@ skillsRouter.get('/batches/:id', async (req, res) => {
             ),
           )
           .orderBy(desc(skillAssessments.month))
-      : [],
-    ids.length
-      ? db
-          .select({ id: studentPhotos.studentId })
-          .from(studentPhotos)
-          .where(inArray(studentPhotos.studentId, ids))
       : [],
   ]);
   const ratings = assessments.length
@@ -133,7 +126,6 @@ skillsRouter.get('/batches/:id', async (req, res) => {
       const previous = mine.find((a) => a.month < month);
       return {
         ...s,
-        hasPhoto: photos.some((p) => p.id === s.id),
         current: current ? view(current) : null,
         previous: previous ? view(previous) : null,
       };
