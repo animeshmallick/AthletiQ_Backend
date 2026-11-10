@@ -155,6 +155,13 @@
       "when": 1794330042917,
       "tag": "0021_batch_plans",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1794337396596,
+      "tag": "0022_drop_old_lesson_tables",
+      "breakpoints": true
     }
   ]
 }
