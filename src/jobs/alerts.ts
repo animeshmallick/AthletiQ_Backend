@@ -62,6 +62,9 @@ export async function runSessionAlerts(now: Date = new Date()) {
     if (!s.coachSession && mins >= start - 15 && mins < start) {
       if (
         await notifyOnce(`remind:${b.id}:${today}`, [b.coach.id], {
+          category: 'sessions',
+          icon: '⏰',
+          actions: [{ label: 'Check in', link: '/' }],
           title: `${b.name} starts at ${at}`,
           body: `In ${start - mins} min at ${b.location.name}. Check in when you arrive.`,
           link: '/',
@@ -73,12 +76,17 @@ export async function runSessionAlerts(now: Date = new Date()) {
 
     if (!s.coachSession && mins >= start + 30 && mins < end) {
       const coach = await notifyOnce(`nocheckin-coach:${b.id}:${today}`, [b.coach.id], {
+        category: 'sessions',
+        icon: '📍',
+        actions: [{ label: 'Check in now', link: '/' }],
         title: `You haven't checked in to ${b.name}`,
         body: `It started at ${at}. Check in at ${b.location.name} so attendance can be marked.`,
         link: '/',
         tag: `session-${b.id}`,
       });
       const admin = await notifyOnce(`nocheckin-admin:${b.id}:${today}`, admins, {
+        category: 'sessions',
+        icon: '⚠️',
         title: `${b.coach.name} hasn't checked in`,
         body: `${b.name} started at ${at} · ${b.location.name}`,
         link: `/calendar?date=${today}&view=day`,
@@ -97,12 +105,17 @@ export async function runSessionAlerts(now: Date = new Date()) {
       if (!s.hasLessonPlan) pending.push('no lesson plan');
       if (pending.length) {
         const coach = await notifyOnce(`wrapup-coach:${b.id}:${today}`, [b.coach.id], {
+          category: 'sessions',
+          icon: '📝',
+          actions: [{ label: 'Finish up', link: attendanceLink }],
           title: `${b.name}: ${pending.length} thing${pending.length === 1 ? '' : 's'} left for today`,
           body: pending.join(' · '),
           link: attendanceLink,
           tag: `wrapup-${b.id}`,
         });
         const admin = await notifyOnce(`wrapup-admin:${b.id}:${today}`, admins, {
+          category: 'sessions',
+          icon: '📝',
           title: `${b.name} (${b.coach.name}) has pending items`,
           body: pending.join(' · '),
           link: `/calendar?date=${today}&view=day`,
@@ -143,6 +156,8 @@ export async function sendAdminDigest(now: Date = new Date()) {
     overdue!.n ? `${overdue!.n} overdue invoice${overdue!.n === 1 ? '' : 's'}` : null,
   ].filter(Boolean);
   const sent = await notifyOnce(`digest:${today}`, await activeAdminIds(), {
+    category: 'summaries',
+    icon: '📊',
     title: 'Today at the academy',
     body: parts.join(' · '),
     link: '/',
@@ -166,6 +181,9 @@ export async function sendFeedbackReminders() {
     if (!open) continue;
     if (
       await notifyOnce(`feedback:${c.id}:${weekStart}`, [c.id], {
+        category: 'summaries',
+        icon: '✍️',
+        actions: [{ label: 'Write reports', link: '/feedback' }],
         title: `${open} weekly report${open === 1 ? '' : 's'} to send`,
         body: 'Last week is done. Parents are waiting to hear how it went.',
         link: '/feedback',
@@ -219,6 +237,8 @@ export async function sendOverdueNotices(now: Date = new Date()) {
     const list = [...names.values()];
     const [first] = [...names.keys()];
     await notifyUsers([coachId], {
+      category: 'money',
+      icon: '💸',
       title:
         list.length === 1
           ? `${list[0]}'s fees are over a week overdue`
@@ -272,6 +292,8 @@ export async function sendWeeklyFeesSummary(now: Date = new Date()) {
       .where(and(eq(invoices.status, 'due'), lt(invoices.dueDate, today))),
   ]);
   const sent = await notifyOnce(`fees-week:${from}`, await activeAdminIds(), {
+    category: 'summaries',
+    icon: '💰',
     title: `Last week: ${formatInr(paid!.total)} collected`,
     body: [
       `${paid!.n} payment${paid!.n === 1 ? '' : 's'}`,

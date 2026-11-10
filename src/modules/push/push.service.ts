@@ -1,7 +1,7 @@
-import { arrayContains, and, eq, inArray } from 'drizzle-orm';
+import { arrayContains, and, count, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
 import { env } from '../../config/env.js';
 import { db } from '../../db/client.js';
-import { deviceTokens, notificationLog, users } from '../../db/schema/index.js';
+import { deviceTokens, notificationLog, notifications, users } from '../../db/schema/index.js';
 import { logger } from '../../lib/logger.js';
 import { createFcmSender, parseServiceAccount, type PushMessage, type PushSender } from './fcm.js';
 
@@ -59,20 +59,84 @@ export async function unregisterDevice(userId: string, token: string) {
     .where(and(eq(deviceTokens.userId, userId), eq(deviceTokens.token, token)));
 }
 
-/** Sends to every device of the given users; prunes tokens FCM reports as gone. */
-export async function notifyUsers(userIds: string[], message: PushMessage) {
-  const send = getSender();
-  if (!send || userIds.length === 0) return { sent: 0, removed: 0 };
+const KEEP_DAYS = 60;
+
+/** The title as people see it: the icon (emoji) first. */
+export const withIcon = (m: Pick<PushMessage, 'icon' | 'title'>) =>
+  m.icon ? `${m.icon} ${m.title}` : m.title;
+
+/**
+ * Saves the notification to each person's in-app inbox (a newer one with the same tag replaces
+ * an unread older one). Returns each person's inbox id.
+ */
+async function saveToInbox(userIds: string[], m: PushMessage) {
+  if (m.tag)
+    await db
+      .delete(notifications)
+      .where(
+        and(
+          inArray(notifications.userId, userIds),
+          eq(notifications.tag, m.tag),
+          isNull(notifications.readAt),
+        ),
+      );
   const rows = await db
-    .select({ token: deviceTokens.token })
-    .from(deviceTokens)
-    .where(inArray(deviceTokens.userId, [...new Set(userIds)]));
+    .insert(notifications)
+    .values(
+      userIds.map((userId) => ({
+        userId,
+        category: m.category,
+        title: withIcon(m),
+        body: m.body,
+        link: m.link ?? null,
+        tag: m.tag ?? null,
+      })),
+    )
+    .returning({ id: notifications.id, userId: notifications.userId });
+  if (Math.random() < 0.02)
+    await db
+      .delete(notifications)
+      .where(lt(notifications.createdAt, sql`now() - make_interval(days => ${KEEP_DAYS})`));
+  return new Map(rows.map((r) => [r.userId, r.id]));
+}
+
+/** Unread inbox counts, for the app icon badge. */
+async function unreadCounts(userIds: string[]) {
+  const rows = await db
+    .select({ userId: notifications.userId, n: count() })
+    .from(notifications)
+    .where(and(inArray(notifications.userId, userIds), isNull(notifications.readAt)))
+    .groupBy(notifications.userId);
+  return new Map(rows.map((r) => [r.userId, Number(r.n)]));
+}
+
+/**
+ * Notifies people: saved to their in-app inbox, then pushed to every device they're signed in on
+ * (with their unread count as the app badge). Prunes tokens FCM reports as gone.
+ */
+export async function notifyUsers(userIds: string[], message: PushMessage) {
+  const ids = [...new Set(userIds)];
+  if (ids.length === 0) return { sent: 0, removed: 0 };
+  const inbox = await saveToInbox(ids, message);
+  const send = getSender();
+  if (!send) return { sent: 0, removed: 0 };
+  const [rows, unread] = await Promise.all([
+    db
+      .select({ token: deviceTokens.token, userId: deviceTokens.userId })
+      .from(deviceTokens)
+      .where(inArray(deviceTokens.userId, ids)),
+    unreadCounts(ids),
+  ]);
   let sent = 0;
   const dead: string[] = [];
   await Promise.all(
-    rows.map(async ({ token }) => {
+    rows.map(async ({ token, userId }) => {
       try {
-        const result = await send(token, message);
+        const result = await send(token, {
+          ...message,
+          badge: unread.get(userId) ?? 0,
+          notificationId: inbox.get(userId),
+        });
         if (result === 'ok') sent++;
         else if (result === 'invalid-token') dead.push(token);
       } catch (err) {
@@ -97,7 +161,7 @@ export async function activeAdminIds(): Promise<string[]> {
  * The key is claimed before sending, so concurrent runs or restarts never double-notify.
  */
 export async function notifyOnce(key: string, userIds: string[], message: PushMessage) {
-  if (!getSender() || userIds.length === 0) return false;
+  if (userIds.length === 0) return false;
   const claimed = await db
     .insert(notificationLog)
     .values({ key })
@@ -109,7 +173,6 @@ export async function notifyOnce(key: string, userIds: string[], message: PushMe
 }
 
 export async function notifyAdmins(message: PushMessage) {
-  if (!getSender()) return { sent: 0, removed: 0 };
   const admins = await db
     .select({ id: users.id })
     .from(users)
@@ -122,6 +185,43 @@ export async function notifyAdmins(message: PushMessage) {
 
 /** Fire-and-forget from request handlers: a notification problem never fails or delays a request. */
 export function notifyInBackground(task: () => Promise<unknown>): void {
-  if (!getSender()) return;
   task().catch((err: unknown) => logger.warn({ err }, 'Notification failed'));
+}
+
+// ─── Inbox ───────────────────────────────────────────────────────────────────
+
+/** A person's latest notifications and how many are unread. */
+export async function inboxFor(userId: string, limit = 50) {
+  const [items, unread] = await Promise.all([
+    db
+      .select({
+        id: notifications.id,
+        category: notifications.category,
+        title: notifications.title,
+        body: notifications.body,
+        link: notifications.link,
+        readAt: notifications.readAt,
+        createdAt: notifications.createdAt,
+      })
+      .from(notifications)
+      .where(eq(notifications.userId, userId))
+      .orderBy(sql`${notifications.createdAt} desc`)
+      .limit(limit),
+    unreadCounts([userId]),
+  ]);
+  return { items, unread: unread.get(userId) ?? 0 };
+}
+
+/** Marks some (or all) of a person's notifications read. */
+export async function markRead(userId: string, ids?: string[]) {
+  await db
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(
+      and(
+        eq(notifications.userId, userId),
+        isNull(notifications.readAt),
+        ids ? inArray(notifications.id, ids) : undefined,
+      ),
+    );
 }

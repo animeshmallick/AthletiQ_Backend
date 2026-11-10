@@ -176,6 +176,13 @@
       "when": 1794341543606,
       "tag": "0024_client_events",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1794343138611,
+      "tag": "0025_notification_inbox",
+      "breakpoints": true
     }
   ]
 }

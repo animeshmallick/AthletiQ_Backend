@@ -148,8 +148,11 @@ publicRegistrationRouter.post('/student', registrationLimiter, async (req, res) 
 
   notifyInBackground(() =>
     notifyAdmins({
-      title: 'New registration',
-      body: `${body.fullName} wants to join as a student`,
+      category: 'approvals',
+      icon: '🙋',
+      actions: [{ label: 'Review', link: '/registrations' }],
+      title: 'New student sign-up',
+      body: `${body.fullName} wants to join. Review and pick a batch.`,
       link: '/registrations',
       tag: 'registrations',
     }),
@@ -213,8 +216,11 @@ publicRegistrationRouter.post('/coach', registrationLimiter, async (req, res) =>
 
   notifyInBackground(() =>
     notifyAdmins({
-      title: 'New registration',
-      body: `${body.fullName} wants to join as a coach`,
+      category: 'approvals',
+      icon: '🧑‍🏫',
+      actions: [{ label: 'Review', link: '/registrations' }],
+      title: 'New coach sign-up',
+      body: `${body.fullName} wants to join the team. Review the request.`,
       link: '/registrations',
       tag: 'registrations',
     }),

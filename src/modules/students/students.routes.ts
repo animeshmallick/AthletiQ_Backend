@@ -745,8 +745,11 @@ studentsRouter.post('/:id/makeups', async (req, res) => {
   } else {
     notifyInBackground(() =>
       notifyAdmins({
-        title: 'Makeup request',
-        body: `${s.fullName} → ${batch.name} ${onDay(body.date)} · requested by ${user.name}`,
+        category: 'approvals',
+        icon: '🔁',
+        actions: [{ label: 'Review', link: '/makeups' }],
+        title: `Makeup request for ${s.fullName}`,
+        body: `${batch.name} ${onDay(body.date)} · asked by ${user.name}. Approve or decline.`,
         link: '/makeups',
         tag: 'makeups',
       }),

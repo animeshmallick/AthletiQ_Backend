@@ -406,7 +406,11 @@ describe('coach notices', () => {
       .post(`/api/v1/students/${s.id}/makeups`, { batchId: batch.id, date: '2026-03-17' })
       .expect(201);
     await settle(sent, 2);
-    expect(sent[0]!.message.title).toBe('Makeup request');
+    expect(sent[0]!.message.title).toMatch(/^Makeup request for /);
+    expect(sent[0]!.message).toMatchObject({
+      category: 'approvals',
+      actions: [{ label: 'Review', link: '/makeups' }],
+    });
     const adminApi = await as(admin);
     await adminApi.post(`/api/v1/makeups/${r1.body.data.id}/approve`).expect(200);
     await settle(sent, 3);

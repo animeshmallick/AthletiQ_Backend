@@ -280,6 +280,9 @@ invoicesRouter.post('/:id/payments', async (req, res) => {
   notifyInBackground(async () => {
     const admins = (await activeAdminIds()).filter((a) => a !== user.id);
     await notifyUsers(admins, {
+      category: 'money',
+      icon: '💰',
+      actions: [{ label: 'View invoice', link: `/finance?tab=invoices&status=paid&invoice=${id}` }],
       title: `Fee received · ${formatInr(paid.totalAmount)}`,
       body: `${paid.student.fullName} · ${body.mode.toUpperCase()} · received by ${user.name}`,
       link: `/finance?tab=invoices&status=paid&invoice=${id}`,

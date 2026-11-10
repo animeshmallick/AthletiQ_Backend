@@ -122,6 +122,8 @@ makeupsRouter.post('/:id/approve', async (req, res) => {
     notifyUsers(
       [m.createdById, batch.coachId].filter((x): x is string => !!x),
       {
+        category: 'students',
+        icon: '✅',
         title: 'Makeup approved',
         body: `${student?.fullName ?? 'Student'} · ${batch.name} ${onDay(m.date)}`,
         link: `/attendance?batch=${batch.id}&date=${m.date}`,
@@ -158,6 +160,8 @@ makeupsRouter.post('/:id/reject', async (req, res) => {
     const to = m.createdById;
     notifyInBackground(() =>
       notifyUsers([to], {
+        category: 'students',
+        icon: '❌',
         title: 'Makeup not approved',
         body: `${student?.fullName ?? 'Student'} ${onDay(m.date)}: ${reason}`,
         link: `/students/${m.studentId}`,

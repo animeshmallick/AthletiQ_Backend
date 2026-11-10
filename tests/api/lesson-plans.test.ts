@@ -313,3 +313,50 @@ describe('lesson plan to-dos', () => {
     });
   });
 });
+
+describe('lesson plan insights', () => {
+  it('counts held sessions filled in per batch, the drills used and what is still open', async () => {
+    setToday('2026-03-11'); // Wednesday
+    const { coach, admin, batch, otherCoach } = await makeAcademy();
+    const api = await as(coach);
+    await api.put('/api/v1/lessons/batch-plan', { batchId: batch.id, blocks: PLAN }).expect(200);
+    // Monday filled in; Tuesday cancelled; Wednesday not filled yet.
+    await api
+      .put('/api/v1/lessons/session', {
+        batchId: batch.id,
+        date: '2026-03-09',
+        blocks: [
+          { name: 'Warm-up', minutes: 20, drills: [{ name: 'Skipping' }, { name: 'Jogging' }] },
+          { name: 'Ball drills', minutes: 100, drills: [{ name: 'skipping ' }] },
+        ],
+      })
+      .expect(204);
+    await api
+      .post(`/api/v1/batches/${batch.id}/cancellations`, { date: '2026-03-10', reason: 'Rain' })
+      .expect(201);
+
+    const q = '?from=2026-03-09&to=2026-03-15';
+    const ins = (await api.get(`/api/v1/lessons/insights${q}`).expect(200)).body.data;
+    // Only up to today, and not the cancelled day.
+    expect(ins.to).toBe('2026-03-11');
+    expect(ins.totals).toMatchObject({ sessions: 2, filled: 1, rate: 0.5, drills: 2 });
+    expect(ins.batches).toEqual([
+      { id: batch.id, name: batch.name, sessions: 2, filled: 1, rate: 0.5 },
+    ]);
+    // "Skipping" twice (case and spaces don't matter).
+    expect(ins.drills[0]).toMatchObject({ name: 'Skipping', sessions: 2, batches: 1 });
+    expect(ins.blocks.map((b: { name: string }) => b.name)).toEqual(['Ball drills', 'Warm-up']);
+    expect(ins.unfilled).toEqual([
+      { batchId: batch.id, batchName: batch.name, date: '2026-03-11' },
+    ]);
+    expect(ins.weeks).toEqual([{ start: '2026-03-09', sessions: 2, filled: 1 }]);
+
+    // Admins see every batch; another coach sees none of these.
+    const all = (await (await as(admin)).get(`/api/v1/lessons/insights${q}`).expect(200)).body.data;
+    expect(all.batches.map((b: { id: string }) => b.id)).toContain(batch.id);
+    const other = (await (await as(otherCoach)).get(`/api/v1/lessons/insights${q}`).expect(200))
+      .body.data;
+    expect(other.batches.map((b: { id: string }) => b.id)).not.toContain(batch.id);
+    await api.get('/api/v1/lessons/insights?from=2026-01-01&to=2026-12-31').expect(400);
+  });
+});

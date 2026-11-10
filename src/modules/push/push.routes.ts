@@ -4,7 +4,13 @@ import { noContent, ok } from '../../lib/http.js';
 import { parse } from '../../lib/validation.js';
 import { currentUser } from '../../middleware/auth.js';
 import { tasksFor } from '../tasks/tasks.service.js';
-import { pushEnabled, registerDevice, unregisterDevice } from './push.service.js';
+import {
+  inboxFor,
+  markRead,
+  pushEnabled,
+  registerDevice,
+  unregisterDevice,
+} from './push.service.js';
 
 /** Mounted at /api/v1/me: the signed-in user's own devices. */
 export const pushRouter = Router();
@@ -32,4 +38,19 @@ pushRouter.delete('/devices', async (req, res) => {
 /** What needs the signed-in user's attention now (header bell + tab badges). */
 pushRouter.get('/tasks', async (req, res) => {
   ok(res, await tasksFor(currentUser(req)));
+});
+
+/** The in-app notification inbox (latest 50) and the unread count. */
+pushRouter.get('/notifications', async (req, res) => {
+  ok(res, await inboxFor(currentUser(req).id));
+});
+
+/** Marks notifications read: the given ids, or all of them. */
+pushRouter.post('/notifications/read', async (req, res) => {
+  const body = parse(
+    z.object({ ids: z.array(z.string().uuid()).min(1).max(100).optional() }),
+    req.body,
+  );
+  await markRead(currentUser(req).id, body.ids);
+  ok(res, await inboxFor(currentUser(req).id, 0));
 });

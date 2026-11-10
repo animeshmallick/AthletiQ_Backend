@@ -35,8 +35,18 @@ describe('createFcmSender', () => {
   it('authenticates once and sends a well-formed message', async () => {
     const f = fakeFetch(200);
     const send = createFcmSender(sa, f);
-    expect(await send('tok-1', { title: 'T', body: 'B', link: '/x', tag: 'g' })).toBe('ok');
-    expect(await send('tok-2', { title: 'T2', body: 'B2' })).toBe('ok');
+    expect(
+      await send('tok-1', {
+        category: 'sessions',
+        icon: '⏰',
+        title: 'T',
+        body: 'B',
+        link: '/x',
+        tag: 'g',
+        actions: [{ label: 'Go', link: '/y' }],
+      }),
+    ).toBe('ok');
+    expect(await send('tok-2', { category: 'summaries', title: 'T2', body: 'B2' })).toBe('ok');
     const calls = f.mock.calls.map((c) => String(c[0]));
     expect(calls.filter((u) => u.includes('oauth2'))).toHaveLength(1); // token cached
     const [, init] = f.mock.calls[1] as [string, RequestInit];
@@ -46,36 +56,66 @@ describe('createFcmSender', () => {
     expect((init.headers as Record<string, string>).authorization).toBe('Bearer at-123');
     expect(JSON.parse(init.body as string).message).toMatchObject({
       token: 'tok-1',
-      notification: { title: 'T', body: 'B' },
-      data: { link: '/x' },
-      android: { priority: 'high', notification: { tag: 'g', channel_id: 'default' } },
+      notification: { title: '⏰ T', body: 'B' },
+      data: {
+        link: '/x',
+        category: 'sessions',
+        actions: JSON.stringify([{ label: 'Go', link: '/y' }]),
+      },
+      // Its own channel on Android; urgent, with sound, stacked by category on iPhone.
+      android: {
+        priority: 'high',
+        notification: { tag: 'g', channel_id: 'sessions', default_sound: true },
+      },
+      apns: {
+        headers: { 'apns-priority': '10', 'apns-collapse-id': 'g' },
+        payload: {
+          aps: {
+            'thread-id': 'sessions',
+            'interruption-level': 'time-sensitive',
+            sound: 'default',
+          },
+        },
+      },
       webpush: { headers: { Urgency: 'high', TTL: '86400' } },
     });
     const second = JSON.parse((f.mock.calls[2]![1] as RequestInit).body as string);
     expect(second.message.data.link).toBe('/');
+    // Summaries are quiet: no sound, passive on iPhone, normal priority.
+    expect(second.message.android).toMatchObject({
+      priority: 'normal',
+      notification: { channel_id: 'summaries' },
+    });
+    expect(second.message.android.notification.default_sound).toBeUndefined();
+    expect(second.message.apns.payload.aps).toMatchObject({ 'interruption-level': 'passive' });
+    expect(second.message.apns.payload.aps.sound).toBeUndefined();
   });
 
   it('reports uninstalled tokens and other failures', async () => {
-    expect(await createFcmSender(sa, fakeFetch(404))('t', { title: 'a', body: 'b' })).toBe(
-      'invalid-token',
-    );
+    expect(
+      await createFcmSender(sa, fakeFetch(404))('t', { category: 'money', title: 'a', body: 'b' }),
+    ).toBe('invalid-token');
     expect(
       await createFcmSender(
         sa,
         fakeFetch(400, 'The registration token is not a valid FCM registration token'),
-      )('t', { title: 'a', body: 'b' }),
+      )('t', { category: 'money', title: 'a', body: 'b' }),
     ).toBe('invalid-token');
-    expect(await createFcmSender(sa, fakeFetch(500, 'oops'))('t', { title: 'a', body: 'b' })).toBe(
-      'error',
-    );
+    expect(
+      await createFcmSender(sa, fakeFetch(500, 'oops'))('t', {
+        category: 'money',
+        title: 'a',
+        body: 'b',
+      }),
+    ).toBe('error');
   });
 
   it('fails clearly when Google rejects the credentials', async () => {
     const f = jest.fn(
       async () => new Response('denied', { status: 401 }),
     ) as unknown as typeof fetch;
-    await expect(createFcmSender(sa, f)('t', { title: 'a', body: 'b' })).rejects.toThrow(
-      /auth failed/,
-    );
+    await expect(
+      createFcmSender(sa, f)('t', { category: 'money', title: 'a', body: 'b' }),
+    ).rejects.toThrow(/auth failed/);
   });
 });

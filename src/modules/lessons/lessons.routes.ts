@@ -12,7 +12,7 @@
  *  DELETE /lessons/session?batchId&date         back to the batch plan
  *  GET    /lessons/overview                     each batch: plan status, totals, adjusted days
  */
-import { and, asc, count, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, type DbOrTx } from '../../db/client.js';
@@ -28,7 +28,14 @@ import {
   type SessionBlock,
 } from '../../db/schema/index.js';
 import { timesOn } from '../../lib/batch-times.js';
-import { addDays, isoWeekday, todayInAppTz, type IsoDate } from '../../lib/dates.js';
+import {
+  addDays,
+  diffDays,
+  eachDay,
+  isoWeekday,
+  todayInAppTz,
+  type IsoDate,
+} from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { noContent, ok } from '../../lib/http.js';
 import { parse, zId, zIsoDate, zName, zOptionalText } from '../../lib/validation.js';
@@ -36,7 +43,7 @@ import { currentUser, requireCoach } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin, isSubstituteFor } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
-import { getCancellation } from '../attendance/cancellations.js';
+import { cancellationsIn, getCancellation } from '../attendance/cancellations.js';
 
 export const lessonsRouter = Router();
 
@@ -562,3 +569,140 @@ export async function planStatusFor(
   }
   return out;
 }
+
+// ─── Insights ────────────────────────────────────────────────────────────────
+
+const InsightsQuery = z
+  .object({ from: zIsoDate, to: zIsoDate, batchId: zId.optional() })
+  .refine((q) => q.to >= q.from && diffDays(q.from, q.to) <= 180, {
+    message: 'Choose a range of up to six months',
+  });
+
+/**
+ * How lesson planning is going: per batch, how many of its held sessions (up to today, not
+ * cancelled) had their drills filled in; the drills used most; week by week; and recent sessions
+ * still not filled in. Admins see every batch, coaches their own.
+ */
+lessonsRouter.get('/insights', async (req, res) => {
+  const q = parse(InsightsQuery, req.query);
+  const user = currentUser(req);
+  const today = todayInAppTz();
+  const to = q.to > today ? today : q.to;
+  const list = await db
+    .select({
+      id: batches.id,
+      name: batches.name,
+      weekdays: batches.weekdays,
+      coachFeedback: batches.coachFeedback,
+    })
+    .from(batches)
+    .where(
+      and(
+        eq(batches.isActive, true),
+        // Attendance-only batches have no plans to fill in.
+        eq(batches.coachFeedback, true),
+        isAdmin(user) ? undefined : eq(batches.coachId, user.id),
+        q.batchId ? eq(batches.id, q.batchId) : undefined,
+      ),
+    )
+    .orderBy(asc(batches.name));
+  const ids = list.map((b) => b.id);
+  const [cancelled, filled] =
+    ids.length && to >= q.from
+      ? await Promise.all([
+          cancellationsIn(ids, q.from, to),
+          db
+            .select({
+              batchId: sessionPlans.batchId,
+              date: sessionPlans.date,
+              blocks: sessionPlans.blocks,
+            })
+            .from(sessionPlans)
+            .where(
+              and(
+                inArray(sessionPlans.batchId, ids),
+                gte(sessionPlans.date, q.from),
+                lte(sessionPlans.date, to),
+              ),
+            ),
+        ])
+      : [new Map<string, string>(), []];
+
+  const days = to >= q.from ? eachDay(q.from, to) : [];
+  const filledKey = new Set(filled.map((f) => `${f.batchId}:${f.date}`));
+  const weekOf = (d: IsoDate) => addDays(d, 1 - isoWeekday(d));
+  const weeks = new Map<string, { start: IsoDate; sessions: number; filled: number }>();
+  const unfilled: { batchId: string; batchName: string; date: IsoDate }[] = [];
+  const perBatch = list.map((b) => {
+    let sessions = 0;
+    let done = 0;
+    for (const d of days) {
+      if (!b.weekdays.includes(isoWeekday(d)) || cancelled.has(`${b.id}:${d}`)) continue;
+      sessions++;
+      const isFilled = filledKey.has(`${b.id}:${d}`);
+      if (isFilled) done++;
+      else unfilled.push({ batchId: b.id, batchName: b.name, date: d });
+      const w = weeks.get(weekOf(d)) ?? { start: weekOf(d), sessions: 0, filled: 0 };
+      w.sessions++;
+      if (isFilled) w.filled++;
+      weeks.set(w.start, w);
+    }
+    return {
+      id: b.id,
+      name: b.name,
+      sessions,
+      filled: done,
+      rate: sessions ? done / sessions : null,
+    };
+  });
+
+  // Drills actually run (from filled-in sessions), most used first.
+  const drills = new Map<
+    string,
+    { name: string; block: string; sessions: number; batches: Set<string> }
+  >();
+  const blockMinutes = new Map<string, { name: string; color: string | null; minutes: number }>();
+  for (const f of filled)
+    for (const block of f.blocks) {
+      const bm = blockMinutes.get(block.name) ?? {
+        name: block.name,
+        color: block.color,
+        minutes: 0,
+      };
+      bm.minutes += block.minutes;
+      blockMinutes.set(block.name, bm);
+      for (const d of block.drills) {
+        const key = d.name.trim().toLowerCase();
+        const row = drills.get(key) ?? {
+          name: d.name.trim(),
+          block: block.name,
+          sessions: 0,
+          batches: new Set<string>(),
+        };
+        row.sessions++;
+        row.batches.add(f.batchId);
+        drills.set(key, row);
+      }
+    }
+  const totalSessions = perBatch.reduce((n, b) => n + b.sessions, 0);
+  const totalFilled = perBatch.reduce((n, b) => n + b.filled, 0);
+  ok(res, {
+    from: q.from,
+    to,
+    totals: {
+      sessions: totalSessions,
+      filled: totalFilled,
+      rate: totalSessions ? totalFilled / totalSessions : null,
+      drills: drills.size,
+    },
+    batches: perBatch,
+    weeks: [...weeks.values()].sort((a, b) => a.start.localeCompare(b.start)),
+    drills: [...drills.values()]
+      .map((d) => ({ name: d.name, block: d.block, sessions: d.sessions, batches: d.batches.size }))
+      .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name))
+      .slice(0, 15),
+    blocks: [...blockMinutes.values()].sort((a, b) => b.minutes - a.minutes),
+    // Most recent first.
+    unfilled: unfilled.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10),
+  });
+});

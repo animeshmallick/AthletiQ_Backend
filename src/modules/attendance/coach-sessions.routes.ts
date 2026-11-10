@@ -156,8 +156,11 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
   if (!within) {
     notifyInBackground(() =>
       notifyAdmins({
-        title: 'Check-in flagged',
-        body: `${user.name} checked in ${distance} m from ${location.name} (${batch.name})`,
+        category: 'sessions',
+        icon: '🚩',
+        actions: [{ label: 'Review', link: '/coach-sessions' }],
+        title: `${user.name} checked in away from the venue`,
+        body: `${distance} m from ${location.name} · ${batch.name}. Review the check-in.`,
         link: '/coach-sessions',
         tag: `flag-${session.id}`,
       }),
@@ -342,8 +345,10 @@ coachSessionsRouter.post('/:id/check-out', requireAdmin, async (req, res) => {
   const batch = await db.query.batches.findFirst({ where: eq(batches.id, existing.batchId) });
   notifyInBackground(() =>
     notifyUsers([existing.coachId], {
-      title: 'You were checked out',
-      body: `${batch?.name ?? 'Your session'} · by ${admin.name}${body.reason ? ` (${body.reason})` : ''}`,
+      category: 'sessions',
+      icon: '🔒',
+      title: `Checked out of ${batch?.name ?? 'your session'}`,
+      body: `By ${admin.name}${body.reason ? ` · ${body.reason}` : ''}`,
       link: '/coach-sessions',
       tag: `checkout-${id}`,
     }),

@@ -46,6 +46,8 @@ export function noticeFeeShares(
     for (const s of await staffShares(paymentId, true)) {
       if (!s.userId || s.userId === collector.id) continue;
       await notifyUsers([s.userId], {
+        category: 'money',
+        icon: '🪙',
         title: `Your share · ${formatInr(s.amount)}`,
         body: `${student}'s fee was received by ${collector.name}. ${
           heldByAcademy || collector.role === 'admin'
@@ -70,6 +72,8 @@ export function noticeSharesReversed(paymentId: string, actor: AuthUser, why: st
     for (const s of await staffShares(paymentId, false)) {
       if (!s.userId || s.userId === actor.id) continue;
       await notifyUsers([s.userId], {
+        category: 'money',
+        icon: '↩️',
         title: `Share removed · ${formatInr(s.amount)}`,
         body: `The payment was ${why} by ${actor.name}.`,
         link: LINK,
@@ -88,7 +92,14 @@ export function noticeStaff(
 ) {
   if (!userId || userId === actor.id) return;
   notifyInBackground(() =>
-    notifyUsers([userId], { title, body, link: LINK, tag: `funds-${userId}-${Date.now()}` }),
+    notifyUsers([userId], {
+      category: 'money',
+      icon: '💳',
+      title,
+      body,
+      link: LINK,
+      tag: `funds-${userId}-${Date.now()}`,
+    }),
   );
 }
 
@@ -96,7 +107,14 @@ export function noticeStaff(
 export function noticeAdmins(actor: AuthUser, title: string, body: string) {
   notifyInBackground(async () => {
     const admins = (await activeAdminIds()).filter((a) => a !== actor.id);
-    await notifyUsers(admins, { title, body, link: LINK, tag: `funds-${Date.now()}` });
+    await notifyUsers(admins, {
+      category: 'money',
+      icon: '💳',
+      title,
+      body,
+      link: LINK,
+      tag: `funds-${Date.now()}`,
+    });
   });
 }
 
@@ -143,6 +161,9 @@ export async function sendMoneyReminders(now: Date = new Date()) {
     const owed =
       balances.find((b) => b.account === 'staff_due' && b.userId === h.userId)?.amount ?? 0;
     const sent = await notifyOnce(`cash-week:${week}:${h.userId}`, [h.userId!], {
+      category: 'money',
+      icon: '👛',
+      actions: [{ label: 'Pay to academy', link: '/finance?tab=money' }],
       title: `You hold ${formatInr(h.amount)} for the academy`,
       body:
         owed > 0
@@ -157,6 +178,8 @@ export async function sendMoneyReminders(now: Date = new Date()) {
   const withStaff = sum('cash', true);
   const owed = sum('staff_due', true) + sum('payee_due', false);
   const admins = await notifyOnce(`money-week:${week}`, await activeAdminIds(), {
+    category: 'summaries',
+    icon: '🏦',
     title: `Money position · ${formatInr(academyCash + withStaff)} in hand`,
     body: [
       `Academy ${formatInr(academyCash)}`,

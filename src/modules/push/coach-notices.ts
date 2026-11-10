@@ -39,6 +39,9 @@ export async function noticeBatchAssigned(batchId: string, previousCoachId?: str
     .from(enrollments)
     .where(and(eq(enrollments.batchId, b.id), isNull(enrollments.effectiveTo)));
   await notifyUsers([b.coachId], {
+    category: 'sessions',
+    icon: '🗓️',
+    actions: [{ label: 'View batch', link: `/batches/${b.id}` }],
     title: `New batch assigned: ${b.name}`,
     body: `${schedule(b, location)}${n ? ` · ${n} student${n === 1 ? '' : 's'}` : ''}`,
     link: `/batches/${b.id}`,
@@ -46,6 +49,8 @@ export async function noticeBatchAssigned(batchId: string, previousCoachId?: str
   });
   if (previousCoachId && previousCoachId !== b.coachId) {
     await notifyUsers([previousCoachId], {
+      category: 'sessions',
+      icon: '↪️',
       title: `${b.name} moved to another coach`,
       body: 'It no longer appears in your schedule.',
       link: '/calendar',
@@ -76,6 +81,8 @@ export async function noticeBatchChanged(
   if (before.isActive && !b.isActive) changes.push('batch closed');
   if (!changes.length) return;
   await notifyUsers([b.coachId], {
+    category: 'sessions',
+    icon: '✏️',
     title: `${b.name} was updated`,
     body: changes.join(' · '),
     link: `/batches/${b.id}`,
@@ -106,6 +113,9 @@ export async function noticeStudentJoined(studentId: string, batchId?: string) {
     );
   for (const row of rows) {
     await notifyUsers([row.coachId], {
+      category: 'students',
+      icon: '🎉',
+      actions: [{ label: 'View student', link: `/students/${studentId}` }],
       title: `New student in ${row.batchName}`,
       body: `${row.name} · ${daysLabel(row.days)} from ${dayPhrase(row.from)}`,
       link: `/students/${studentId}`,
@@ -129,6 +139,8 @@ export async function noticeStudentLeft(
   const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
   if (!b) return;
   await notifyUsers([b.coachId], {
+    category: 'students',
+    icon: '👋',
     title: `${await studentName(studentId)} left ${academy ? 'the academy' : b.name}`,
     body: `${b.name} · last day ${dayPhrase(leftOn)}`,
     link: `/students/${studentId}`,
@@ -149,6 +161,8 @@ export async function noticeStudentMovedOut(
   ]);
   if (!a || !b || a.coachId === b.coachId) return; // same coach also gets the "joined" notice
   await notifyUsers([a.coachId], {
+    category: 'students',
+    icon: '🔀',
     title: `${await studentName(studentId)} moved out of ${a.name}`,
     body: `Now in ${b.name} from ${dayPhrase(from)}`,
     link: `/batches/${a.id}`,
@@ -168,6 +182,8 @@ export async function noticeSessionCancelled(
   if (!row || row.batch.coachId === byUserId) return;
   const { batch: b } = row;
   await notifyUsers([b.coachId], {
+    category: 'sessions',
+    icon: restored ? '✅' : '🚫',
     title: restored
       ? `${b.name} is on again ${onDay(date)}`
       : `${b.name} is cancelled ${onDay(date)}`,
@@ -189,6 +205,8 @@ export async function noticeMakeupBooked(
   const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
   if (!b || b.coachId === byUserId) return;
   await notifyUsers([b.coachId], {
+    category: 'students',
+    icon: '➕',
     title: `Makeup student in ${b.name}`,
     body: `${await studentName(studentId)} joins ${onDay(date)}`,
     link: `/attendance?batch=${b.id}&date=${date}`,

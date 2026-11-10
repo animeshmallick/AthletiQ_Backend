@@ -79,23 +79,59 @@ describe('sending', () => {
     await api.post('/api/v1/me/devices', { token: TOKEN_B }).expect(200);
     await api.post('/api/v1/me/devices', { token: 'boom-token-xxxxxxxxxxxxxxxxxxxx' }).expect(200);
 
-    const result = await notifyUsers([coach.id, coach.id], { title: 'Hi', body: 'There' });
+    const result = await notifyUsers([coach.id, coach.id], {
+      category: 'students',
+      title: 'Hi',
+      body: 'There',
+    });
     expect(result).toEqual({ sent: 1, removed: 1 });
     expect(sent.map((s) => s.token)).toEqual([TOKEN_A]);
     const left = await db.select({ token: deviceTokens.token }).from(deviceTokens);
     expect(left.map((r) => r.token).sort()).toEqual(['boom-token-xxxxxxxxxxxxxxxxxxxx', TOKEN_A]);
   });
 
-  it('is a no-op when push is not configured', async () => {
+  it('still fills the in-app inbox when push is not configured', async () => {
     const coach = await makeUser('coach');
-    expect(await notifyUsers([coach.id], { title: 'x', body: 'y' })).toEqual({
+    expect(
+      await notifyUsers([coach.id], { category: 'students', icon: '🎉', title: 'x', body: 'y' }),
+    ).toEqual({ sent: 0, removed: 0 });
+    expect(await notifyAdmins({ category: 'students', title: 'x', body: 'y' })).toEqual({
       sent: 0,
       removed: 0,
     });
-    expect(await notifyAdmins({ title: 'x', body: 'y' })).toEqual({ sent: 0, removed: 0 });
     const task = jest.fn(async () => undefined);
     notifyInBackground(task);
-    expect(task).not.toHaveBeenCalled();
+    expect(task).toHaveBeenCalled();
+    const inbox = (await (await as(coach)).get('/api/v1/me/notifications').expect(200)).body.data;
+    expect(inbox).toMatchObject({ unread: 1, items: [{ title: '🎉 x', category: 'students' }] });
+  });
+
+  it('keeps an inbox: unread count on the app badge, a newer one replaces the same kind, mark read', async () => {
+    const sent = fakeSender();
+    const coach = await makeUser('coach');
+    const coach$ = await as(coach);
+    await coach$.post('/api/v1/me/devices', { token: TOKEN_A, platform: 'android' }).expect(200);
+    await notifyUsers([coach.id], { category: 'sessions', title: 'A', body: '1', tag: 't1' });
+    await notifyUsers([coach.id], { category: 'money', title: 'B', body: '2' });
+    // Same tag, still unread: replaces the first rather than stacking.
+    await notifyUsers([coach.id], { category: 'sessions', title: 'A2', body: '3', tag: 't1' });
+    expect(sent.map((s) => s.message.badge)).toEqual([1, 2, 2]);
+    expect(sent[2]!.message.notificationId).toEqual(expect.any(String));
+
+    let inbox = (await coach$.get('/api/v1/me/notifications').expect(200)).body.data;
+    expect(inbox.unread).toBe(2);
+    expect(inbox.items.map((n: { title: string }) => n.title)).toEqual(['A2', 'B']);
+
+    await coach$.post('/api/v1/me/notifications/read', { ids: [inbox.items[0].id] }).expect(200);
+    inbox = (await coach$.get('/api/v1/me/notifications').expect(200)).body.data;
+    expect(inbox.unread).toBe(1);
+    const all = (await coach$.post('/api/v1/me/notifications/read', {}).expect(200)).body.data;
+    expect(all.unread).toBe(0);
+    // Someone else's inbox is separate.
+    const other = await makeUser('coach');
+    expect(
+      (await (await as(other)).get('/api/v1/me/notifications').expect(200)).body.data.unread,
+    ).toBe(0);
   });
 
   it('only reaches active admins', async () => {
@@ -112,7 +148,7 @@ describe('sending', () => {
     await db
       .insert(deviceTokens)
       .values({ userId: disabled.id, token: 'disabled-admin-token-xxxxxx' });
-    await notifyAdmins({ title: 'Admins', body: 'only' });
+    await notifyAdmins({ category: 'approvals', title: 'Admins', body: 'only' });
     expect(sent.map((s) => s.token)).toEqual([TOKEN_A]);
   });
 });
@@ -128,8 +164,9 @@ describe('triggers', () => {
       .expect(201);
     await until(() => sent.length === 1);
     expect(sent[0]!.message).toMatchObject({
-      title: 'New registration',
-      body: 'Diya Kapoor wants to join as a student',
+      category: 'approvals',
+      title: 'New student sign-up',
+      body: 'Diya Kapoor wants to join. Review and pick a batch.',
       link: '/registrations',
     });
   });
@@ -149,7 +186,8 @@ describe('triggers', () => {
       })
       .expect(200);
     await until(() => sent.length === 1);
-    expect(sent[0]!.message.title).toBe('Check-in flagged');
+    expect(sent[0]!.message.title).toMatch(/checked in away from the venue$/);
+    expect(sent[0]!.message.category).toBe('sessions');
     expect(sent[0]!.message.body).toContain(batch.name);
   });
 
@@ -201,7 +239,10 @@ describe('push status', () => {
     expect(pushStatus()).toBe('misconfigured');
     // Notifying must not throw (e.g. inside the public registration handler).
     expect(() => notifyInBackground(async () => undefined)).not.toThrow();
-    await expect(notifyAdmins({ title: 'x', body: 'y' })).resolves.toEqual({ sent: 0, removed: 0 });
+    await expect(notifyAdmins({ category: 'students', title: 'x', body: 'y' })).resolves.toEqual({
+      sent: 0,
+      removed: 0,
+    });
     (env as { FCM_SERVICE_ACCOUNT?: string }).FCM_SERVICE_ACCOUNT = original;
     setPushSender(undefined);
     expect(pushStatus()).toBe('disabled');

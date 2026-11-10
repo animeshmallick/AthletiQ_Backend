@@ -37,6 +37,8 @@ export async function sendSessionReminders(today = todayInAppTz()) {
     list.sort((a, b) => a.startTime.localeCompare(b.startTime));
     const n = list.length;
     await notifyUsers([coachId], {
+      category: 'sessions',
+      icon: '📅',
       title: n === 1 ? 'You have 1 session today' : `You have ${n} sessions today`,
       body: list.map((b) => `${b.name} at ${clock(b.startTime)}`).join(' · '),
       link: '/',

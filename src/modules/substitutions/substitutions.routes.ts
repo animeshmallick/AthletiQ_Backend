@@ -254,6 +254,8 @@ function noticeDecision(r: Row, actorId: string) {
       pending: 'requested',
     }[r.status];
     await notifyUsers(people, {
+      category: 'sessions',
+      icon: '🔁',
       title: `Substitute ${verb} · ${r.batch.name}`,
       body: `${r.substitute.name} covering ${span(r)}${r.reviewNote ? ` — ${r.reviewNote}` : ''}`,
       link: LINK,
@@ -363,6 +365,9 @@ substitutionsRouter.post('/', async (req, res) => {
   else
     notifyInBackground(() =>
       notifyAdmins({
+        category: 'approvals',
+        icon: '🔁',
+        actions: [{ label: 'Review', link: LINK }],
         title: `Substitute request · ${row!.batch.name}`,
         body: `${user.name ?? 'A coach'} asks for ${row!.substitute.name} to cover ${span(row!)}`,
         link: LINK,

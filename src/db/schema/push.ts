@@ -31,3 +31,30 @@ export const notificationLog = pgTable('notification_log', {
   key: text().primaryKey(),
   sentAt: tz().notNull().defaultNow(),
 });
+
+/**
+ * The in-app notification inbox: every notification a person was sent, so nothing is lost when
+ * it is swiped away on the phone (and people without push still see them). One row per person;
+ * a newer notification with the same tag replaces an unread older one. Kept 60 days.
+ */
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: id(),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** sessions | students | money | approvals | summaries */
+    category: text().notNull(),
+    title: text().notNull(),
+    body: text().notNull(),
+    link: text(),
+    tag: text(),
+    readAt: tz(),
+    createdAt: tz().notNull().defaultNow(),
+  },
+  (t) => [
+    index('notifications_user_idx').on(t.userId, t.createdAt),
+    index('notifications_unread_idx').on(t.userId, t.readAt),
+  ],
+);
