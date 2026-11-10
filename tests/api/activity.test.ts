@@ -215,3 +215,35 @@ describe('activity log', () => {
     expect(typeof stream.data[0].durationMs).toBe('number');
   });
 });
+
+describe('activity within the last few hours', () => {
+  it('filters to an exact start time and compares with the same length before', async () => {
+    const a = await makeAcademy();
+    const admin$ = await as(a.admin);
+    const ago = (h: number) => new Date(Date.now() - h * 3_600_000);
+    const log = (action: string, at: Date) =>
+      db.insert(auditLogs).values({
+        actorId: a.admin.id,
+        action,
+        entityType: 'invoice',
+        entityId: a.batch.id,
+        createdAt: at,
+      });
+    await log('invoice.shared', ago(1));
+    await log('invoice.payment_recorded', ago(2));
+    await log('invoice.cancelled', ago(5)); // the 3 hours before
+    await log('student.updated', ago(30)); // outside both
+
+    const since = ago(3).toISOString();
+    const day = (d: Date) => d.toISOString().slice(0, 10);
+    const q = `from=${day(ago(3))}&to=${day(new Date())}&since=${encodeURIComponent(since)}`;
+    const logs = (await admin$.get(`/api/v1/activity/logs?${q}`).expect(200)).body.data;
+    expect(logs.map((l: { action: string }) => l.action).sort()).toEqual([
+      'invoice.payment_recorded',
+      'invoice.shared',
+    ]);
+    const ins = (await admin$.get(`/api/v1/activity/insights?${q}`).expect(200)).body.data;
+    expect(ins.totals).toMatchObject({ events: 2, previous: 1 });
+    await admin$.get('/api/v1/activity/logs?since=yesterday').expect(400);
+  });
+});

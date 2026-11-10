@@ -48,17 +48,35 @@ function scopeFor(user: AuthUser): SQL | undefined {
   return isAdmin(user) ? undefined : eq(auditLogs.actorId, user.id);
 }
 
+/**
+ * Optional exact start (an ISO timestamp) for windows shorter than whole days, e.g. "the last
+ * 3 hours". `from` / `to` still give the dates the window covers.
+ */
+const zSince = z.iso.datetime({ offset: true }).optional();
+type Window = { from: IsoDate; to: IsoDate; since?: string };
+
 const Range = z
-  .object({ from: zIsoDate, to: zIsoDate })
+  .object({ from: zIsoDate, to: zIsoDate, since: zSince })
   .refine((r) => r.to >= r.from && diffDays(r.from, r.to) <= 400, {
     message: 'Choose a range of up to about a year',
   });
 
-function inRange(
-  col: typeof auditLogs.createdAt | typeof apiRequests.createdAt,
-  r: { from: IsoDate; to: IsoDate },
-) {
-  return and(gte(col, startOf(r.from)), lt(col, startOf(addDays(r.to, 1))));
+function inRange(col: typeof auditLogs.createdAt | typeof apiRequests.createdAt, r: Window) {
+  return and(
+    gte(col, r.since ? new Date(r.since) : startOf(r.from)),
+    lt(col, startOf(addDays(r.to, 1))),
+  );
+}
+
+/** The window of the same length just before this one (for "vs the period before"). */
+function previousRange(col: typeof auditLogs.createdAt | typeof apiRequests.createdAt, r: Window) {
+  if (r.since) {
+    const since = new Date(r.since);
+    const length = Math.max(Date.now() - since.getTime(), 0);
+    return and(gte(col, new Date(since.getTime() - length)), lt(col, since));
+  }
+  const days = diffDays(r.from, r.to) + 1;
+  return inRange(col, { from: addDays(r.from, -days), to: addDays(r.from, -1) });
 }
 
 // ─── Activity list ───────────────────────────────────────────────────────────
@@ -66,6 +84,7 @@ function inRange(
 const LogQuery = zPagination.extend({
   from: zIsoDate.optional(),
   to: zIsoDate.optional(),
+  since: zSince,
   entityType: z.string().max(60).optional(),
   entityId: zId.optional(),
   actorId: zId.optional(),
@@ -80,7 +99,11 @@ activityRouter.get('/logs', async (req, res) => {
   const term = q.search ? `%${q.search.replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
   const where = and(
     scopeFor(user),
-    q.from ? gte(auditLogs.createdAt, startOf(q.from)) : undefined,
+    q.since
+      ? gte(auditLogs.createdAt, new Date(q.since))
+      : q.from
+        ? gte(auditLogs.createdAt, startOf(q.from))
+        : undefined,
     q.to ? lt(auditLogs.createdAt, startOf(addDays(q.to, 1))) : undefined,
     q.entityType ? eq(auditLogs.entityType, q.entityType) : undefined,
     q.entityId ? eq(auditLogs.entityId, q.entityId) : undefined,
@@ -120,10 +143,9 @@ activityRouter.get('/logs', async (req, res) => {
 // ─── Period insights ─────────────────────────────────────────────────────────
 
 /** What happened in a period: volume, when, where, who, and what needs a second look. */
-async function periodInsights(user: AuthUser, r: { from: IsoDate; to: IsoDate }) {
+async function periodInsights(user: AuthUser, r: Window) {
   const where = and(scopeFor(user), inRange(auditLogs.createdAt, r));
   const days = diffDays(r.from, r.to) + 1;
-  const prev = { from: addDays(r.from, -days), to: addDays(r.from, -1) };
   const admin = isAdmin(user);
 
   const [[totals], [previous], byDay, byHour, byEntity, byAction, byActor, notable, [sens]] =
@@ -139,7 +161,7 @@ async function periodInsights(user: AuthUser, r: { from: IsoDate; to: IsoDate })
       db
         .select({ events: count() })
         .from(auditLogs)
-        .where(and(scopeFor(user), inRange(auditLogs.createdAt, prev))),
+        .where(and(scopeFor(user), previousRange(auditLogs.createdAt, r))),
       db
         .select({ date: localDay(auditLogs.createdAt), n: count() })
         .from(auditLogs)
@@ -197,6 +219,7 @@ async function periodInsights(user: AuthUser, r: { from: IsoDate; to: IsoDate })
   return {
     from: r.from,
     to: r.to,
+    since: r.since ?? null,
     totals: {
       events,
       people: totals?.people ?? 0,
@@ -386,13 +409,12 @@ activityRouter.post('/summary', async (req, res) => {
 const ErrorQuery = zPagination.extend({
   from: zIsoDate,
   to: zIsoDate,
+  since: zSince,
   kind: z.enum(['client', 'server']).optional(),
   route: z.string().max(200).optional(),
 });
 
-function errorWhere(
-  q: z.output<typeof ErrorQuery> | { from: IsoDate; to: IsoDate; kind?: string; route?: string },
-) {
+function errorWhere(q: z.output<typeof ErrorQuery> | (Window & { kind?: string; route?: string })) {
   return and(
     inRange(apiRequests.createdAt, q),
     gte(apiRequests.status, 400),
@@ -490,6 +512,7 @@ activityRouter.get('/errors/insights', requireAdmin, async (req, res) => {
   ok(res, {
     from: r.from,
     to: r.to,
+    since: r.since ?? null,
     totals: totals ?? { total: 0, server: 0, client: 0, routes: 0, users: 0 },
     byDay: eachDay(r.from, r.to).map((date) => ({
       date,
@@ -566,6 +589,7 @@ activityRouter.get('/requests/insights', async (req, res) => {
   ok(res, {
     from: r.from,
     to: r.to,
+    since: r.since ?? null,
     totals: totals ?? { total: 0, writes: 0, failed: 0, avgMs: 0, p95Ms: 0, people: 0 },
     byRoute,
     slowest: [...byRoute].sort((a, b) => b.avgMs - a.avgMs).slice(0, 5),
@@ -573,7 +597,12 @@ activityRouter.get('/requests/insights', async (req, res) => {
   });
 });
 
-const RequestQuery = zPagination.extend({ from: zIsoDate, to: zIsoDate, userId: zId.optional() });
+const RequestQuery = zPagination.extend({
+  from: zIsoDate,
+  to: zIsoDate,
+  since: zSince,
+  userId: zId.optional(),
+});
 
 /** The raw stream of tracked requests (newest first). */
 activityRouter.get('/requests', async (req, res) => {
