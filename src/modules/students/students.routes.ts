@@ -64,6 +64,8 @@ export const studentsRouter = Router();
 // ─── List ────────────────────────────────────────────────────────────────────
 
 const ListQuery = zPagination.extend({
+  /** Up to 500 at once, so the grouped view can show the whole list. */
+  pageSize: z.coerce.number().int().min(1).max(500).default(20),
   search: z.string().trim().max(100).optional(),
   status: z.enum(['active', 'left']).optional(),
   batchId: zId.optional(),

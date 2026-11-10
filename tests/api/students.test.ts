@@ -178,6 +178,9 @@ describe('student listing and access', () => {
     expect(await ids(`locationId=${lake.id}&sportId=${tennis!.id}&coachId=${coach.id}`)).toEqual(
       [],
     );
+    // The grouped view asks for everyone at once (up to 500).
+    await api.get('/api/v1/students?pageSize=500').expect(200);
+    await api.get('/api/v1/students?pageSize=501').expect(400);
     await api.get(`/api/v1/students/${UNKNOWN}`).expect(404);
   });
 });
