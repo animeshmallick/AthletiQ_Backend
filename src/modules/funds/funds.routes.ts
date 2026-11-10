@@ -333,7 +333,7 @@ fundsRouter.get('/overview', async (req, res) => {
   const [people, parties] = await Promise.all([
     userIds.length
       ? db
-          .select({ id: users.id, name: users.name, role: users.role })
+          .select({ id: users.id, name: users.name, role: users.lastRole })
           .from(users)
           .where(inArray(users.id, userIds))
       : [],
@@ -937,7 +937,11 @@ fundsRouter.post('/resplit', requireAdmin, async (req, res) => {
   const updated = await db.transaction(async (tx) => {
     await lockFunds(tx);
     const rows = await tx
-      .select({ txn: fundTxns, invoice: invoices, collector: { id: users.id, role: users.role } })
+      .select({
+        txn: fundTxns,
+        invoice: invoices,
+        collector: { id: users.id, role: users.lastRole },
+      })
       .from(fundTxns)
       .innerJoin(payments, eq(payments.id, fundTxns.paymentId))
       .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
@@ -990,7 +994,7 @@ fundsRouter.post('/resplit', requireAdmin, async (req, res) => {
         payment: payments,
         invoice: invoices,
         student: students.fullName,
-        collector: { id: users.id, role: users.role },
+        collector: { id: users.id, role: users.lastRole },
       })
       .from(payments)
       .innerJoin(invoices, eq(invoices.id, payments.invoiceId))

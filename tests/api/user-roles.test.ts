@@ -118,7 +118,14 @@ describe('one account, coach and/or admin', () => {
     await api.patch(`/api/v1/users/${id}`, { roles: ['coach', 'coach'] }).expect(400);
     await api.patch(`/api/v1/users/${id}`, { roles: ['owner'] }).expect(400);
     const coachOnly = await api.patch(`/api/v1/users/${id}`, { roles: ['coach'] }).expect(200);
-    expect(coachOnly.body.data).toMatchObject({ roles: ['coach'], role: 'coach' });
+    expect(coachOnly.body.data).toMatchObject({ roles: ['coach'], role: 'coach' }); // API keeps 'role'
+
+    // Taking a role away is an access change: its own audit entry, flagged for a second look;
+    // switching your own role is routine and isn't.
+    const flagged = await api.get('/api/v1/activity/logs?sensitive=true&pageSize=50').expect(200);
+    const actions = flagged.body.data.map((l: { action: string }) => l.action);
+    expect(actions).toContain('user.roles_changed');
+    expect(actions).not.toContain('auth.role_switched');
 
     // No admin can take away their own admin role.
     await api.patch(`/api/v1/users/${admin.id}`, { roles: ['coach'] }).expect(422);
@@ -128,10 +135,10 @@ describe('one account, coach and/or admin', () => {
       db.execute(sql`update users set roles = '{coach,coach}' where id = ${id}`),
     ).rejects.toThrow();
     await expect(
-      db.execute(sql`update users set roles = '{}', role = 'coach' where id = ${id}`),
+      db.execute(sql`update users set roles = '{}', last_role = 'coach' where id = ${id}`),
     ).rejects.toThrow();
     await expect(
-      db.execute(sql`update users set role = 'admin' where id = ${id}`), // not a role they hold
+      db.execute(sql`update users set last_role = 'admin' where id = ${id}`), // not a role they hold
     ).rejects.toThrow();
   });
 
@@ -175,7 +182,7 @@ describe('one account, coach and/or admin', () => {
       withPassword: true,
       email: 'two@example.com',
       roles: ['admin', 'coach'],
-      role: 'coach',
+      lastRole: 'coach',
     });
     const s = await signIn('two@example.com');
     expect(s.user.role).toBe('coach');

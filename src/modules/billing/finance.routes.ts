@@ -175,7 +175,7 @@ financeRouter.get('/summary', async (req, res) => {
       .select({
         userId: payments.recordedById,
         name: users.name,
-        role: users.role,
+        role: users.lastRole,
         amount: sql<number>`sum(${payments.amount})::int`,
         count: sql<number>`count(*)::int`,
       })
@@ -191,7 +191,7 @@ financeRouter.get('/summary', async (req, res) => {
           lte(payments.paidOn, to),
         ),
       )
-      .groupBy(payments.recordedById, users.name, users.role)
+      .groupBy(payments.recordedById, users.name, users.lastRole)
       .orderBy(desc(sql`sum(${payments.amount})`)),
   ]);
 

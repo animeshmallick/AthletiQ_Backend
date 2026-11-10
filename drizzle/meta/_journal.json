@@ -134,6 +134,13 @@
       "when": 1794319688379,
       "tag": "0018_user_roles",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794323095057,
+      "tag": "0019_last_role",
+      "breakpoints": true
     }
   ]
 }

@@ -10,7 +10,7 @@ export const users = pgTable(
     name: text().notNull(),
     phone: text(),
     /** The role the user last signed in as (their default next time). Always one of `roles`. */
-    role: userRole().notNull(),
+    lastRole: userRole().notNull(),
     /** Every role the person holds; someone can be both an admin and a coach. */
     roles: userRole().array().notNull(),
     status: userStatus().notNull().default('invited'),
@@ -25,10 +25,10 @@ export const users = pgTable(
   },
   (t) => [
     uniqueIndex('users_email_lower_uq').on(sql`lower(${t.email})`),
-    index('users_role_idx').on(t.role),
+    index('users_last_role_idx').on(t.lastRole),
     // One account per person: a phone number belongs to one account only.
     uniqueIndex('users_phone_uq').on(t.phone),
-    check('users_role_in_roles', sql`${t.role} = any(${t.roles})`),
+    check('users_last_role_in_roles', sql`${t.lastRole} = any(${t.roles})`),
     // Coach, admin, or both — never empty and never the same role twice.
     check(
       'users_roles_valid',

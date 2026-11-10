@@ -30,7 +30,7 @@ try {
     await db.insert(users).values({
       email: cfg.SEED_ADMIN_EMAIL,
       name: cfg.SEED_ADMIN_NAME,
-      role: 'admin',
+      lastRole: 'admin',
       roles: ['admin'],
       status: 'active',
       passwordHash: await hashPassword(cfg.SEED_ADMIN_PASSWORD),

@@ -22,13 +22,13 @@ type UserRow = typeof users.$inferSelect;
 /**
  * The role a sign-in uses: the one asked for if the user holds it, else the one they used last.
  */
-export function activeRoleOf(u: Pick<UserRow, 'role' | 'roles'>, wanted?: Role | null): Role {
+export function activeRoleOf(u: Pick<UserRow, 'lastRole' | 'roles'>, wanted?: Role | null): Role {
   if (wanted && u.roles.includes(wanted)) return wanted;
-  return u.roles.includes(u.role) ? u.role : u.roles[0]!;
+  return u.roles.includes(u.lastRole) ? u.lastRole : u.roles[0]!;
 }
 
 /** `role` is the role in use (defaults to the one they used last); `roles` all they hold. */
-export function toPublicUser(u: UserRow, role: Role = u.role): PublicUser {
+export function toPublicUser(u: UserRow, role: Role = u.lastRole): PublicUser {
   return {
     id: u.id,
     email: u.email,
@@ -277,13 +277,17 @@ export async function switchRole(
     .update(sessions)
     .set({ role, lastUsedAt: new Date() })
     .where(eq(sessions.id, session.id));
-  const [updated] = await db.update(users).set({ role }).where(eq(users.id, user.id)).returning();
+  const [updated] = await db
+    .update(users)
+    .set({ lastRole: role })
+    .where(eq(users.id, user.id))
+    .returning();
   await audit({
     actorId: user.id,
     action: 'auth.role_switched',
     entityType: 'user',
     entityId: user.id,
-    metadata: { from: session.role ?? user.role, to: role },
+    metadata: { from: session.role ?? user.lastRole, to: role },
     ipAddress: client.ip,
   });
   return buildAuthResult(updated!, { refreshToken, expiresAt: session.expiresAt, role });

@@ -159,9 +159,10 @@ usersRouter.post('/', requireAdmin, async (req, res) => {
     const [u] = await tx
       .insert(users)
       .values({
-        ...body,
+        name: body.name,
+        email: body.email,
         roles,
-        role: roles.includes(body.role) ? body.role : roles[0]!,
+        lastRole: roles.includes(body.role) ? body.role : roles[0]!,
         phone: body.phone ?? null,
         status: 'invited',
       })
@@ -207,7 +208,7 @@ usersRouter.patch('/:id', requireAdmin, async (req, res) => {
     ? {
         ...body,
         // Their default role must stay one they hold.
-        role: body.roles.includes(current.role) ? current.role : body.roles[0]!,
+        lastRole: body.roles.includes(current.lastRole) ? current.lastRole : body.roles[0]!,
       }
     : body;
   const [u] = await db.update(users).set(changes).where(eq(users.id, id)).returning();
@@ -219,6 +220,15 @@ usersRouter.patch('/:id', requireAdmin, async (req, res) => {
     entityId: id,
     metadata: body,
   });
+  // Giving or taking away a role is an access change: its own entry, flagged for a second look.
+  if (body.roles && body.roles.join() !== [...current.roles].sort().join())
+    await audit({
+      ...auditCtx(req),
+      action: 'user.roles_changed',
+      entityType: 'user',
+      entityId: id,
+      metadata: { from: current.roles, to: body.roles },
+    });
   ok(res, toPublicUser(u));
 });
 

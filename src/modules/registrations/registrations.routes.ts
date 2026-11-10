@@ -392,7 +392,7 @@ registrationsRouter.post('/:id/approve', async (req, res) => {
         name: reg.fullName,
         email: reg.email!,
         phone: reg.phone,
-        role: 'coach',
+        lastRole: 'coach',
         roles: ['coach'],
         status: 'active',
         passwordHash: reg.passwordHash,

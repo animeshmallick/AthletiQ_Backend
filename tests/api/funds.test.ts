@@ -815,7 +815,13 @@ describe('migration backfill', () => {
     await db.delete(fundTxns);
     const file = readFileSync(path.join(__dirname, '../../drizzle/0006_funds.sql'), 'utf8');
     const backfill = file.slice(file.indexOf('-- Backfill')).split('--> statement-breakpoint');
-    for (const stmt of backfill) await db.execute(sql.raw(stmt));
+    // This old migration ran before `role` was renamed to `last_role`: replay it as it ran then.
+    await db.execute(sql.raw('ALTER TABLE users RENAME COLUMN last_role TO role'));
+    try {
+      for (const stmt of backfill) await db.execute(sql.raw(stmt));
+    } finally {
+      await db.execute(sql.raw('ALTER TABLE users RENAME COLUMN role TO last_role'));
+    }
 
     const o = (
       await (await as(a.admin)).get('/api/v1/funds/overview?from=2026-01-01&to=2026-02-28')

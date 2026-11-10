@@ -37,7 +37,7 @@ const TZ = 'Asia/Kolkata';
 const TZS = sql.raw(`'${TZ}'`);
 /** Actions that deserve a second look: money reversed, access changed, things removed. */
 const SENSITIVE =
-  '(refund|revert|revers|cancel|disabl|delete|remov|password|role|split|discount|waive|reject|token_reuse|locked)';
+  '(refund|revert|revers|cancel|disabl|delete|remov|password|roles_changed|split|discount|waive|reject|token_reuse|locked)';
 
 const localDay = (col: typeof auditLogs.createdAt | typeof apiRequests.createdAt) =>
   sql<string>`to_char(${col} at time zone ${TZS}, 'YYYY-MM-DD')`;
@@ -97,7 +97,7 @@ activityRouter.get('/logs', async (req, res) => {
   );
   const [rows, [{ n } = { n: 0 }]] = await Promise.all([
     db
-      .select({ log: auditLogs, actor: { id: users.id, name: users.name, role: users.role } })
+      .select({ log: auditLogs, actor: { id: users.id, name: users.name, role: users.lastRole } })
       .from(auditLogs)
       .leftJoin(users, eq(users.id, auditLogs.actorId))
       .where(where)
@@ -168,11 +168,11 @@ async function periodInsights(user: AuthUser, r: { from: IsoDate; to: IsoDate })
         .limit(12),
       admin
         ? db
-            .select({ id: users.id, name: users.name, role: users.role, n: count() })
+            .select({ id: users.id, name: users.name, role: users.lastRole, n: count() })
             .from(auditLogs)
             .innerJoin(users, eq(users.id, auditLogs.actorId))
             .where(where)
-            .groupBy(users.id, users.name, users.role)
+            .groupBy(users.id, users.name, users.lastRole)
             .orderBy(desc(count()))
             .limit(10)
         : [],
@@ -278,10 +278,10 @@ activityRouter.post('/summary', async (req, res) => {
         .limit(10),
       admin
         ? db
-            .select({ id: users.id, name: users.name, role: users.role, n: count() })
+            .select({ id: users.id, name: users.name, role: users.lastRole, n: count() })
             .from(auditLogs)
             .innerJoin(users, eq(users.id, auditLogs.actorId))
-            .groupBy(users.id, users.name, users.role)
+            .groupBy(users.id, users.name, users.lastRole)
             .orderBy(desc(count()))
             .limit(10)
         : [],
@@ -551,14 +551,14 @@ activityRouter.get('/requests/insights', async (req, res) => {
           .select({
             id: users.id,
             name: users.name,
-            role: users.role,
+            role: users.lastRole,
             n: count(),
             failed: sql<number>`count(*) filter (where ${apiRequests.status} >= 400)::int`,
           })
           .from(apiRequests)
           .innerJoin(users, eq(users.id, apiRequests.userId))
           .where(where)
-          .groupBy(users.id, users.name, users.role)
+          .groupBy(users.id, users.name, users.lastRole)
           .orderBy(desc(count()))
           .limit(10)
       : [],

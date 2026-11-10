@@ -68,14 +68,15 @@ export async function makeUser(
     .values({
       email: `${role}-${uniq()}@example.com`,
       name: role === 'admin' ? 'Admin User' : `Coach ${uniq()}`,
-      role,
+      lastRole: role,
       roles: [role],
       status: 'active',
       passwordHash: withPassword ? await hashPassword(PASSWORD) : null,
       ...rest,
     })
     .returning();
-  return u!;
+  // Tests sign in as this user in the role it was made with (or the given last role).
+  return { ...u!, role: u!.lastRole };
 }
 
 export async function tokenFor(user: {
