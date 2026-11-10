@@ -427,7 +427,8 @@ activityRouter.get('/errors', requireAdmin, async (req, res) => {
 activityRouter.get('/errors/insights', requireAdmin, async (req, res) => {
   const r = parse(Range, req.query);
   const where = errorWhere(r);
-  const [[totals], byDay, byStatus, byCode, byRoute] = await Promise.all([
+  const hourOf = sql<number>`extract(hour from ${apiRequests.createdAt} at time zone ${TZS})::int`;
+  const [[totals], byDay, byHourRows, byStatus, byCode, byRoute] = await Promise.all([
     db
       .select({
         total: count(),
@@ -447,6 +448,16 @@ activityRouter.get('/errors/insights', requireAdmin, async (req, res) => {
       .from(apiRequests)
       .where(where)
       .groupBy(localDay(apiRequests.createdAt)),
+    // Hour of day (IST): the chart for a single day.
+    db
+      .select({
+        hour: hourOf,
+        n: count(),
+        server: sql<number>`count(*) filter (where ${apiRequests.status} >= 500)::int`,
+      })
+      .from(apiRequests)
+      .where(where)
+      .groupBy(hourOf),
     db
       .select({ status: apiRequests.status, n: count() })
       .from(apiRequests)
@@ -485,6 +496,10 @@ activityRouter.get('/errors/insights', requireAdmin, async (req, res) => {
       n: perDay.get(date)?.n ?? 0,
       server: perDay.get(date)?.server ?? 0,
     })),
+    byHour: Array.from({ length: 24 }, (_, hour) => {
+      const h = byHourRows.find((x) => x.hour === hour);
+      return { hour, n: h?.n ?? 0, server: h?.server ?? 0 };
+    }),
     byStatus,
     byCode,
     byRoute,

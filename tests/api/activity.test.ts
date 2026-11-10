@@ -170,6 +170,9 @@ describe('activity log', () => {
     expect(ins.byStatus.map((s: { status: number }) => s.status).sort()).toEqual([400, 403, 404]);
     expect(ins.byRoute.length).toBeGreaterThanOrEqual(2);
     expect(ins.byDay).toHaveLength(31);
+    // Hour of day for a one-day chart: 24 slots that add up to the total.
+    expect(ins.byHour).toHaveLength(24);
+    expect(ins.byHour.reduce((n: number, h: { n: number }) => n + h.n, 0)).toBe(3);
   });
 
   it('tracks every write and failure per person, off the request path', async () => {
