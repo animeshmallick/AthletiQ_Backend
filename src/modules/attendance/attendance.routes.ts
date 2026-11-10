@@ -1,5 +1,5 @@
 import { timesOn } from '../../lib/batch-times.js';
-import { and, asc, eq, gte, inArray, lte, sql, type SQL, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, lte, sql, type SQL, or } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { COACH_ATTENDANCE_EDIT_WINDOW_DAYS } from '../../config/constants.js';
@@ -35,6 +35,7 @@ import { assertNotCancelled, cancellationsIn, getCancellation } from './cancella
 export const attendanceRouter = Router();
 
 const zStatus = z.enum(['present', 'absent', 'late', 'excused']);
+type AttendanceStatus = z.infer<typeof zStatus>;
 type Status = z.infer<typeof zStatus>;
 
 function summarize(statuses: (Status | null)[]) {
@@ -211,6 +212,11 @@ attendanceRouter.get('/session', async (req, res) => {
     });
   }
 
+  const history = await recentAttendance(
+    batchId,
+    rows.map((r) => r.studentId),
+    date,
+  );
   const visit = user.role === 'coach' ? await coachVisit(user.id, batchId, date) : null;
   const needsCheckIn = !!visit && !visit.checkedIn;
   const checkedOut = !!visit?.checkedOut;
@@ -232,10 +238,50 @@ attendanceRouter.get('/session', async (req, res) => {
           : checkedOut
             ? CHECKED_OUT_LOCK
             : null,
-    students: rows,
+    students: rows.map((r) => ({
+      ...r,
+      ...(history.get(r.studentId) ?? { recent: [], rate30: null }),
+    })),
     summary: summarize(rows.map((r) => r.status)),
   });
 });
+
+/** Last 5 marks before `date` in this batch (newest first) and the 30-day attendance rate. */
+async function recentAttendance(batchId: string, studentIds: string[], date: IsoDate) {
+  const out = new Map<
+    string,
+    { recent: { date: IsoDate; status: AttendanceStatus }[]; rate30: number | null }
+  >();
+  if (!studentIds.length) return out;
+  const from = addDays(date, -60);
+  const rows = await db
+    .select({
+      studentId: studentAttendance.studentId,
+      date: studentAttendance.date,
+      status: studentAttendance.status,
+    })
+    .from(studentAttendance)
+    .where(
+      and(
+        eq(studentAttendance.batchId, batchId),
+        inArray(studentAttendance.studentId, studentIds),
+        gte(studentAttendance.date, from),
+        lt(studentAttendance.date, date),
+      ),
+    )
+    .orderBy(desc(studentAttendance.date));
+  const from30 = addDays(date, -30);
+  for (const id of studentIds) {
+    const mine = rows.filter((r) => r.studentId === id);
+    const last30 = mine.filter((r) => r.date >= from30);
+    const present = last30.filter((r) => r.status === 'present' || r.status === 'late').length;
+    out.set(id, {
+      recent: mine.slice(0, 5).map((r) => ({ date: r.date, status: r.status })),
+      rate30: last30.length ? Math.round((present * 100) / last30.length) : null,
+    });
+  }
+  return out;
+}
 
 const CHECKED_OUT_LOCK =
   'Attendance is locked after you check out of this session. Ask an admin to make changes.';
@@ -270,7 +316,7 @@ const MarkBody = z.object({
   batchId: zId,
   date: zIsoDate,
   records: z
-    .array(z.object({ studentId: zId, status: zStatus, note: zOptionalText(500) }))
+    .array(z.object({ studentId: zId, status: zStatus.nullable(), note: zOptionalText(500) }))
     .min(1)
     .max(300),
 });
@@ -313,29 +359,44 @@ attendanceRouter.put('/session', async (req, res) => {
     });
   }
 
+  const marks = body.records.filter(
+    (r): r is typeof r & { status: AttendanceStatus } => r.status !== null,
+  );
+  const clears = body.records.filter((r) => r.status === null).map((r) => r.studentId);
   await db.transaction(async (tx) => {
-    await tx
-      .insert(studentAttendance)
-      .values(
-        body.records.map((r) => ({
-          batchId: body.batchId,
-          studentId: r.studentId,
-          date: body.date,
-          status: r.status,
-          note: r.note,
-          isMakeup: expected.get(r.studentId)?.isMakeup ?? false,
-          markedById: user.id,
-        })),
-      )
-      .onConflictDoUpdate({
-        target: [studentAttendance.batchId, studentAttendance.studentId, studentAttendance.date],
-        set: {
-          status: sql`excluded.status`,
-          note: sql`excluded.note`,
-          markedById: user.id,
-          updatedAt: new Date(),
-        },
-      });
+    if (clears.length)
+      await tx
+        .delete(studentAttendance)
+        .where(
+          and(
+            eq(studentAttendance.batchId, body.batchId),
+            eq(studentAttendance.date, body.date),
+            inArray(studentAttendance.studentId, clears),
+          ),
+        );
+    if (marks.length)
+      await tx
+        .insert(studentAttendance)
+        .values(
+          marks.map((r) => ({
+            batchId: body.batchId,
+            studentId: r.studentId,
+            date: body.date,
+            status: r.status,
+            note: r.note,
+            isMakeup: expected.get(r.studentId)?.isMakeup ?? false,
+            markedById: user.id,
+          })),
+        )
+        .onConflictDoUpdate({
+          target: [studentAttendance.batchId, studentAttendance.studentId, studentAttendance.date],
+          set: {
+            status: sql`excluded.status`,
+            note: sql`excluded.note`,
+            markedById: user.id,
+            updatedAt: new Date(),
+          },
+        });
     if (diffDays(body.date, todayInAppTz()) > COACH_ATTENDANCE_EDIT_WINDOW_DAYS) {
       await audit(
         {
