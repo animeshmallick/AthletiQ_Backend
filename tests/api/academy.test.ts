@@ -140,6 +140,31 @@ describe('locations', () => {
 });
 
 describe('fee plans', () => {
+  it('keeps the order the admin drags plans into; new plans go last', async () => {
+    const { admin, coach, plan } = await makeAcademy();
+    const api = await as(admin);
+    const b = await api
+      .post('/api/v1/fee-plans', { name: 'Two days', daysPerWeek: 2, monthlyFee: 150_000 })
+      .expect(201);
+    const c = await api
+      .post('/api/v1/fee-plans', { name: 'Weekend', daysPerWeek: 2, monthlyFee: 120_000 })
+      .expect(201);
+    const names = async () =>
+      (await api.get('/api/v1/fee-plans').expect(200)).body.data.map(
+        (p: { name: string }) => p.name,
+      );
+    // Created last, listed last (not by days or price).
+    expect((await names()).slice(-2)).toEqual(['Two days', 'Weekend']);
+
+    const ids = [c.body.data.id, plan.id, b.body.data.id];
+    await api.put('/api/v1/fee-plans/order', { ids }).expect(200);
+    expect(await names()).toEqual(['Weekend', plan.name, 'Two days']);
+
+    await api.put('/api/v1/fee-plans/order', { ids: ids.slice(1) }).expect(400);
+    await api.put('/api/v1/fee-plans/order', { ids: [...ids, ids[0]] }).expect(400);
+    await (await as(coach)).put('/api/v1/fee-plans/order', { ids }).expect(403);
+  });
+
   it('manages plans with usage counts and history-safe price changes', async () => {
     const { admin, batch, plan } = await makeAcademy();
     await makeStudent({ batchId: batch.id, feePlanId: plan.id }, admin.id);

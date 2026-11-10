@@ -27,6 +27,7 @@ import { makeupsRouter } from './modules/makeups/makeups.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { reportsRouter } from './modules/reports/reports.routes.js';
 import { fundsRouter } from './modules/funds/funds.routes.js';
+import { clientEventsRouter } from './modules/activity/client-events.js';
 import { skillsRouter } from './modules/skills/skills.routes.js';
 import { sportsRouter } from './modules/skills/sports.routes.js';
 
@@ -38,6 +39,8 @@ export function apiRouter(): Router {
   api.use('/auth', authRouter);
   api.use('/public', publicRouter);
   api.use('/public/register', publicRegistrationRouter);
+  // Client-side logs: reports work signed in or out; insights need a session (inside).
+  api.use('/client-events', clientEventsRouter);
 
   // Authenticated
   api.use(requireAuth);

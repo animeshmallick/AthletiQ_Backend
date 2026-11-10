@@ -114,6 +114,8 @@ export const feePlans = pgTable(
      * batch but not listed (or editable) on the Fee plans page. There is exactly one.
      */
     isSystem: boolean().notNull().default(false),
+    /** Where the plan sits in lists (admins drag to reorder); lower first. */
+    sortOrder: integer().notNull().default(0),
     ...timestamps,
   },
   (t) => [

@@ -80,3 +80,19 @@ export function currentUser(req: Request): AuthUser {
   if (!req.user) throw AppError.unauthenticated();
   return req.user;
 }
+
+/**
+ * Attaches the user when the request carries a valid session, and carries on either way (for
+ * endpoints that also work signed out, like client error reports from the login screen).
+ */
+export const optionalAuth: RequestHandler = async (req, res, next) => {
+  if (extractBearer(req)) {
+    try {
+      await requireAuth(req, res, () => undefined);
+    } catch {
+      req.user = undefined;
+    }
+    res.locals.accessTokenExpired = false;
+  }
+  next();
+};

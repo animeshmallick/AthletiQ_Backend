@@ -245,7 +245,9 @@ describe('activity within the last few hours', () => {
     await log('student.updated', ago(30)); // outside both
 
     const since = ago(3).toISOString();
-    const day = (d: Date) => d.toISOString().slice(0, 10);
+    // Dates as the API reads them (IST), so this holds around midnight too.
+    const day = (d: Date) =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
     const q = `from=${day(ago(3))}&to=${day(new Date())}&since=${encodeURIComponent(since)}`;
     const logs = (await admin$.get(`/api/v1/activity/logs?${q}`).expect(200)).body.data;
     expect(logs.map((l: { action: string }) => l.action).sort()).toEqual([

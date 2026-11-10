@@ -162,6 +162,20 @@
       "when": 1794337396596,
       "tag": "0022_drop_old_lesson_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1794341152644,
+      "tag": "0023_fee_plan_order",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1794341543606,
+      "tag": "0024_client_events",
+      "breakpoints": true
     }
   ]
 }

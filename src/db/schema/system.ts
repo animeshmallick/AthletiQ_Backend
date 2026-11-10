@@ -1,5 +1,15 @@
 import { sql } from 'drizzle-orm';
-import { check, date, index, integer, jsonb, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  check,
+  date,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { id, jobRunStatus, timestamps, tz } from './_shared.js';
 import { users } from './users.js';
 
@@ -101,3 +111,43 @@ export const shareLinkAttempts = pgTable('share_link_attempts', {
   lockedUntil: tz(),
   updatedAt: tz().notNull().defaultNow(),
 });
+
+/**
+ * What went wrong on people's phones and browsers: crashes, script errors, failed updates,
+ * freezes and failed API calls as the device saw them. Sent by the app in small batches; the same
+ * error repeated in a session arrives once with a count. Pruned after 30 days.
+ */
+export const clientEvents = pgTable(
+  'client_events',
+  {
+    id: id(),
+    /** crash | error | update | freeze | stuck | api */
+    kind: text().notNull(),
+    /** Groups the same problem (kind + normalised message + where it happened). */
+    fingerprint: text().notNull(),
+    message: text().notNull(),
+    stack: text(),
+    /** The screen (path) the person was on. */
+    screen: text(),
+    appVersion: text(),
+    /** web | pwa | android | ios */
+    platform: text().notNull(),
+    userAgent: text(),
+    online: boolean(),
+    /** Times it happened in the batch (repeats are merged on the device). */
+    count: integer().notNull().default(1),
+    /** Extra facts: the API call (method, route, status, ms), how long a freeze lasted… */
+    details: jsonb().$type<Record<string, unknown>>(),
+    userId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    /** Role in use at the time (admin / coach), when signed in. */
+    role: text(),
+    /** When it happened on the device. */
+    occurredAt: tz().notNull(),
+    createdAt: tz().notNull().defaultNow(),
+  },
+  (t) => [
+    index('client_events_occurred_idx').on(t.occurredAt),
+    index('client_events_fingerprint_idx').on(t.fingerprint, t.occurredAt),
+    index('client_events_user_idx').on(t.userId, t.occurredAt),
+  ],
+);

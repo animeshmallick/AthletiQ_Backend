@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, isNull } from 'drizzle-orm';
+import { and, asc, count, desc, eq, isNull, sql } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -8,6 +8,7 @@ import { created, ok } from '../../lib/http.js';
 import {
   parse,
   zBoolQuery,
+  zId,
   zIdParam,
   zName,
   zOptionalText,
@@ -64,8 +65,13 @@ feePlansRouter.get('/', async (req, res) => {
         q.forBatch ? undefined : eq(feePlans.isSystem, false),
       ),
     )
-    // The free plan first, then by days and price.
-    .orderBy(desc(feePlans.isSystem), asc(feePlans.daysPerWeek), asc(feePlans.monthlyFee));
+    // The free plan first, then the admin's order (ties by days and price).
+    .orderBy(
+      desc(feePlans.isSystem),
+      asc(feePlans.sortOrder),
+      asc(feePlans.daysPerWeek),
+      asc(feePlans.monthlyFee),
+    );
 
   // Admins also get each plan's fee split ([] = everything to the academy).
   const splits = currentUser(req).role === 'admin' ? await splitTrees() : null;
@@ -81,7 +87,14 @@ feePlansRouter.get('/', async (req, res) => {
 
 feePlansRouter.post('/', requireAdmin, async (req, res) => {
   const body = parse(PlanBody, req.body);
-  const [plan] = await db.insert(feePlans).values(body).returning();
+  // New plans go to the end of the list.
+  const [last] = await db
+    .select({ n: sql<number>`coalesce(max(${feePlans.sortOrder}), -1)::int` })
+    .from(feePlans);
+  const [plan] = await db
+    .insert(feePlans)
+    .values({ ...body, sortOrder: (last?.n ?? -1) + 1 })
+    .returning();
   await audit({
     ...auditCtx(req),
     action: 'fee_plan.created',
@@ -90,6 +103,31 @@ feePlansRouter.post('/', requireAdmin, async (req, res) => {
     metadata: body,
   });
   created(res, plan);
+});
+
+/** Admin: the order plans are listed in (every non-system plan's id, in order). */
+feePlansRouter.put('/order', requireAdmin, async (req, res) => {
+  const { ids } = parse(z.object({ ids: z.array(zId).min(1).max(200) }), req.body);
+  if (new Set(ids).size !== ids.length) throw AppError.badRequest('Each plan can appear only once');
+  const plans = await db
+    .select({ id: feePlans.id })
+    .from(feePlans)
+    .where(eq(feePlans.isSystem, false));
+  const known = new Set(plans.map((p) => p.id));
+  if (ids.length !== known.size || ids.some((id) => !known.has(id)))
+    throw AppError.badRequest('Send every fee plan exactly once');
+  await db.transaction(async (tx) => {
+    for (const [i, id] of ids.entries())
+      await tx.update(feePlans).set({ sortOrder: i }).where(eq(feePlans.id, id));
+  });
+  await audit({
+    ...auditCtx(req),
+    action: 'fee_plan.reordered',
+    entityType: 'fee_plan',
+    entityId: ids[0]!,
+    metadata: { ids },
+  });
+  ok(res, { ids });
 });
 
 /**
