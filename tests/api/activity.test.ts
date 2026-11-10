@@ -244,6 +244,18 @@ describe('activity within the last few hours', () => {
     ]);
     const ins = (await admin$.get(`/api/v1/activity/insights?${q}`).expect(200)).body.data;
     expect(ins.totals).toMatchObject({ events: 2, previous: 1 });
+    // In 10-minute slices: 18 for 3 hours (plus the current, partial one), oldest first.
+    const sliced = (await admin$.get(`/api/v1/activity/insights?${q}&bucket=10`).expect(200)).body
+      .data;
+    expect(sliced.byBucket.length).toBeGreaterThanOrEqual(18);
+    expect(sliced.byBucket.length).toBeLessThanOrEqual(19);
+    expect(sliced.byBucket.reduce((n: number, b: { n: number }) => n + b.n, 0)).toBe(2);
+    expect(Date.parse(sliced.byBucket[1].at) - Date.parse(sliced.byBucket[0].at)).toBe(600_000);
+    expect(ins.byBucket).toBeNull(); // no bucket asked for
+    await admin$.get(`/api/v1/activity/insights?${q}&bucket=7`).expect(400);
+    const errs = (await admin$.get(`/api/v1/activity/errors/insights?${q}&bucket=10`).expect(200))
+      .body.data;
+    expect(errs.byBucket.length).toBeGreaterThanOrEqual(18);
     await admin$.get('/api/v1/activity/logs?since=yesterday').expect(400);
   });
 });

@@ -53,10 +53,37 @@ function scopeFor(user: AuthUser): SQL | undefined {
  * 3 hours". `from` / `to` still give the dates the window covers.
  */
 const zSince = z.iso.datetime({ offset: true }).optional();
-type Window = { from: IsoDate; to: IsoDate; since?: string };
+/** With `since`: chart in slices of this many minutes (e.g. 5 for the last hour). */
+const zBucket = z.coerce
+  .number()
+  .int()
+  .refine((m) => [5, 10, 15, 30].includes(m), 'Bucket must be 5, 10, 15 or 30 minutes')
+  .optional();
+type Window = { from: IsoDate; to: IsoDate; since?: string; bucket?: number };
+
+/** Index of the time slice (from `since`) a row falls in. */
+// Inlined (not bind parameters) so the GROUP BY matches the select; both are validated above
+// (an ISO timestamp and one of a few whole numbers).
+const sliceOf = (col: typeof auditLogs.createdAt | typeof apiRequests.createdAt, r: Window) =>
+  sql<number>`floor(extract(epoch from (${col} - ${sql.raw(`'${new Date(r.since!).toISOString()}'`)}::timestamptz)) / ${sql.raw(String(Number(r.bucket) * 60))})::int`;
+
+/** Every slice from `since` up to now, filled in (empty slices count 0). */
+function slices(r: Window, rows: { i: number; n: number; server?: number }[]) {
+  const start = Date.parse(r.since!);
+  const size = r.bucket! * 60_000;
+  const count = Math.min(Math.max(Math.ceil((Date.now() - start) / size), 1), 200);
+  return Array.from({ length: count }, (_, i) => {
+    const row = rows.find((x) => x.i === i);
+    return {
+      at: new Date(start + i * size).toISOString(),
+      n: row?.n ?? 0,
+      server: row?.server ?? 0,
+    };
+  });
+}
 
 const Range = z
-  .object({ from: zIsoDate, to: zIsoDate, since: zSince })
+  .object({ from: zIsoDate, to: zIsoDate, since: zSince, bucket: zBucket })
   .refine((r) => r.to >= r.from && diffDays(r.from, r.to) <= 400, {
     message: 'Choose a range of up to about a year',
   });
@@ -216,10 +243,20 @@ async function periodInsights(user: AuthUser, r: Window) {
   const busiest = series.reduce((m, d) => (d.n > m.n ? d : m), { date: r.from, n: 0 });
   const hours = Array.from({ length: 24 }, (_, h) => byHour.find((x) => x.hour === h)?.n ?? 0);
   const events = totals?.events ?? 0;
+  const bucketRows =
+    r.since && r.bucket
+      ? await db
+          .select({ i: sliceOf(auditLogs.createdAt, r), n: count() })
+          .from(auditLogs)
+          .where(where)
+          .groupBy(sliceOf(auditLogs.createdAt, r))
+      : null;
   return {
     from: r.from,
     to: r.to,
     since: r.since ?? null,
+    /** Short windows: activity per slice (e.g. every 5 minutes), oldest first. */
+    byBucket: bucketRows ? slices(r, bucketRows).map(({ at, n }) => ({ at, n })) : null,
     totals: {
       events,
       people: totals?.people ?? 0,
@@ -509,10 +546,24 @@ activityRouter.get('/errors/insights', requireAdmin, async (req, res) => {
       .limit(10),
   ]);
   const perDay = new Map(byDay.map((d) => [d.date, d]));
+  const bucketRows =
+    r.since && r.bucket
+      ? await db
+          .select({
+            i: sliceOf(apiRequests.createdAt, r),
+            n: count(),
+            server: sql<number>`count(*) filter (where ${apiRequests.status} >= 500)::int`,
+          })
+          .from(apiRequests)
+          .where(where)
+          .groupBy(sliceOf(apiRequests.createdAt, r))
+      : null;
   ok(res, {
     from: r.from,
     to: r.to,
     since: r.since ?? null,
+    /** Short windows: failures per slice (e.g. every 5 minutes), oldest first. */
+    byBucket: bucketRows ? slices(r, bucketRows) : null,
     totals: totals ?? { total: 0, server: 0, client: 0, routes: 0, users: 0 },
     byDay: eachDay(r.from, r.to).map((date) => ({
       date,
