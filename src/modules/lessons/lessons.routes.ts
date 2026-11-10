@@ -1,617 +1,564 @@
-import { and, asc, desc, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
+/**
+ * Lesson plans: one plan per batch. A plan is an ordered list of timed blocks, each holding its
+ * drills. Every session of the batch follows the plan; a coach can adjust a single session (its
+ * own copy), and reset it back. The blocks must add up to exactly the session length — on every
+ * day the batch runs for the batch plan, and on that day for a session.
+ *
+ *  GET    /lessons/batch-plan?batchId           the batch's plan (+ session lengths, can-edit)
+ *  PUT    /lessons/batch-plan                   replace it (the batch's own coach)
+ *  POST   /lessons/batch-plan/copy              copy to other batches of the same session length
+ *  GET    /lessons/session?batchId&date         that day's plan (its own copy, else the batch's)
+ *  PUT    /lessons/session                      adjust that day (coach or covering substitute)
+ *  DELETE /lessons/session?batchId&date         back to the batch plan
+ *  GET    /lessons/overview                     each batch: plan status, totals, adjusted days
+ */
+import { and, asc, count, eq, gte, inArray, sql } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, type DbOrTx } from '../../db/client.js';
 import {
-  lessonEvents,
-  lessonPlanCells,
-  lessonPlans,
-  lessonPlanTemplates,
-  lessonStages,
+  batchPlanBlocks,
+  batchPlanDrills,
+  batchPlans,
+  batches,
+  locations,
+  sessionPlans,
+  sports,
+  users,
+  type SessionBlock,
 } from '../../db/schema/index.js';
-import { diffDays, eachDay, isoWeekday, type IsoDate } from '../../lib/dates.js';
+import { timesOn } from '../../lib/batch-times.js';
+import { addDays, isoWeekday, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
-import { created, noContent, ok } from '../../lib/http.js';
-import { parse, zId, zIdParam, zIsoDate, zName, zOptionalText } from '../../lib/validation.js';
+import { noContent, ok } from '../../lib/http.js';
+import { parse, zId, zIsoDate, zName, zOptionalText } from '../../lib/validation.js';
 import { currentUser, requireCoach } from '../../middleware/auth.js';
+import { assertBatchAccess, isAdmin, isSubstituteFor } from '../access/access.js';
+import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
-import { assertBatchAccess, isSubstituteFor } from '../access/access.js';
-import { cancellationsIn, getCancellation } from '../attendance/cancellations.js';
-import { lessonInsights } from './insights.js';
+import { getCancellation } from '../attendance/cancellations.js';
 
 export const lessonsRouter = Router();
 
-/**
- * Each coach keeps one library: stages (the timed blocks of a session, e.g. Warm-up 10 min) and
- * events (drills / skills picked into those blocks). It is used across all their batches. A day's
- * plan picks blocks and drills from the library, with minutes per block, a focus line and notes;
- * whole plans can be saved under a name and applied to any session in one tap.
- */
+type BatchRow = Awaited<ReturnType<typeof assertBatchAccess>>;
+type Timed = Pick<BatchRow, 'weekdays' | 'startTime' | 'endTime' | 'dayTimes'>;
 
-// ─── Library: stages (blocks) and events (drills) ────────────────────────────
+const toMin = (t: string) => {
+  const [h = 0, m = 0] = t.split(':').map(Number);
+  return h * 60 + m;
+};
 
-const zMinutes = z.number().int().min(1).max(240);
-const LibraryItem = z.object({
-  /** Batch the coach was planning when they added it (kept for history only). */
-  batchId: zId.optional(),
+/** Minutes each day the batch runs (ISO weekday → minutes), and the one length if all agree. */
+export function sessionLengths(b: Timed) {
+  const byDay: Record<string, number> = {};
+  for (const d of [...b.weekdays].sort()) {
+    const t = timesOn(b, d);
+    byDay[String(d)] = toMin(t.endTime) - toMin(t.startTime);
+  }
+  const lengths = [...new Set(Object.values(byDay))];
+  return { byDay, minutes: lengths.length === 1 ? lengths[0]! : null };
+}
+
+const sumMinutes = (blocks: { minutes: number }[]) => blocks.reduce((n, b) => n + b.minutes, 0);
+const WEEKDAY = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+// ─── Shapes ──────────────────────────────────────────────────────────────────
+
+const zMinutes = z.number().int().min(1).max(600);
+const zDrill = z.object({
   name: zName,
-  description: zOptionalText(500),
+  minutes: zMinutes.nullable().optional(),
+  reps: zOptionalText(60),
+  note: zOptionalText(500),
+});
+const zBlock = z.object({
+  name: zName,
   color: z
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/, 'Must be a hex colour like #22c55e')
     .nullable()
     .optional(),
-  durationMin: zMinutes.nullable().optional(),
+  minutes: zMinutes,
+  drills: z.array(zDrill).max(30).default([]),
 });
-const LibraryPatch = LibraryItem.omit({ batchId: true })
-  .partial()
-  .extend({ isArchived: z.boolean().optional() });
-const ReorderBody = z.object({ ids: z.array(zId).min(1).max(200) });
+const zBlocks = z.array(zBlock).min(1, 'Add at least one block').max(20);
+type BlocksInput = z.infer<typeof zBlocks>;
 
-/** Whose library a request reads: the coach's own; for admins, the given batch's coach. */
-async function libraryOwner(user: AuthUser, batchId: string | undefined) {
-  if (user.role !== 'admin') return user.id;
-  if (!batchId) throw AppError.badRequest('Pick a batch');
-  return (await assertBatchAccess(user, batchId)).coachId;
-}
-
-function libraryRoutes(kind: 'stages' | 'events') {
-  const table = kind === 'stages' ? lessonStages : lessonEvents;
-  const label = kind === 'stages' ? 'Stage' : 'Drill';
-
-  lessonsRouter.get(`/${kind}`, async (req, res) => {
-    const { batchId, includeArchived } = parse(
-      z.object({ batchId: zId.optional(), includeArchived: z.enum(['true', 'false']).optional() }),
-      req.query,
-    );
-    const owner = await libraryOwner(currentUser(req), batchId);
-    const rows = await db
-      .select()
-      .from(table)
-      .where(
-        and(
-          eq(table.coachId, owner),
-          includeArchived === 'true' ? undefined : eq(table.isArchived, false),
-        ),
-      )
-      .orderBy(asc(table.sortOrder), asc(table.name));
-    ok(res, rows);
-  });
-
-  lessonsRouter.post(`/${kind}`, requireCoach, async (req, res) => {
-    const user = currentUser(req);
-    const body = parse(LibraryItem, req.body);
-    if (body.batchId) await assertBatchAccess(user, body.batchId);
-    const [{ next } = { next: 0 }] = await db
-      .select({ next: sql<number>`coalesce(max(${table.sortOrder}), -1)::int + 1` })
-      .from(table)
-      .where(eq(table.coachId, user.id));
-    const base = {
-      batchId: body.batchId ?? null,
-      coachId: user.id,
-      name: body.name,
-      sortOrder: next,
-    };
-    const values =
-      kind === 'stages'
-        ? { ...base, color: body.color ?? null, durationMin: body.durationMin ?? null }
-        : { ...base, description: body.description };
-    const [row] = await db
-      .insert(table)
-      .values(values as typeof table.$inferInsert)
-      .returning();
-    created(res, row);
-  });
-
-  lessonsRouter.put(`/${kind}/order`, requireCoach, async (req, res) => {
-    const { ids } = parse(ReorderBody, req.body);
-    const user = currentUser(req);
-    await db.transaction(async (tx) => {
-      const owned = await tx
-        .select({ id: table.id })
-        .from(table)
-        .where(and(eq(table.coachId, user.id), inArray(table.id, ids)));
-      if (owned.length !== new Set(ids).size)
-        throw AppError.badRequest(`Unknown ${kind} in order list`);
-      await Promise.all(
-        ids.map((id, i) => tx.update(table).set({ sortOrder: i }).where(eq(table.id, id))),
+/** A block's drills must fit inside it (when drills have their own minutes). */
+function checkDrillMinutes(blocks: BlocksInput) {
+  for (const b of blocks) {
+    const used = b.drills.reduce((n, d) => n + (d.minutes ?? 0), 0);
+    if (used > b.minutes)
+      throw AppError.unprocessable(
+        `${b.name}: its drills take ${used} min, more than the block's ${b.minutes} min.`,
       );
-    });
-    noContent(res);
-  });
-
-  lessonsRouter.patch(`/${kind}/:id`, requireCoach, async (req, res) => {
-    const { id } = parse(zIdParam, req.params);
-    const body = parse(LibraryPatch, req.body);
-    const [item] = await db.select({ coachId: table.coachId }).from(table).where(eq(table.id, id));
-    if (!item || item.coachId !== currentUser(req).id) throw AppError.notFound(label);
-    const changes =
-      kind === 'stages'
-        ? {
-            name: body.name,
-            color: body.color,
-            durationMin: body.durationMin,
-            isArchived: body.isArchived,
-          }
-        : { name: body.name, description: body.description, isArchived: body.isArchived };
-    const [row] = await db.update(table).set(changes).where(eq(table.id, id)).returning();
-    ok(res, row);
-  });
+  }
 }
 
-libraryRoutes('stages');
-libraryRoutes('events');
+// ─── Batch plan ──────────────────────────────────────────────────────────────
 
-// ─── Daily plans ─────────────────────────────────────────────────────────────
-
-type Cell = { eventId: string; stageId: string; content: string };
-type Grid = {
-  stageIds: string[];
-  eventIds: string[];
-  durations: Record<string, number>;
-  focus: string | null;
-  notes: string | null;
-  cells: Cell[];
-};
-
-async function loadPlan(batchId: string, date: string, tx: DbOrTx = db) {
-  const plan = await tx.query.lessonPlans.findFirst({
-    where: and(eq(lessonPlans.batchId, batchId), eq(lessonPlans.date, date)),
-  });
+export async function loadBatchPlan(batchId: string, tx: DbOrTx = db) {
+  const [plan] = await tx
+    .select({
+      id: batchPlans.id,
+      focus: batchPlans.focus,
+      notes: batchPlans.notes,
+      updatedAt: batchPlans.updatedAt,
+      updatedById: users.id,
+      updatedByName: users.name,
+    })
+    .from(batchPlans)
+    .leftJoin(users, eq(users.id, batchPlans.updatedById))
+    .where(eq(batchPlans.batchId, batchId));
   if (!plan) return null;
-  const cells = await tx.select().from(lessonPlanCells).where(eq(lessonPlanCells.planId, plan.id));
-  return {
-    id: plan.id,
-    batchId: plan.batchId,
-    coachId: plan.coachId,
-    date: plan.date,
-    updatedAt: plan.updatedAt,
-    ...(await expandGrid(
-      {
-        stageIds: plan.stageIds,
-        eventIds: plan.eventIds,
-        durations: plan.durations,
-        focus: plan.focus,
-        notes: plan.notes,
-        cells: cells.map((c) => ({ eventId: c.eventId, stageId: c.stageId, content: c.content })),
-      },
-      tx,
-    )),
-  };
-}
-
-/** Resolves a grid's ids into names, colours and minutes (in the grid's order). */
-async function expandGrid(grid: Grid, tx: DbOrTx = db) {
-  const [stages, events] = await Promise.all([
-    grid.stageIds.length
-      ? tx.select().from(lessonStages).where(inArray(lessonStages.id, grid.stageIds))
-      : [],
-    grid.eventIds.length
-      ? tx.select().from(lessonEvents).where(inArray(lessonEvents.id, grid.eventIds))
-      : [],
-  ]);
-  const byId = <T extends { id: string }>(rows: T[], ids: string[]) =>
-    ids.map((id) => rows.find((r) => r.id === id)).filter((r): r is T => Boolean(r));
-  const orderedStages = byId(stages, grid.stageIds).map((s) => ({
-    id: s.id,
-    name: s.name,
-    color: s.color,
-    durationMin: s.durationMin,
-    /** This session's minutes for the block (falls back to the library default). */
-    minutes: grid.durations[s.id] ?? s.durationMin ?? null,
+  const blocks = await tx
+    .select()
+    .from(batchPlanBlocks)
+    .where(eq(batchPlanBlocks.planId, plan.id))
+    .orderBy(asc(batchPlanBlocks.sortOrder));
+  const drills = blocks.length
+    ? await tx
+        .select()
+        .from(batchPlanDrills)
+        .where(
+          inArray(
+            batchPlanDrills.blockId,
+            blocks.map((b) => b.id),
+          ),
+        )
+        .orderBy(asc(batchPlanDrills.sortOrder))
+    : [];
+  const shaped = blocks.map((b) => ({
+    id: b.id,
+    name: b.name,
+    color: b.color,
+    minutes: b.minutes,
+    drills: drills
+      .filter((d) => d.blockId === b.id)
+      .map((d) => ({ id: d.id, name: d.name, minutes: d.minutes, reps: d.reps, note: d.note })),
   }));
   return {
-    focus: grid.focus,
-    notes: grid.notes,
-    durations: grid.durations,
-    totalMinutes: orderedStages.reduce((n, s) => n + (s.minutes ?? 0), 0),
-    stages: orderedStages,
-    events: byId(events, grid.eventIds).map((e) => ({
-      id: e.id,
-      name: e.name,
-      description: e.description,
-    })),
-    cells: grid.cells,
+    focus: plan.focus,
+    notes: plan.notes,
+    updatedAt: plan.updatedAt,
+    updatedBy:
+      plan.updatedById && plan.updatedByName
+        ? { id: plan.updatedById, name: plan.updatedByName }
+        : null,
+    totalMinutes: sumMinutes(shaped),
+    blocks: shaped,
   };
 }
 
-/** Calendar view: which days in a range have a plan, and how filled each grid is. */
-lessonsRouter.get('/plans', async (req, res) => {
-  const q = parse(z.object({ batchId: zId, from: zIsoDate, to: zIsoDate }), req.query);
-  if (q.to < q.from || diffDays(q.from, q.to) > 92)
-    throw AppError.badRequest('Choose a range of up to 3 months');
-  const batch = await assertBatchAccess(currentUser(req), q.batchId);
-
-  const plans = await db
-    .select({
-      id: lessonPlans.id,
-      date: lessonPlans.date,
-      focus: lessonPlans.focus,
-      gridSize: sql<number>`cardinality(${lessonPlans.stageIds})::int`,
-      filled: sql<number>`count(distinct ${lessonPlanCells.stageId})::int`,
-      content: sql<boolean>`(count(${lessonPlanCells.id}) > 0 or coalesce(btrim(${lessonPlans.focus}), '') <> '' or coalesce(btrim(${lessonPlans.notes}), '') <> '')`,
-    })
-    .from(lessonPlans)
-    .leftJoin(lessonPlanCells, eq(lessonPlanCells.planId, lessonPlans.id))
-    .where(
-      and(
-        eq(lessonPlans.batchId, q.batchId),
-        gte(lessonPlans.date, q.from),
-        lte(lessonPlans.date, q.to),
-      ),
-    )
-    .groupBy(lessonPlans.id);
-
-  const byDate = new Map(plans.map((p) => [p.date, p]));
-  const cancelled = await cancellationsIn([q.batchId], q.from, q.to);
-  ok(res, {
-    batch: { id: batch.id, name: batch.name, weekdays: batch.weekdays },
-    days: eachDay(q.from, q.to).map((date) => {
-      const p = byDate.get(date);
-      return {
-        date,
-        isSessionDay: batch.weekdays.includes(isoWeekday(date)),
-        cancelled: cancelled.get(`${q.batchId}:${date}`) ?? null,
-        planId: p?.id ?? null,
-        /** Anything filled in (a drill, the focus or notes): the session counts as planned. */
-        hasContent: p?.content ?? false,
-        focus: p?.focus ?? null,
-        filledCells: p?.filled ?? 0,
-        totalCells: p?.gridSize ?? 0,
-      };
-    }),
-  });
-});
-
-/** Planning coverage, look-ahead and library usage across the caller's batches. */
-lessonsRouter.get('/insights', lessonInsights);
-
-lessonsRouter.get('/plans/day', async (req, res) => {
-  const q = parse(z.object({ batchId: zId, date: zIsoDate }), req.query);
-  const batch = await assertBatchAccess(currentUser(req), q.batchId, { on: q.date });
-  const [plan, cancelled, blocked, [previous]] = await Promise.all([
-    loadPlan(q.batchId, q.date),
-    getCancellation(q.batchId, q.date),
-    planBlockedReason(batch, q.date),
-    db
-      .select({ date: lessonPlans.date })
-      .from(lessonPlans)
-      .where(and(eq(lessonPlans.batchId, q.batchId), lt(lessonPlans.date, q.date)))
-      .orderBy(desc(lessonPlans.date))
-      .limit(1),
-  ]);
-  ok(res, {
-    batch: {
-      id: batch.id,
-      name: batch.name,
-      startTime: batch.startTime,
-      endTime: batch.endTime,
-    },
-    date: q.date,
-    isSessionDay: batch.weekdays.includes(isoWeekday(q.date)),
-    cancelled: cancelled?.reason ?? null,
-    /** Why the plan can't be edited on this day (not a session day / cancelled), else null. */
-    lockedReason: blocked,
-    /** The most recent earlier plan for this batch, to start a new day from. */
-    previousPlanDate: previous?.date ?? null,
-    plan,
-  });
-});
-
-const zGrid = z
-  .object({
-    stageIds: z.array(zId).max(30),
-    eventIds: z.array(zId).max(60),
-    durations: z.record(zId, zMinutes).default({}),
-    focus: zOptionalText(200),
-    notes: zOptionalText(4000),
-    cells: z
-      .array(z.object({ eventId: zId, stageId: zId, content: z.string().max(2000) }))
-      .max(1800),
-  })
-  .refine(
-    (b) =>
-      new Set(b.stageIds).size === b.stageIds.length &&
-      new Set(b.eventIds).size === b.eventIds.length,
-    { message: 'Stages and drills must not repeat' },
-  );
-const SavePlanBody = z.object({ batchId: zId, date: zIsoDate }).and(zGrid);
-
-/** Every stage/drill in a plan must come from the planner's or the batch coach's library. */
-async function assertLibrary(tx: DbOrTx, owners: string[], stageIds: string[], eventIds: string[]) {
-  const [stages, events] = await Promise.all([
-    stageIds.length
-      ? tx
-          .select({ id: lessonStages.id })
-          .from(lessonStages)
-          .where(and(inArray(lessonStages.coachId, owners), inArray(lessonStages.id, stageIds)))
-      : [],
-    eventIds.length
-      ? tx
-          .select({ id: lessonEvents.id })
-          .from(lessonEvents)
-          .where(and(inArray(lessonEvents.coachId, owners), inArray(lessonEvents.id, eventIds)))
-      : [],
-  ]);
-  if (stages.length !== stageIds.length || events.length !== eventIds.length) {
-    throw AppError.badRequest("Plan uses stages or drills that aren't in your library");
-  }
-}
-
-/** Keeps only what belongs to the grid: cells on its rows/columns, minutes for its stages. */
-function cleanGrid(input: Grid): Grid {
-  const stageSet = new Set(input.stageIds);
-  const eventSet = new Set(input.eventIds);
-  const seen = new Set<string>();
-  return {
-    ...input,
-    durations: Object.fromEntries(
-      Object.entries(input.durations).filter(([id]) => stageSet.has(id)),
-    ),
-    // A cell with no text still means "this drill runs in this block".
-    cells: input.cells
-      .filter((c) => stageSet.has(c.stageId) && eventSet.has(c.eventId))
-      .filter((c) => {
-        const k = `${c.eventId}:${c.stageId}`;
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      })
-      .map((c) => ({ ...c, content: c.content.trim() })),
-  };
-}
-
-async function writePlan(
+/** Writes a batch's plan (replacing what was there). */
+export async function writeBatchPlan(
   tx: DbOrTx,
-  coachId: string,
-  input: { batchId: string; date: string } & Grid,
+  batchId: string,
+  userId: string | null,
+  body: { focus?: string | null; notes?: string | null; blocks: BlocksInput },
 ) {
-  const grid = cleanGrid(input);
-  const values = {
-    stageIds: grid.stageIds,
-    eventIds: grid.eventIds,
-    durations: grid.durations,
-    focus: grid.focus,
-    notes: grid.notes,
-  };
+  const values = { focus: body.focus ?? null, notes: body.notes ?? null, updatedById: userId };
   const [plan] = await tx
-    .insert(lessonPlans)
-    .values({ batchId: input.batchId, coachId, date: input.date, ...values })
-    .onConflictDoUpdate({
-      target: [lessonPlans.batchId, lessonPlans.date],
-      set: { ...values, coachId, updatedAt: new Date() },
-    })
-    .returning({ id: lessonPlans.id });
-
-  await tx.delete(lessonPlanCells).where(eq(lessonPlanCells.planId, plan!.id));
-  if (grid.cells.length)
-    await tx.insert(lessonPlanCells).values(grid.cells.map((c) => ({ planId: plan!.id, ...c })));
+    .insert(batchPlans)
+    .values({ batchId, ...values })
+    .onConflictDoUpdate({ target: batchPlans.batchId, set: { ...values, updatedAt: new Date() } })
+    .returning({ id: batchPlans.id });
+  await tx.delete(batchPlanBlocks).where(eq(batchPlanBlocks.planId, plan!.id));
+  for (const [i, b] of body.blocks.entries()) {
+    const [block] = await tx
+      .insert(batchPlanBlocks)
+      .values({
+        planId: plan!.id,
+        name: b.name,
+        color: b.color ?? null,
+        minutes: b.minutes,
+        sortOrder: i,
+      })
+      .returning({ id: batchPlanBlocks.id });
+    if (b.drills.length)
+      await tx.insert(batchPlanDrills).values(
+        b.drills.map((d, j) => ({
+          blockId: block!.id,
+          name: d.name,
+          minutes: d.minutes ?? null,
+          reps: d.reps ?? null,
+          note: d.note ?? null,
+          sortOrder: j,
+        })),
+      );
+  }
 }
 
-/** Why a plan can't be written for this batch on this date, or null if it can. */
-async function planBlockedReason(
-  batch: { id: string; name: string; weekdays: number[] },
-  date: IsoDate,
-): Promise<string | null> {
-  if (!batch.weekdays.includes(isoWeekday(date))) {
-    return `${batch.name} doesn't run on this day, so it can't have a lesson plan.`;
+/** Why a plan with this total can't be the batch's plan, or null. */
+export function batchPlanMismatch(batch: Timed & { name: string }, total: number): string | null {
+  const { byDay, minutes } = sessionLengths(batch);
+  if (minutes === null) {
+    const days = Object.entries(byDay)
+      .map(([d, m]) => `${WEEKDAY[Number(d)]} ${m} min`)
+      .join(', ');
+    return `${batch.name}'s days aren't the same length (${days}). Make them equal to give it one plan.`;
   }
+  if (total !== minutes)
+    return `The blocks add up to ${total} min, but each session is ${minutes} min.`;
+  return null;
+}
+
+/** The batch's main coach edits its plan (not admins, not substitutes). */
+const canEditPlan = (user: AuthUser, batch: BatchRow) =>
+  user.role === 'coach' && batch.coachId === user.id;
+
+const batchInfo = (b: BatchRow) => {
+  const lengths = sessionLengths(b);
+  return {
+    id: b.id,
+    name: b.name,
+    weekdays: b.weekdays,
+    sessionMinutes: lengths.minutes,
+    minutesByDay: lengths.byDay,
+  };
+};
+
+lessonsRouter.get('/batch-plan', async (req, res) => {
+  const { batchId } = parse(z.object({ batchId: zId }), req.query);
+  const user = currentUser(req);
+  const batch = await assertBatchAccess(user, batchId);
+  const plan = await loadBatchPlan(batchId);
+  ok(res, {
+    batch: batchInfo(batch),
+    plan,
+    /** Why the plan doesn't fit the sessions (e.g. after a timing change), else null. */
+    mismatch: plan ? batchPlanMismatch(batch, plan.totalMinutes) : null,
+    canEdit: canEditPlan(user, batch),
+  });
+});
+
+const PlanBody = z.object({
+  batchId: zId,
+  focus: zOptionalText(200),
+  notes: zOptionalText(4000),
+  blocks: zBlocks,
+});
+
+lessonsRouter.put('/batch-plan', requireCoach, async (req, res) => {
+  const body = parse(PlanBody, req.body);
+  const user = currentUser(req);
+  const batch = await assertBatchAccess(user, body.batchId, { mainOnly: true });
+  if (!canEditPlan(user, batch))
+    throw AppError.forbidden("Only the batch's coach can change its plan");
+  checkDrillMinutes(body.blocks);
+  const mismatch = batchPlanMismatch(batch, sumMinutes(body.blocks));
+  if (mismatch) throw AppError.unprocessable(mismatch);
+  await db.transaction((tx) => writeBatchPlan(tx, batch.id, user.id, body));
+  await audit({
+    ...auditCtx(req),
+    action: 'lesson_plan.saved',
+    entityType: 'batch',
+    entityId: batch.id,
+    metadata: {
+      blocks: body.blocks.length,
+      drills: body.blocks.reduce((n, b) => n + b.drills.length, 0),
+    },
+  });
+  ok(res, {
+    batch: batchInfo(batch),
+    plan: await loadBatchPlan(batch.id),
+    mismatch: null,
+    canEdit: true,
+  });
+});
+
+const CopyBody = z.object({
+  fromBatchId: zId,
+  toBatchIds: z.array(zId).min(1).max(50),
+  /** Replace plans the target batches already have. */
+  overwrite: z.boolean().default(false),
+});
+
+/** Copies a batch's plan to the coach's other batches whose sessions are the same length. */
+lessonsRouter.post('/batch-plan/copy', requireCoach, async (req, res) => {
+  const body = parse(CopyBody, req.body);
+  const user = currentUser(req);
+  const from = await assertBatchAccess(user, body.fromBatchId);
+  const source = await loadBatchPlan(from.id);
+  if (!source) throw AppError.notFound('Lesson plan');
+  const copied: string[] = [];
+  const skipped: { batchId: string; reason: string }[] = [];
+  for (const id of [...new Set(body.toBatchIds)].filter((x) => x !== from.id)) {
+    const target = await assertBatchAccess(user, id, { mainOnly: true });
+    if (!canEditPlan(user, target)) {
+      skipped.push({ batchId: id, reason: 'Not your batch' });
+      continue;
+    }
+    const mismatch = batchPlanMismatch(target, source.totalMinutes);
+    if (mismatch) {
+      skipped.push({ batchId: id, reason: mismatch });
+      continue;
+    }
+    const [existing] = await db
+      .select({ id: batchPlans.id })
+      .from(batchPlans)
+      .where(eq(batchPlans.batchId, id));
+    if (existing && !body.overwrite) {
+      skipped.push({ batchId: id, reason: 'Already has a plan' });
+      continue;
+    }
+    await db.transaction((tx) => writeBatchPlan(tx, id, user.id, source));
+    copied.push(id);
+  }
+  if (copied.length)
+    await audit({
+      ...auditCtx(req),
+      action: 'lesson_plan.copied',
+      entityType: 'batch',
+      entityId: from.id,
+      metadata: { to: copied },
+    });
+  ok(res, { copied, skipped });
+});
+
+// ─── One session ─────────────────────────────────────────────────────────────
+
+/** Why this day can't have a session plan (not a session day / cancelled), or null. */
+async function sessionBlocked(batch: BatchRow, date: IsoDate): Promise<string | null> {
+  if (!batch.weekdays.includes(isoWeekday(date)))
+    return `${batch.name} doesn't run on ${WEEKDAY[isoWeekday(date)]}s.`;
   const cancelled = await getCancellation(batch.id, date);
   if (cancelled) return `This session was cancelled (${cancelled.reason}).`;
   return null;
 }
 
-/** Saves the whole plan for a day (create or replace). */
-lessonsRouter.put('/plans/day', requireCoach, async (req, res) => {
-  const body = parse(SavePlanBody, req.body);
-  const user = currentUser(req);
-  const batch = await assertBatchAccess(user, body.batchId, { on: body.date });
-  const blocked = await planBlockedReason(batch, body.date);
-  if (blocked) throw AppError.unprocessable(blocked);
+const dayMinutes = (batch: Timed, date: IsoDate) => {
+  const t = timesOn(batch, date);
+  return toMin(t.endTime) - toMin(t.startTime);
+};
 
-  await db.transaction(async (tx) => {
-    await assertLibrary(tx, [user.id, batch.coachId], body.stageIds, body.eventIds);
-    await writePlan(tx, user.id, body);
-  });
-  ok(res, await loadPlan(body.batchId, body.date));
-});
-
-lessonsRouter.delete('/plans/day', requireCoach, async (req, res) => {
+lessonsRouter.get('/session', async (req, res) => {
   const q = parse(z.object({ batchId: zId, date: zIsoDate }), req.query);
-  await assertBatchAccess(currentUser(req), q.batchId, { on: q.date });
-  await db
-    .delete(lessonPlans)
-    .where(and(eq(lessonPlans.batchId, q.batchId), eq(lessonPlans.date, q.date)));
-  noContent(res);
-});
-
-/**
- * Writes one grid onto many sessions (other days, other batches of the same coach). Days a batch
- * doesn't run, cancelled days, days a substitute doesn't cover and (unless `overwrite`) days that
- * already have a plan are skipped.
- */
-async function applyGrid(
-  user: AuthUser,
-  grid: Grid,
-  targets: { batchId: string; dates: string[] }[],
-  overwrite: boolean,
-  skipSelf?: { batchId: string; date: string },
-) {
-  const copied: { batchId: string; date: string }[] = [];
-  const skipped: { batchId: string; date: string }[] = [];
-  const plans: { batch: Awaited<ReturnType<typeof assertBatchAccess>>; dates: string[] }[] = [];
-  for (const t of targets) {
-    const batch = await assertBatchAccess(user, t.batchId);
-    const ok: string[] = [];
-    for (const date of new Set(t.dates)) {
-      const blocked =
-        (skipSelf && skipSelf.batchId === t.batchId && skipSelf.date === date) ||
-        !!(await planBlockedReason(batch, date)) ||
-        (batch.coachId !== user.id && !(await isSubstituteFor(user.id, t.batchId, date)));
-      if (blocked) skipped.push({ batchId: t.batchId, date });
-      else ok.push(date);
-    }
-    plans.push({ batch, dates: ok });
-  }
-  await db.transaction(async (tx) => {
-    for (const { batch, dates } of plans) {
-      if (!dates.length) continue;
-      await assertLibrary(tx, [user.id, batch.coachId], grid.stageIds, grid.eventIds);
-      const existing = new Set(
-        (
-          await tx
-            .select({ date: lessonPlans.date })
-            .from(lessonPlans)
-            .where(and(eq(lessonPlans.batchId, batch.id), inArray(lessonPlans.date, dates)))
-        ).map((e) => e.date),
-      );
-      for (const date of dates) {
-        if (existing.has(date) && !overwrite) {
-          skipped.push({ batchId: batch.id, date });
-          continue;
-        }
-        await writePlan(tx, user.id, { batchId: batch.id, date, ...grid });
-        copied.push({ batchId: batch.id, date });
-      }
-    }
-  });
-  return { copied, skipped };
-}
-
-const CopyBody = z.object({
-  batchId: zId,
-  fromDate: zIsoDate,
-  /** Target batch defaults to the source batch; may be another batch of the same coach. */
-  toBatchId: zId.optional(),
-  toDates: z.array(zIsoDate).min(1).max(31),
-  overwrite: z.boolean().default(false),
-});
-
-/** Copies a day's plan to other days ("repeat for the week", "same as last session"). */
-lessonsRouter.post('/plans/copy', requireCoach, async (req, res) => {
-  const body = parse(CopyBody, req.body);
   const user = currentUser(req);
-  await assertBatchAccess(user, body.batchId, { on: body.fromDate });
-  const source = await loadPlan(body.batchId, body.fromDate);
-  if (!source) throw AppError.notFound('Source plan');
-  const result = await applyGrid(
-    user,
-    gridOf(source),
-    [{ batchId: body.toBatchId ?? body.batchId, dates: body.toDates }],
-    body.overwrite,
-    { batchId: body.batchId, date: body.fromDate },
-  );
-  ok(res, { copied: result.copied.map((c) => c.date), skipped: result.skipped.map((s) => s.date) });
-});
-
-function gridOf(p: {
-  stages: { id: string }[];
-  events: { id: string }[];
-  durations: Record<string, number>;
-  focus: string | null;
-  notes: string | null;
-  cells: Cell[];
-}): Grid {
-  return {
-    stageIds: p.stages.map((s) => s.id),
-    eventIds: p.events.map((e) => e.id),
-    durations: p.durations,
-    focus: p.focus,
-    notes: p.notes,
-    cells: p.cells,
-  };
-}
-
-// ─── Saved plans ─────────────────────────────────────────────────────────────
-
-const SavedBody = z.union([
-  /** Save an existing day's plan under a name. */
-  z.object({ name: zName, from: z.object({ batchId: zId, date: zIsoDate }) }),
-  /** Or build one directly. */
-  z.object({ name: zName }).and(zGrid),
-]);
-
-async function loadSaved(coachId: string) {
-  const rows = await db
+  const batch = await assertBatchAccess(user, q.batchId, { on: q.date });
+  const [own] = await db
     .select()
-    .from(lessonPlanTemplates)
-    .where(eq(lessonPlanTemplates.coachId, coachId))
-    .orderBy(asc(lessonPlanTemplates.name));
-  return Promise.all(
-    rows.map(async (r) => ({
-      id: r.id,
-      name: r.name,
-      updatedAt: r.updatedAt,
-      ...(await expandGrid(r)),
-    })),
-  );
-}
-
-async function ownSaved(user: AuthUser, id: string) {
-  const [row] = await db.select().from(lessonPlanTemplates).where(eq(lessonPlanTemplates.id, id));
-  if (!row || row.coachId !== user.id) throw AppError.notFound('Saved plan');
-  return row;
-}
-
-lessonsRouter.get('/saved', async (req, res) => {
-  const { batchId } = parse(z.object({ batchId: zId.optional() }), req.query);
-  ok(res, await loadSaved(await libraryOwner(currentUser(req), batchId)));
-});
-
-lessonsRouter.post('/saved', requireCoach, async (req, res) => {
-  const user = currentUser(req);
-  const body = parse(SavedBody, req.body);
-  let grid: Grid;
-  if ('from' in body) {
-    await assertBatchAccess(user, body.from.batchId, { on: body.from.date });
-    const plan = await loadPlan(body.from.batchId, body.from.date);
-    if (!plan) throw AppError.notFound('Plan');
-    grid = gridOf(plan);
-  } else {
-    await assertLibrary(db, [user.id], body.stageIds, body.eventIds);
-    grid = body;
-  }
-  const g = cleanGrid(grid);
-  const [row] = await db
-    .insert(lessonPlanTemplates)
-    .values({ coachId: user.id, name: body.name, ...g })
-    .returning();
-  created(res, {
-    id: row!.id,
-    name: row!.name,
-    updatedAt: row!.updatedAt,
-    ...(await expandGrid(g)),
+    .from(sessionPlans)
+    .where(and(eq(sessionPlans.batchId, batch.id), eq(sessionPlans.date, q.date)));
+  const plan = await loadBatchPlan(batch.id);
+  // Not filled in yet: the batch plan's blocks with no drills picked. The coach picks the day's
+  // drills from each block's list (drillOptions) when filling it in.
+  const blocks: SessionBlock[] = own
+    ? own.blocks
+    : (plan?.blocks ?? []).map((b) => ({
+        name: b.name,
+        color: b.color,
+        minutes: b.minutes,
+        drills: [],
+      }));
+  const drillOptions: Record<
+    string,
+    { name: string; minutes: number | null; reps: string | null; note: string | null }[]
+  > = {};
+  for (const b of plan?.blocks ?? [])
+    drillOptions[b.name] = b.drills.map((d) => ({
+      name: d.name,
+      minutes: d.minutes,
+      reps: d.reps,
+      note: d.note,
+    }));
+  const coach = user.role === 'coach';
+  const substitute = coach && batch.coachId !== user.id;
+  ok(res, {
+    batch: batchInfo(batch),
+    date: q.date,
+    minutes: dayMinutes(batch, q.date),
+    lockedReason: await sessionBlocked(batch, q.date),
+    /** 'session': filled in for this day; 'batch': not filled yet (batch blocks); 'none': no plan. */
+    source: own ? 'session' : plan ? 'batch' : 'none',
+    /** Each block's drills in the batch plan, to pick from (by block name). */
+    drillOptions,
+    focus: plan?.focus ?? null,
+    note: own?.note ?? null,
+    blocks,
+    totalMinutes: sumMinutes(blocks),
+    canAdjust: coach && (!substitute || (await isSubstituteFor(user.id, batch.id, q.date))),
   });
 });
 
-lessonsRouter.patch('/saved/:id', requireCoach, async (req, res) => {
-  const { id } = parse(zIdParam, req.params);
-  const { name } = parse(z.object({ name: zName }), req.body);
-  await ownSaved(currentUser(req), id);
-  await db.update(lessonPlanTemplates).set({ name }).where(eq(lessonPlanTemplates.id, id));
-  noContent(res);
+const SessionBody = z.object({
+  batchId: zId,
+  date: zIsoDate,
+  note: zOptionalText(1000),
+  blocks: zBlocks,
 });
 
-lessonsRouter.delete('/saved/:id', requireCoach, async (req, res) => {
-  const { id } = parse(zIdParam, req.params);
-  await ownSaved(currentUser(req), id);
-  await db.delete(lessonPlanTemplates).where(eq(lessonPlanTemplates.id, id));
-  noContent(res);
-});
-
-const ApplyBody = z.object({
-  targets: z
-    .array(z.object({ batchId: zId, dates: z.array(zIsoDate).min(1).max(31) }))
-    .min(1)
-    .max(20),
-  overwrite: z.boolean().default(false),
-});
-
-/** Applies a saved plan to one or many sessions (e.g. the whole week). */
-lessonsRouter.post('/saved/:id/apply', requireCoach, async (req, res) => {
-  const { id } = parse(zIdParam, req.params);
-  const body = parse(ApplyBody, req.body);
+lessonsRouter.put('/session', requireCoach, async (req, res) => {
+  const body = parse(SessionBody, req.body);
   const user = currentUser(req);
-  const t = await ownSaved(user, id);
-  ok(res, await applyGrid(user, t, body.targets, body.overwrite));
+  // The batch's coach, or a substitute covering that day.
+  const batch = await assertBatchAccess(user, body.batchId, { on: body.date });
+  const blocked = await sessionBlocked(batch, body.date);
+  if (blocked) throw AppError.unprocessable(blocked);
+  checkDrillMinutes(body.blocks);
+  const length = dayMinutes(batch, body.date);
+  const total = sumMinutes(body.blocks);
+  if (total !== length)
+    throw AppError.unprocessable(
+      `The blocks add up to ${total} min, but this session is ${length} min.`,
+    );
+  const blocks: SessionBlock[] = body.blocks.map((b) => ({
+    name: b.name,
+    color: b.color ?? null,
+    minutes: b.minutes,
+    drills: b.drills.map((d) => ({
+      name: d.name,
+      minutes: d.minutes ?? null,
+      reps: d.reps ?? null,
+      note: d.note ?? null,
+    })),
+  }));
+  await db
+    .insert(sessionPlans)
+    .values({
+      batchId: batch.id,
+      date: body.date,
+      coachId: user.id,
+      blocks,
+      note: body.note ?? null,
+    })
+    .onConflictDoUpdate({
+      target: [sessionPlans.batchId, sessionPlans.date],
+      set: { blocks, note: body.note ?? null, coachId: user.id, updatedAt: new Date() },
+    });
+  noContent(res);
 });
+
+lessonsRouter.delete('/session', requireCoach, async (req, res) => {
+  const q = parse(z.object({ batchId: zId, date: zIsoDate }), req.query);
+  const batch = await assertBatchAccess(currentUser(req), q.batchId, { on: q.date });
+  await db
+    .delete(sessionPlans)
+    .where(and(eq(sessionPlans.batchId, batch.id), eq(sessionPlans.date, q.date)));
+  noContent(res);
+});
+
+// ─── Overview ────────────────────────────────────────────────────────────────
+
+/** Every batch in view with its plan status (none / ready / needs updating) and adjusted days. */
+lessonsRouter.get('/overview', async (req, res) => {
+  const user = currentUser(req);
+  const rows = await db
+    .select({
+      id: batches.id,
+      name: batches.name,
+      weekdays: batches.weekdays,
+      startTime: batches.startTime,
+      endTime: batches.endTime,
+      dayTimes: batches.dayTimes,
+      coachId: batches.coachId,
+      coachFeedback: batches.coachFeedback,
+      coachName: users.name,
+      sport: sports.name,
+      location: locations.name,
+    })
+    .from(batches)
+    .innerJoin(users, eq(users.id, batches.coachId))
+    .innerJoin(sports, eq(sports.id, batches.sportId))
+    .innerJoin(locations, eq(locations.id, batches.locationId))
+    .where(
+      and(eq(batches.isActive, true), isAdmin(user) ? undefined : eq(batches.coachId, user.id)),
+    )
+    .orderBy(asc(batches.name));
+  const ids = rows.map((r) => r.id);
+  const since = addDays(todayInAppTz(), -30);
+  const [plans, blocks, drills, adjusted] = ids.length
+    ? await Promise.all([
+        db
+          .select({
+            id: batchPlans.id,
+            batchId: batchPlans.batchId,
+            updatedAt: batchPlans.updatedAt,
+          })
+          .from(batchPlans)
+          .where(inArray(batchPlans.batchId, ids)),
+        db
+          .select({
+            planId: batchPlanBlocks.planId,
+            n: count(),
+            minutes: sql<number>`sum(${batchPlanBlocks.minutes})::int`,
+          })
+          .from(batchPlanBlocks)
+          .innerJoin(batchPlans, eq(batchPlans.id, batchPlanBlocks.planId))
+          .where(inArray(batchPlans.batchId, ids))
+          .groupBy(batchPlanBlocks.planId),
+        db
+          .select({ planId: batchPlanBlocks.planId, n: count() })
+          .from(batchPlanDrills)
+          .innerJoin(batchPlanBlocks, eq(batchPlanBlocks.id, batchPlanDrills.blockId))
+          .innerJoin(batchPlans, eq(batchPlans.id, batchPlanBlocks.planId))
+          .where(inArray(batchPlans.batchId, ids))
+          .groupBy(batchPlanBlocks.planId),
+        db
+          .select({ batchId: sessionPlans.batchId, n: count() })
+          .from(sessionPlans)
+          .where(and(inArray(sessionPlans.batchId, ids), gte(sessionPlans.date, since)))
+          .groupBy(sessionPlans.batchId),
+      ])
+    : [[], [], [], []];
+  ok(res, {
+    batches: rows.map((b) => {
+      const plan = plans.find((p) => p.batchId === b.id);
+      const bl = plan ? blocks.find((x) => x.planId === plan.id) : undefined;
+      const lengths = sessionLengths(b);
+      const total = bl?.minutes ?? 0;
+      return {
+        id: b.id,
+        name: b.name,
+        sport: b.sport,
+        location: b.location,
+        coach: { id: b.coachId, name: b.coachName },
+        attendanceOnly: !b.coachFeedback,
+        sessionMinutes: lengths.minutes,
+        status: !plan ? 'none' : lengths.minutes === total ? 'ready' : 'needs-update',
+        totalMinutes: total,
+        blocks: bl?.n ?? 0,
+        drills: plan ? (drills.find((x) => x.planId === plan.id)?.n ?? 0) : 0,
+        adjustedDays: adjusted.find((x) => x.batchId === b.id)?.n ?? 0,
+        updatedAt: plan?.updatedAt ?? null,
+      };
+    }),
+  });
+});
+
+/** For the day overview and to-dos: does each session have a plan, and does it fit the day? */
+export async function planStatusFor(
+  list: { id: string; startTime: string; endTime: string }[],
+  day: IsoDate,
+) {
+  const out = new Map<string, { hasPlan: boolean; fits: boolean; filled: boolean }>();
+  const ids = list.map((b) => b.id);
+  if (!ids.length) return out;
+  const [plans, own] = await Promise.all([
+    db
+      .select({
+        batchId: batchPlans.batchId,
+        minutes: sql<number>`coalesce(sum(${batchPlanBlocks.minutes}), 0)::int`,
+      })
+      .from(batchPlans)
+      .leftJoin(batchPlanBlocks, eq(batchPlanBlocks.planId, batchPlans.id))
+      .where(inArray(batchPlans.batchId, ids))
+      .groupBy(batchPlans.batchId),
+    db
+      .select({ batchId: sessionPlans.batchId })
+      .from(sessionPlans)
+      .where(and(inArray(sessionPlans.batchId, ids), eq(sessionPlans.date, day))),
+  ]);
+  for (const b of list) {
+    const length = toMin(b.endTime) - toMin(b.startTime);
+    const adjusted = own.some((o) => o.batchId === b.id);
+    const plan = plans.find((p) => p.batchId === b.id);
+    out.set(b.id, {
+      hasPlan: adjusted || !!plan,
+      fits: adjusted || (!!plan && plan.minutes === length),
+      /** The coach picked this day's drills. */
+      filled: adjusted,
+    });
+  }
+  return out;
+}

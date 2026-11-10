@@ -128,15 +128,20 @@ async function sessionTasks(user: AuthUser, now: Date): Promise<Task[]> {
         });
       }
     }
-    // No plan reminders for attendance-only (no-feedback) batches.
-    if (!admin && !s.hasLessonPlan && mins < end && b.coachFeedback) {
+    // The batch needs a lesson plan (or its plan no longer fits the session). Not for
+    // attendance-only batches.
+    if (!admin && b.coachFeedback && mins < end && (!s.hasLessonPlan || !s.lessonPlanFits)) {
       tasks.push({
         id: `lesson-plan:${b.id}:${today}`,
         kind: 'lesson-plan',
         severity: 'info',
-        title: `Add today's plan for ${b.name}`,
-        detail: `Session at ${at}`,
-        link: `/lesson-plans?batch=${b.id}&date=${today}`,
+        title: s.hasLessonPlan
+          ? `Update the lesson plan for ${b.name}`
+          : `Set up the lesson plan for ${b.name}`,
+        detail: s.hasLessonPlan
+          ? `It no longer adds up to the session length · ${at}`
+          : `Session at ${at}`,
+        link: `/lesson-plans?batch=${b.id}&plan=1`,
         screen: '/lesson-plans',
       });
     }

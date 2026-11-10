@@ -11,7 +11,7 @@ import {
   coachSessions,
   enrollments,
   invoices,
-  lessonPlans,
+  sessionPlans,
   skillAssessments,
   studentAttendance,
   students,
@@ -28,6 +28,7 @@ import {
   type IsoDate,
 } from '../../lib/dates.js';
 import { cancellationsIn } from '../attendance/cancellations.js';
+import { loadBatchPlan } from '../lessons/lessons.routes.js';
 import { effectiveMonthlyFee } from '../students/students.service.js';
 
 export interface BatchForInsights {
@@ -149,10 +150,11 @@ export async function batchInsights(
         .from(studentAttendance)
         .where(and(eq(studentAttendance.batchId, b.id), gte(studentAttendance.date, from8w)))
         .groupBy(studentAttendance.date),
+      // Days adjusted on their own; every other session follows the batch's plan.
       db
-        .select({ date: lessonPlans.date })
-        .from(lessonPlans)
-        .where(and(eq(lessonPlans.batchId, b.id), gte(lessonPlans.date, from8w))),
+        .select({ date: sessionPlans.date })
+        .from(sessionPlans)
+        .where(and(eq(sessionPlans.batchId, b.id), gte(sessionPlans.date, from8w))),
       // Approved substitutions touching the last 8 weeks or the next week.
       db
         .select({
@@ -238,6 +240,7 @@ export async function batchInsights(
   const marksOn = new Map(recentMarks.map((r) => [r.date, r]));
   const checkInOn = new Map(checkIns.map((c) => [c.date, c]));
   const planOn = new Set(plans.map((p) => p.date));
+  const hasBatchPlan = !!(await loadBatchPlan(b.id))?.blocks.length;
   const subOn = (d: IsoDate) => subs.find((s) => s.fromDate <= d && s.toDate >= d)?.name ?? null;
   const session = (d: IsoDate) => {
     const m = marksOn.get(d);
@@ -251,7 +254,7 @@ export async function batchInsights(
       present: m?.present ?? 0,
       checkedIn: !!c,
       onTime: c ? c.onTime : null,
-      hasPlan: planOn.has(d),
+      hasPlan: hasBatchPlan || planOn.has(d),
     };
   };
   const past8w = scheduled(from8w, today).map(session);

@@ -62,8 +62,8 @@ describe('substitute coaches', () => {
     // Session tools on covered days only.
     await sub$.get(`/api/v1/attendance/session?batchId=${batch.id}&date=2026-03-10`).expect(200);
     await sub$.get(`/api/v1/attendance/session?batchId=${batch.id}&date=2026-03-12`).expect(404);
-    await sub$.get(`/api/v1/lessons/plans/day?batchId=${batch.id}&date=2026-03-11`).expect(200);
-    await sub$.get(`/api/v1/lessons/plans/day?batchId=${batch.id}&date=2026-03-13`).expect(404);
+    await sub$.get(`/api/v1/lessons/session?batchId=${batch.id}&date=2026-03-11`).expect(200);
+    await sub$.get(`/api/v1/lessons/session?batchId=${batch.id}&date=2026-03-13`).expect(404);
 
     // Never the batch's history, students or fees.
     await sub$

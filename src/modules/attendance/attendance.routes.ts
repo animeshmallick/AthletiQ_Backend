@@ -1,4 +1,5 @@
 import { timesOn } from '../../lib/batch-times.js';
+import { planStatusFor } from '../lessons/lessons.routes.js';
 import { and, asc, desc, eq, gte, inArray, lt, lte, sql, type SQL, or } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -7,8 +8,6 @@ import { db } from '../../db/client.js';
 import {
   batches,
   coachSessions,
-  lessonPlanCells,
-  lessonPlans,
   locations,
   studentAttendance,
   students,
@@ -101,19 +100,8 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
           .from(coachSessions)
           .where(and(inArray(coachSessions.batchId, ids), eq(coachSessions.date, day)))
       : [],
-    ids.length
-      ? db
-          .select({ batchId: lessonPlans.batchId })
-          .from(lessonPlans)
-          .where(
-            and(
-              inArray(lessonPlans.batchId, ids),
-              eq(lessonPlans.date, day),
-              // An empty plan is still pending.
-              sql`(exists (select 1 from ${lessonPlanCells} c where c.plan_id = ${lessonPlans.id}) or coalesce(btrim(${lessonPlans.focus}), '') <> '' or coalesce(btrim(${lessonPlans.notes}), '') <> '')`,
-            ),
-          )
-      : [],
+    // Every session follows its batch's lesson plan (or its own adjusted copy).
+    planStatusFor(sessionBatches, day),
     Promise.all(ids.map((id) => expectedRoster(id, day))),
   ]);
 
@@ -129,7 +117,11 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
         marked: batchMarks.length,
         present: batchMarks.filter((m) => m.status === 'present' || m.status === 'late').length,
         attendanceComplete: expected > 0 && batchMarks.length >= expected,
-        hasLessonPlan: plans.some((p) => p.batchId === b.id),
+        hasLessonPlan: plans.get(b.id)?.hasPlan ?? false,
+        /** The plan adds up to this session's length (false after a timing change). */
+        lessonPlanFits: plans.get(b.id)?.fits ?? false,
+        /** This session's drills are filled in. */
+        lessonPlanFilled: plans.get(b.id)?.filled ?? false,
         cancelled: cancelled.get(`${b.id}:${day}`) ?? null,
         /** Who covers this session as a substitute coach, if anyone. */
         substitute: subs.get(b.id) ?? null,

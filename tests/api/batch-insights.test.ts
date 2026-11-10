@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../src/db/client';
 import {
   batchSubstitutions,
-  lessonPlans,
+  sessionPlans,
   sessionCancellations,
   skillAssessments,
   studentAttendance,
@@ -51,12 +51,11 @@ async function setup() {
     .insert(sessionCancellations)
     .values({ batchId: a.batch.id, date: '2026-03-18', reason: 'Rain' });
   await checkIn(a.coach.id, a.batch.id, '2026-03-16', '2026-03-17');
-  await db.insert(lessonPlans).values({
+  await db.insert(sessionPlans).values({
     batchId: a.batch.id,
     coachId: a.coach.id,
     date: '2026-03-16',
-    stageIds: [],
-    eventIds: [],
+    blocks: [{ name: 'Warm-up', color: null, minutes: 120, drills: [] }],
   });
   await db.insert(skillAssessments).values({
     studentId: asha.id,

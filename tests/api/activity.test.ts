@@ -179,8 +179,18 @@ describe('activity log', () => {
     const { admin$, coach$, coach, batch } = await seed();
     await flushRequestLog();
     await db.delete(apiRequests);
-    await coach$.post('/api/v1/lessons/stages', { batchId: batch.id, name: 'Warm-up' }).expect(201);
-    await coach$.post('/api/v1/lessons/stages', { batchId: batch.id, name: 'warm-up' }).expect(409);
+    await coach$
+      .put('/api/v1/lessons/batch-plan', {
+        batchId: batch.id,
+        blocks: [{ name: 'Main', minutes: 120 }],
+      })
+      .expect(200);
+    await coach$
+      .put('/api/v1/lessons/batch-plan', {
+        batchId: batch.id,
+        blocks: [{ name: 'Main', minutes: 30 }],
+      })
+      .expect(422);
     await coach$.get('/api/v1/batches').expect(200); // successful reads aren't stored
     await flushRequestLog();
 
@@ -191,8 +201,8 @@ describe('activity log', () => {
     ).body.data;
     expect(mine.totals).toMatchObject({ total: 2, writes: 2, failed: 1, people: 1 });
     expect(mine.byRoute[0]).toMatchObject({
-      method: 'POST',
-      route: '/api/v1/lessons/stages',
+      method: 'PUT',
+      route: '/api/v1/lessons/batch-plan',
       n: 2,
       failed: 1,
     });
@@ -207,9 +217,9 @@ describe('activity log', () => {
     const stream = (
       await admin$.get('/api/v1/activity/requests?from=2026-03-01&to=2026-03-31').expect(200)
     ).body;
-    expect(stream.data.map((r: { status: number }) => r.status).sort()).toEqual([201, 409]);
-    expect(stream.data.find((r: { status: number }) => r.status === 409)).toMatchObject({
-      code: 'CONFLICT',
+    expect(stream.data.map((r: { status: number }) => r.status).sort()).toEqual([200, 422]);
+    expect(stream.data.find((r: { status: number }) => r.status === 422)).toMatchObject({
+      code: 'UNPROCESSABLE',
       user: { id: coach.id },
     });
     expect(typeof stream.data[0].durationMs).toBe('number');

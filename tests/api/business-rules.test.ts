@@ -139,12 +139,10 @@ describe('session cancellations (rain, holidays)', () => {
       .get(`/api/v1/attendance/register?batchId=${batch.id}&from=2026-03-09&to=2026-03-15`)
       .expect(200);
     expect(register.body.data.cancelled).toEqual({ '2026-03-11': 'Holi' });
-    const cal = await api
-      .get(`/api/v1/lessons/plans?batchId=${batch.id}&from=2026-03-09&to=2026-03-15`)
+    const session = await api
+      .get(`/api/v1/lessons/session?batchId=${batch.id}&date=2026-03-11`)
       .expect(200);
-    expect(
-      cal.body.data.days.find((d: { date: string }) => d.date === '2026-03-11').cancelled,
-    ).toBe('Holi');
+    expect(session.body.data.lockedReason).toContain('Holi');
   });
 });
 
