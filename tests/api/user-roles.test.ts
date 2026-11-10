@@ -147,6 +147,28 @@ describe('one account, coach and/or admin', () => {
     expect(dup.body.error.message).toBe('Another account already uses this phone number');
   });
 
+  it('keeps sign-ins from before roles existed working, now with both roles', async () => {
+    await makeUser('coach', { withPassword: true, email: 'old@example.com' });
+    const s = await signIn('old@example.com');
+    // As if signed in before this change: no role on the session, and given admin later.
+    await db.execute(sql`update sessions set role = null`);
+    await db.execute(sql`update users set roles = '{admin,coach}' where email = 'old@example.com'`);
+    const next = await request(getApp())
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', s.cookie)
+      .set(XHR)
+      .expect(200);
+    // Opens in the role they used last (coach), and the app learns they also hold admin.
+    expect(next.body.data.user).toMatchObject({ role: 'coach', roles: ['admin', 'coach'] });
+    const switched = await request(getApp())
+      .post('/api/v1/auth/switch-role')
+      .set('Cookie', refreshCookie(next))
+      .set(XHR)
+      .send({ role: 'admin' })
+      .expect(200);
+    expect(switched.body.data.user.role).toBe('admin');
+  });
+
   it('moves a signed-in session off a role that was taken away', async () => {
     const admin = await makeUser('admin');
     await makeUser('admin', {
