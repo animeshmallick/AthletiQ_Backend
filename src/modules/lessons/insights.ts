@@ -49,12 +49,14 @@ type PlanRow = {
   createdAt: Date;
   grid: number;
   filled: number;
+  /** Anything filled in (a drill, the focus or notes). */
+  content: boolean;
 };
 
 type Status = 'complete' | 'partial' | 'empty' | 'unplanned';
 
-const statusOf = (p: PlanRow | undefined): Status =>
-  !p ? 'unplanned' : p.filled === 0 ? 'empty' : p.filled >= p.grid ? 'complete' : 'partial';
+/** A plan with anything in it counts as planned; an empty one is still pending. */
+const statusOf = (p: PlanRow | undefined): Status => (p?.content ? 'complete' : 'unplanned');
 
 const ratio = (num: number, den: number) =>
   den > 0 ? Math.round((num / den) * 1000) / 1000 : null;
@@ -115,8 +117,9 @@ export async function lessonInsights(req: Request, res: Response) {
             eventIds: lessonPlans.eventIds,
             stageIds: lessonPlans.stageIds,
             createdAt: lessonPlans.createdAt,
-            grid: sql<number>`(cardinality(${lessonPlans.stageIds}) * cardinality(${lessonPlans.eventIds}))::int`,
-            filled: sql<number>`count(${lessonPlanCells.id})::int`,
+            grid: sql<number>`cardinality(${lessonPlans.stageIds})::int`,
+            filled: sql<number>`count(distinct ${lessonPlanCells.stageId})::int`,
+            content: sql<boolean>`(count(${lessonPlanCells.id}) > 0 or coalesce(btrim(${lessonPlans.focus}), '') <> '' or coalesce(btrim(${lessonPlans.notes}), '') <> '')`,
           })
           .from(lessonPlans)
           .leftJoin(lessonPlanCells, eq(lessonPlanCells.planId, lessonPlans.id))
@@ -177,7 +180,7 @@ export async function lessonInsights(req: Request, res: Response) {
       const w = weeks.get(wk) ?? { start: wk, sessions: 0, planned: 0, complete: 0 };
       w.sessions++;
       weeks.set(wk, w);
-      if (p) {
+      if (p?.content) {
         row.planned++;
         w.planned++;
         row.filled += Math.min(p.filled, p.grid);
@@ -288,9 +291,9 @@ export async function lessonInsights(req: Request, res: Response) {
     if (s) s.cells += c.n;
   }
 
-  // A single library is in view when the scope has exactly one coach.
-  // A single template is in view when the scope is exactly one batch.
-  const libraryBatch = scope.length === 1 ? scope[0]!.id : null;
+  // A coach's library is in view when the scope has exactly one coach.
+  const coaches = [...new Set(scope.map((b) => b.coachId))];
+  const libraryCoach = coaches.length === 1 ? coaches[0]! : null;
 
   const [eventRows, stageRows, lastUsedEver] = await Promise.all([
     db
@@ -301,8 +304,8 @@ export async function lessonInsights(req: Request, res: Response) {
       })
       .from(lessonEvents)
       .where(
-        libraryBatch
-          ? eq(lessonEvents.batchId, libraryBatch)
+        libraryCoach
+          ? eq(lessonEvents.coachId, libraryCoach)
           : eventUse.size
             ? inArray(lessonEvents.id, [...eventUse.keys()])
             : sql`false`,
@@ -314,11 +317,11 @@ export async function lessonInsights(req: Request, res: Response) {
           .where(inArray(lessonStages.id, [...stageUse.keys()]))
       : [],
     // Recent history (newest first) to say when an unused drill was last run.
-    libraryBatch
+    libraryCoach
       ? db
           .select({ date: lessonPlans.date, eventIds: lessonPlans.eventIds })
           .from(lessonPlans)
-          .where(and(eq(lessonPlans.batchId, libraryBatch), lte(lessonPlans.date, today)))
+          .where(and(inArray(lessonPlans.batchId, ids), lte(lessonPlans.date, today)))
           .orderBy(desc(lessonPlans.date))
           .limit(500)
       : [],
@@ -331,7 +334,7 @@ export async function lessonInsights(req: Request, res: Response) {
     .filter((e) => eventUse.has(e.id))
     .map((e) => ({ id: e.id, name: e.name, ...eventUse.get(e.id)! }))
     .sort((a, b) => b.plans - a.plans || b.cells - a.cells || a.name.localeCompare(b.name));
-  const unusedEvents = libraryBatch
+  const unusedEvents = libraryCoach
     ? eventRows
         .filter((e) => !e.isArchived && !eventUse.has(e.id))
         .map((e) => ({ id: e.id, name: e.name, lastUsed: lastEver.get(e.id) ?? null }))

@@ -4,6 +4,7 @@ import {
   date,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   uniqueIndex,
@@ -14,43 +15,41 @@ import { batches } from './academy.js';
 import { users } from './users.js';
 
 /**
- * Columns of a batch's lesson-plan grid, e.g. Warm-up, Main, Test, Post-play. Together with the
- * events below they form the batch's plan template, edited by the batch's coach.
+ * The blocks of a session, in order, e.g. Warm-up 10 min, Ball drills 20 min, Cool down 5 min.
+ * Each coach keeps one library of stages and events, used across all their batches.
  */
 export const lessonStages = pgTable(
   'lesson_stages',
   {
     id: id(),
-    /** The batch whose plan template this belongs to (one template per batch). */
-    batchId: uuid()
-      .notNull()
-      .references(() => batches.id, { onDelete: 'cascade' }),
-    /** Who created it. */
+    /** Batch the item was first made for (history only; the library belongs to the coach). */
+    batchId: uuid().references(() => batches.id, { onDelete: 'set null' }),
+    /** Whose library it is. */
     coachId: uuid()
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     name: text().notNull(),
     color: text(),
+    /** Default length of this block in minutes. */
+    durationMin: integer(),
     sortOrder: integer().notNull().default(0),
     isArchived: boolean().notNull().default(false),
     ...timestamps,
   },
   (t) => [
-    uniqueIndex('lesson_stages_batch_name_uq').on(t.batchId, sql`lower(${t.name})`),
-    index('lesson_stages_batch_idx').on(t.batchId, t.sortOrder),
+    uniqueIndex('lesson_stages_coach_name_uq').on(t.coachId, sql`lower(${t.name})`),
+    index('lesson_stages_coach_idx').on(t.coachId, t.sortOrder),
   ],
 );
 
-/** Rows of the grid: the games / events / drills run in the batch. Part of the batch template. */
+/** Drills / skills / games the coach runs, picked into a session's blocks. Coach-wide library. */
 export const lessonEvents = pgTable(
   'lesson_events',
   {
     id: id(),
-    /** The batch whose plan template this belongs to (one template per batch). */
-    batchId: uuid()
-      .notNull()
-      .references(() => batches.id, { onDelete: 'cascade' }),
-    /** Who created it. */
+    /** Batch the item was first made for (history only; the library belongs to the coach). */
+    batchId: uuid().references(() => batches.id, { onDelete: 'set null' }),
+    /** Whose library it is. */
     coachId: uuid()
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
@@ -61,8 +60,8 @@ export const lessonEvents = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex('lesson_events_batch_name_uq').on(t.batchId, sql`lower(${t.name})`),
-    index('lesson_events_batch_idx').on(t.batchId, t.sortOrder),
+    uniqueIndex('lesson_events_coach_name_uq').on(t.coachId, sql`lower(${t.name})`),
+    index('lesson_events_coach_idx').on(t.coachId, t.sortOrder),
   ],
 );
 
@@ -83,6 +82,10 @@ export const lessonPlans = pgTable(
     date: date({ mode: 'string' }).notNull(),
     stageIds: uuid().array().notNull(),
     eventIds: uuid().array().notNull(),
+    /** Minutes per stage for this session (stage id → minutes); falls back to the stage default. */
+    durations: jsonb().$type<Record<string, number>>().notNull().default({}),
+    /** One line on what this session is about. */
+    focus: text(),
     notes: text(),
     ...timestamps,
   },
@@ -110,4 +113,27 @@ export const lessonPlanCells = pgTable(
     ...timestamps,
   },
   (t) => [uniqueIndex('lesson_plan_cells_uq').on(t.planId, t.eventId, t.stageId)],
+);
+
+/** A whole session plan saved under a name ("Footwork day") to apply to any session in a tap. */
+export const lessonPlanTemplates = pgTable(
+  'lesson_plan_templates',
+  {
+    id: id(),
+    coachId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    focus: text(),
+    notes: text(),
+    stageIds: uuid().array().notNull(),
+    eventIds: uuid().array().notNull(),
+    durations: jsonb().$type<Record<string, number>>().notNull().default({}),
+    cells: jsonb()
+      .$type<{ eventId: string; stageId: string; content: string }[]>()
+      .notNull()
+      .default([]),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('lesson_plan_templates_coach_name_uq').on(t.coachId, sql`lower(${t.name})`)],
 );

@@ -7,6 +7,7 @@ import { db } from '../../db/client.js';
 import {
   batches,
   coachSessions,
+  lessonPlanCells,
   lessonPlans,
   locations,
   studentAttendance,
@@ -103,7 +104,14 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
       ? db
           .select({ batchId: lessonPlans.batchId })
           .from(lessonPlans)
-          .where(and(inArray(lessonPlans.batchId, ids), eq(lessonPlans.date, day)))
+          .where(
+            and(
+              inArray(lessonPlans.batchId, ids),
+              eq(lessonPlans.date, day),
+              // An empty plan is still pending.
+              sql`(exists (select 1 from ${lessonPlanCells} c where c.plan_id = ${lessonPlans.id}) or coalesce(btrim(${lessonPlans.focus}), '') <> '' or coalesce(btrim(${lessonPlans.notes}), '') <> '')`,
+            ),
+          )
       : [],
     Promise.all(ids.map((id) => expectedRoster(id, day))),
   ]);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { eq } from 'drizzle-orm';
+import { eq, isNotNull } from 'drizzle-orm';
 import request from 'supertest';
 import { db } from '../../src/db/client';
 import { auditLogs, sessions, users } from '../../src/db/schema';
@@ -140,7 +140,12 @@ describe('POST /auth/refresh', () => {
         .expect(200),
     );
 
-    // Replaying the old token — e.g. stolen — kills every session in the family.
+    // Replaying the old token well after it was rotated — e.g. stolen — kills every session in
+    // the family.
+    await db
+      .update(sessions)
+      .set({ revokedAt: new Date(Date.now() - 60_000) })
+      .where(isNotNull(sessions.revokedAt));
     const replay = await request(getApp())
       .post('/api/v1/auth/refresh')
       .set('Cookie', first)
@@ -150,6 +155,21 @@ describe('POST /auth/refresh', () => {
     await request(getApp()).post('/api/v1/auth/refresh').set('Cookie', second).set(XHR).expect(401);
     const reuse = await db.select().from(auditLogs).where(eq(auditLogs.action, 'auth.token_reuse'));
     expect(reuse).toHaveLength(1);
+  });
+
+  it('forgives the same token presented again within seconds (two tabs, a lost response)', async () => {
+    const first = await login('g@example.com');
+    const refresh = (cookie: string) =>
+      request(getApp()).post('/api/v1/auth/refresh').set('Cookie', cookie).set(XHR);
+    const a = refreshCookie(await refresh(first).expect(200));
+    // The other tab sent the old cookie at the same time: it gets its own new session.
+    const b = refreshCookie(await refresh(first).expect(200));
+    expect(b).not.toBe(a);
+    // Both stay signed in, and nothing was flagged.
+    await refresh(a).expect(200);
+    await refresh(b).expect(200);
+    const reuse = await db.select().from(auditLogs).where(eq(auditLogs.action, 'auth.token_reuse'));
+    expect(reuse).toHaveLength(0);
   });
 
   it('rejects missing, unknown and expired tokens', async () => {

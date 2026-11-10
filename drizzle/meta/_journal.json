@@ -120,6 +120,13 @@
       "when": 1794244899682,
       "tag": "0016_free_plan",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1794315155845,
+      "tag": "0017_lesson_library",
+      "breakpoints": true
     }
   ]
 }

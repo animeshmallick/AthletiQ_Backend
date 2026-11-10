@@ -25,7 +25,8 @@ describe('lesson planning insights', () => {
           cells: cells.map(([eventId, stageId]) => ({ eventId, stageId, content: 'Drill' })),
         })
         .expect(200);
-    // Mon complete · Tue nothing (missed) · Wed today, nothing · Thu partial · Fri cancelled · Sat empty.
+    // Mon full · Tue nothing (missed) · Wed today, nothing · Thu partly filled · Fri cancelled ·
+    // Sat saved but empty. Anything filled counts as planned; an empty plan is still pending.
     await save(
       '2026-03-09',
       [s1],
@@ -51,11 +52,11 @@ describe('lesson planning insights', () => {
     expect(d.totals).toMatchObject({
       sessions: 5,
       cancelled: 1,
-      planned: 3,
-      complete: 1,
+      planned: 2,
+      complete: 2,
       missed: 1,
-      upcomingUnplanned: 9,
-      fillRate: 0.6,
+      upcomingUnplanned: 10,
+      fillRate: 0.667, // blocks with a drill in planned sessions: Mon 1/1, Thu 1/2
       avgEvents: 1.3,
       streak: 0,
     });
@@ -64,19 +65,19 @@ describe('lesson planning insights', () => {
     expect(d.batches[0]).toMatchObject({
       id: batch.id,
       sessions: 5,
-      planned: 3,
-      complete: 1,
+      planned: 2,
+      complete: 2,
       missed: 1,
-      fillRate: 0.6,
+      fillRate: 0.667, // blocks with a drill in planned sessions: Mon 1/1, Thu 1/2
       next: { date: '2026-03-11', status: 'unplanned', filled: 0, total: 0 },
     });
-    expect(d.needsPlan).toHaveLength(11);
+    expect(d.needsPlan).toHaveLength(10);
     expect(d.needsPlan.slice(0, 3)).toEqual([
       expect.objectContaining({ date: '2026-03-11', status: 'unplanned', batchId: batch.id }),
-      expect.objectContaining({ date: '2026-03-12', status: 'partial' }),
-      expect.objectContaining({ date: '2026-03-14', status: 'empty' }),
+      expect.objectContaining({ date: '2026-03-14', status: 'unplanned' }),
+      expect.objectContaining({ date: '2026-03-16', status: 'unplanned' }),
     ]);
-    expect(d.weeks).toEqual([{ start: '2026-03-09', sessions: 5, planned: 3, complete: 1 }]);
+    expect(d.weeks).toEqual([{ start: '2026-03-09', sessions: 5, planned: 2, complete: 2 }]);
     expect(d.events).toEqual([
       { id: e1, name: 'Footwork', plans: 3, cells: 2, lastUsed: '2026-03-14' },
       { id: e2, name: 'Serve', plans: 1, cells: 1, lastUsed: '2026-03-09' },

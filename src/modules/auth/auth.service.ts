@@ -161,6 +161,9 @@ export async function login(
  * Rotates a refresh token. If a token that was already rotated is presented again, the whole
  * session family is revoked — someone is replaying a stolen token.
  */
+/** A refresh token used again this soon after rotating is a race or a lost response, not theft. */
+const ROTATION_GRACE_MS = 30_000;
+
 export async function refresh(refreshToken: string, client: ClientInfo): Promise<AuthResult> {
   const tokenHash = sha256(refreshToken);
   const expired = () => AppError.unauthenticated('Session expired. Please sign in again.');
@@ -174,7 +177,14 @@ export async function refresh(refreshToken: string, client: ClientInfo): Promise
 
     if (!session) return { kind: 'invalid' as const };
 
-    if (session.revokedAt) {
+    // Just rotated (two tabs refreshing together, or the response with the new cookie was lost on
+    // a flaky connection): not a theft — hand out another session in the same family.
+    const benignRetry =
+      session.revokedAt &&
+      session.replacedById &&
+      Date.now() - session.revokedAt.getTime() < ROTATION_GRACE_MS &&
+      session.expiresAt > new Date();
+    if (session.revokedAt && !benignRetry) {
       // A rotated token presented again means it was copied: revoke the family (committed below,
       // outside this transaction, so the revocation is not rolled back by the error response).
       return session.replacedById
@@ -187,9 +197,15 @@ export async function refresh(refreshToken: string, client: ClientInfo): Promise
     if (user?.status !== 'active') return { kind: 'invalid' as const };
 
     const next = await issueSession(user, client, session.familyId, tx);
+    // On a benign retry the token keeps its first revocation time, so the grace window can't be
+    // stretched by replaying it.
     await tx
       .update(sessions)
-      .set({ revokedAt: new Date(), replacedById: next.sessionId, lastUsedAt: new Date() })
+      .set(
+        benignRetry
+          ? { lastUsedAt: new Date() }
+          : { revokedAt: new Date(), replacedById: next.sessionId, lastUsedAt: new Date() },
+      )
       .where(eq(sessions.id, session.id));
 
     return { kind: 'ok' as const, result: await buildAuthResult(user, next) };

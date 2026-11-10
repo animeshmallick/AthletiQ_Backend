@@ -23,7 +23,8 @@ const UNIQUE_MESSAGES: Record<string, string> = {
   fee_plans_name_lower_uq:
     'A fee plan with this name already exists (the built-in free plan counts too)',
   lesson_stages_coach_name_uq: 'You already have a stage with this name',
-  lesson_events_coach_name_uq: 'You already have an event with this name',
+  lesson_events_coach_name_uq: 'You already have a drill with this name',
+  lesson_plan_templates_coach_name_uq: 'You already have a saved plan with this name',
   makeup_student_batch_date_uq: 'This student already has a makeup in this batch on that date',
   enrollments_one_open_per_student_uq: 'Student already has an active batch enrollment',
   payments_one_completed_per_invoice_uq: 'This invoice already has a recorded payment',
