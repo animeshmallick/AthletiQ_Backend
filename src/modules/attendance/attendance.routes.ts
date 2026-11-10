@@ -65,6 +65,7 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
       startTime: batches.startTime,
       endTime: batches.endTime,
       dayTimes: batches.dayTimes,
+      coachFeedback: batches.coachFeedback,
       coach: { id: users.id, name: users.name },
       location: {
         id: locations.id,

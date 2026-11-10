@@ -49,6 +49,7 @@ function batchSelect(members: ReturnType<typeof memberCounts>) {
     endTime: batches.endTime,
     dayTimes: batches.dayTimes,
     capacity: batches.capacity,
+    coachFeedback: batches.coachFeedback,
     isActive: batches.isActive,
     createdAt: batches.createdAt,
     sport: { id: sports.id, name: sports.name },
@@ -171,6 +172,8 @@ const BatchBody = z.object({
   capacity: z.number().int().min(1).max(1000),
   sportId: zId,
   feePlanId: zId,
+  /** Coach feedback (weekly reports, assessments, plan reminders). Only free batches can opt out. */
+  coachFeedback: z.boolean().default(true),
   isActive: z.boolean().default(true),
 });
 
@@ -238,12 +241,14 @@ async function assertLocation(locationId: string) {
 batchesRouter.post('/', requireAdmin, async (req, res) => {
   const body = parse(BatchBody, req.body);
   body.dayTimes = timings(body.weekdays, body.startTime, body.endTime, body.dayTimes);
-  await Promise.all([
+  const [, , , plan] = await Promise.all([
     assertCoach(body.coachId),
     assertLocation(body.locationId),
     assertSport(body.sportId),
     assertPlanFits(body.feePlanId, body.weekdays),
   ]);
+  // Paying students always get feedback; only a free batch can be attendance-only.
+  if (plan.monthlyFee > 0) body.coachFeedback = true;
   const [batch] = await db.insert(batches).values(body).returning();
   await audit({
     ...auditCtx(req),
@@ -276,8 +281,11 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
   const weekdays = body.weekdays ?? existing.weekdays;
   const daysChanged =
     !!body.weekdays && [...body.weekdays].sort().join() !== [...existing.weekdays].sort().join();
-  if (body.feePlanId || daysChanged)
-    await assertPlanFits(body.feePlanId ?? existing.feePlanId, weekdays);
+  if (body.feePlanId || daysChanged || body.coachFeedback === false) {
+    const plan = await assertPlanFits(body.feePlanId ?? existing.feePlanId, weekdays);
+    // Paying students always get feedback; only a free batch can be attendance-only.
+    if (plan.monthlyFee > 0) body.coachFeedback = true;
+  }
 
   const members = await currentMembers(id);
   if (body.capacity !== undefined && body.capacity < members.length) {

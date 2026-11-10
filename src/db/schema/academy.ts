@@ -77,6 +77,11 @@ export const batches = pgTable(
     feePlanId: uuid()
       .notNull()
       .references((): AnyPgColumn => feePlans.id, { onDelete: 'restrict' }),
+    /**
+     * Does the coach give feedback for this batch (weekly reports, monthly skill assessments,
+     * lesson-plan reminders)? Only free batches can turn it off: then only attendance is kept.
+     */
+    coachFeedback: boolean().notNull().default(true),
     /** What the batch trains; decides which skills its students are assessed on. */
     sportId: uuid()
       .notNull()

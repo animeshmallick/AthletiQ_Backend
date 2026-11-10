@@ -140,7 +140,11 @@ export async function weekBoard(
   weekStart: IsoDate,
   q: { coachId?: string; batchId?: string } = {},
 ) {
-  const filters: SQL[] = [overlapsWeek(weekStart)!, lte(students.joiningDate, weekEnd(weekStart))];
+  const filters: SQL[] = [
+    overlapsWeek(weekStart)!,
+    lte(students.joiningDate, weekEnd(weekStart)),
+    eq(batches.coachFeedback, true),
+  ];
   if (!isAdmin(user)) filters.push(eq(batches.coachId, user.id));
   else if (q.coachId) filters.push(eq(batches.coachId, q.coachId));
   if (q.batchId) filters.push(eq(batches.id, q.batchId));

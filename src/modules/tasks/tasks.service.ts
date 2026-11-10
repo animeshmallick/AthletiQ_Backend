@@ -128,7 +128,8 @@ async function sessionTasks(user: AuthUser, now: Date): Promise<Task[]> {
         });
       }
     }
-    if (!admin && !s.hasLessonPlan && mins < end) {
+    // No plan reminders for attendance-only (no-feedback) batches.
+    if (!admin && !s.hasLessonPlan && mins < end && b.coachFeedback) {
       tasks.push({
         id: `lesson-plan:${b.id}:${today}`,
         kind: 'lesson-plan',

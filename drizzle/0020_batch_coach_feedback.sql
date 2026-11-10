@@ -1,0 +1,1 @@
+ALTER TABLE "batches" ADD COLUMN "coach_feedback" boolean DEFAULT true NOT NULL;

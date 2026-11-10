@@ -288,6 +288,8 @@ skillsRouter.get('/insights', async (req, res) => {
     .where(
       and(
         eq(batches.isActive, true),
+        // Attendance-only batches aren't assessed.
+        eq(batches.coachFeedback, true),
         admin ? undefined : eq(batches.coachId, user.id),
         q.batchId ? eq(batches.id, q.batchId) : undefined,
       ),

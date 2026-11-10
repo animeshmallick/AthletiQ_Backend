@@ -14,6 +14,7 @@ export async function pendingAssessments(coachId: string, day: string): Promise<
       and(
         eq(batches.coachId, coachId),
         eq(batches.isActive, true),
+        eq(batches.coachFeedback, true),
         isNull(enrollments.effectiveTo),
         notExists(
           db
