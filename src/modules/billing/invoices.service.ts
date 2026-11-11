@@ -1,9 +1,10 @@
-import { and, asc, desc, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import {
   batches,
   enrollments,
   invoices,
+  locations,
   payments,
   students,
   users,
@@ -51,12 +52,49 @@ export async function getInvoiceForUser(user: AuthUser, invoiceId: string) {
         phone: students.phone,
         address: students.address,
         status: students.status,
+        joiningDate: students.joiningDate,
       },
     })
     .from(invoices)
     .innerJoin(students, eq(students.id, invoices.studentId))
     .where(and(eq(invoices.id, invoiceId), scope));
   if (!row) throw AppError.notFound('Invoice');
+
+  // Context for the invoice page: the batch (coach, place, times), the student's training days,
+  // and what else they owe (that this user can see).
+  const [[batch], enrollment, [otherDue]] = await Promise.all([
+    row.invoice.batchId
+      ? db
+          .select({
+            startTime: batches.startTime,
+            endTime: batches.endTime,
+            coachName: users.name,
+            locationName: locations.name,
+          })
+          .from(batches)
+          .innerJoin(users, eq(users.id, batches.coachId))
+          .innerJoin(locations, eq(locations.id, batches.locationId))
+          .where(eq(batches.id, row.invoice.batchId))
+      : Promise.resolve([]),
+    db.query.enrollments.findFirst({
+      columns: { trainingDays: true },
+      where: eq(enrollments.id, row.invoice.enrollmentId),
+    }),
+    db
+      .select({
+        count: count(),
+        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+      })
+      .from(invoices)
+      .where(
+        and(
+          eq(invoices.studentId, row.student.id),
+          eq(invoices.status, 'due'),
+          ne(invoices.id, invoiceId),
+          scope,
+        ),
+      ),
+  ]);
 
   const history = await db
     .select({
@@ -90,6 +128,14 @@ export async function getInvoiceForUser(user: AuthUser, invoiceId: string) {
     student: row.student,
     payments: history,
     split,
+    about: {
+      coachName: batch?.coachName ?? null,
+      locationName: batch?.locationName ?? null,
+      startTime: batch?.startTime ?? null,
+      endTime: batch?.endTime ?? null,
+      trainingDays: enrollment?.trainingDays ?? null,
+      otherDue: { count: otherDue?.count ?? 0, amount: otherDue?.amount ?? 0 },
+    },
   };
 }
 

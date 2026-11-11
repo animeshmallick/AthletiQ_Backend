@@ -281,6 +281,16 @@ describe('invoices API', () => {
     const url = `/api/v1/invoices/${inv1.id}`;
 
     await (await as(otherCoach)).get(url).expect(404);
+    // The page's context: joining date, batch coach / place / times, training days, other dues.
+    const detail = (await coachApi.get(url).expect(200)).body.data;
+    expect(detail.student.joiningDate).toEqual(expect.any(String));
+    expect(detail.about).toMatchObject({
+      coachName: coach.name,
+      locationName: expect.any(String),
+      startTime: expect.any(String),
+      trainingDays: expect.any(Array),
+      otherDue: { count: expect.any(Number), amount: expect.any(Number) },
+    });
     await coachApi.post(`${url}/payments`, { mode: 'upi', paidOn: '2026-02-20' }).expect(400);
     await coachApi.post(`${url}/payments`, { mode: 'upi', paidOn: '2025-12-01' }).expect(400);
     const paid = await coachApi
