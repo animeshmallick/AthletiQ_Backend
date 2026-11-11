@@ -2,7 +2,7 @@ import { and, count, eq, gte, ilike, inArray, lt, lte, or, sql, type SQL } from 
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { batches, invoices, payments, students } from '../../db/schema/index.js';
+import { batches, invoices, locations, payments, students } from '../../db/schema/index.js';
 import { addDays, addMonthsClamped, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok, pageMeta } from '../../lib/http.js';
@@ -131,6 +131,9 @@ invoicesRouter.get('/', async (req, res) => {
         status: invoices.status,
         paidAt: invoices.paidAt,
         batchName: invoices.batchName,
+        batchId: invoices.batchId,
+        // For grouping the list by place (null when the batch is gone).
+        location: { id: locations.id, name: locations.name },
         feePlanName: invoices.feePlanName,
         student: {
           id: students.id,
@@ -141,6 +144,8 @@ invoicesRouter.get('/', async (req, res) => {
       })
       .from(invoices)
       .innerJoin(students, eq(students.id, invoices.studentId))
+      .leftJoin(batches, eq(batches.id, invoices.batchId))
+      .leftJoin(locations, eq(locations.id, batches.locationId))
       .where(where)
       .orderBy(invoiceSortSql[q.sort])
       .limit(q.pageSize)

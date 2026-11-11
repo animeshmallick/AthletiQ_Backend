@@ -18,6 +18,8 @@ type Row = {
   totalAmount: number;
   student: { fullName: string };
   batchName: string;
+  batchId: string | null;
+  location: { id: string; name: string } | null;
 };
 
 async function setup() {
@@ -66,6 +68,9 @@ describe('invoice filters and sorting', () => {
     expect((await list('')).meta.total).toBe(4);
     const bySport = await list(`sportId=${chess.id}`);
     expect(bySport.data.map((r) => r.student.fullName)).toEqual(['Cal']);
+    // Each invoice carries its batch and place, for grouping the list.
+    expect(bySport.data[0]).toMatchObject({ location: { id: club.id, name: 'Club' } });
+    expect(bySport.data[0]!.batchId).toEqual(expect.any(String));
     expect((await list(`locationId=${club.id}`)).meta.total).toBe(1);
     expect((await list(`feePlanId=${cheap.id}`)).meta.total).toBe(1);
     expect((await list(`feePlanId=${plan.id}`)).meta).toMatchObject({
