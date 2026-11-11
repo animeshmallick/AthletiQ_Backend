@@ -62,7 +62,7 @@ export async function getInvoiceForUser(user: AuthUser, invoiceId: string) {
 
   // Context for the invoice page: the batch (coach, place, times), the student's training days,
   // and what else they owe (that this user can see).
-  const [[batch], enrollment, [otherDue]] = await Promise.all([
+  const [[batch], enrollment, [otherDue], [joined]] = await Promise.all([
     row.invoice.batchId
       ? db
           .select({
@@ -77,7 +77,7 @@ export async function getInvoiceForUser(user: AuthUser, invoiceId: string) {
           .where(eq(batches.id, row.invoice.batchId))
       : Promise.resolve([]),
     db.query.enrollments.findFirst({
-      columns: { trainingDays: true },
+      columns: { trainingDays: true, billingStartsOn: true },
       where: eq(enrollments.id, row.invoice.enrollmentId),
     }),
     db
@@ -94,6 +94,18 @@ export async function getInvoiceForUser(user: AuthUser, invoiceId: string) {
           scope,
         ),
       ),
+    // When the student joined this batch: the start of their earliest enrollment in it.
+    row.invoice.batchId
+      ? db
+          .select({ on: sql<string | null>`min(${enrollments.effectiveFrom})::text` })
+          .from(enrollments)
+          .where(
+            and(
+              eq(enrollments.studentId, row.student.id),
+              eq(enrollments.batchId, row.invoice.batchId),
+            ),
+          )
+      : Promise.resolve([]),
   ]);
 
   const history = await db
@@ -134,6 +146,8 @@ export async function getInvoiceForUser(user: AuthUser, invoiceId: string) {
       startTime: batch?.startTime ?? null,
       endTime: batch?.endTime ?? null,
       trainingDays: enrollment?.trainingDays ?? null,
+      batchJoinedOn: joined?.on ?? null,
+      billingStartsOn: enrollment?.billingStartsOn ?? null,
       otherDue: { count: otherDue?.count ?? 0, amount: otherDue?.amount ?? 0 },
     },
   };

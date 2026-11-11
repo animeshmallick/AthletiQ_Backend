@@ -289,6 +289,8 @@ describe('invoices API', () => {
       locationName: expect.any(String),
       startTime: expect.any(String),
       trainingDays: expect.any(Array),
+      batchJoinedOn: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      billingStartsOn: expect.any(String),
       otherDue: { count: expect.any(Number), amount: expect.any(Number) },
     });
     await coachApi.post(`${url}/payments`, { mode: 'upi', paidOn: '2026-02-20' }).expect(400);
