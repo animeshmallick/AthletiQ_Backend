@@ -93,13 +93,6 @@ export const coachSessions = pgTable(
     checkInDistanceM: integer().notNull(),
     checkInWithinFence: boolean().notNull(),
 
-    checkOutAt: tz(),
-    checkOutLat: doublePrecision(),
-    checkOutLng: doublePrecision(),
-    checkOutAccuracyM: doublePrecision(),
-    checkOutDistanceM: integer(),
-    checkOutWithinFence: boolean(),
-
     note: text(),
     /** Admin review of flagged sessions. */
     reviewedById: uuid().references(() => users.id, { onDelete: 'set null' }),
@@ -112,6 +105,6 @@ export const coachSessions = pgTable(
     index('coach_sessions_date_idx').on(t.date),
     index('coach_sessions_flagged_idx')
       .on(t.date)
-      .where(sql`${t.checkInWithinFence} = false or ${t.checkOutWithinFence} = false`),
+      .where(sql`${t.checkInWithinFence} = false`),
   ],
 );

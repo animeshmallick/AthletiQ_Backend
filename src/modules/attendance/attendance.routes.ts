@@ -128,8 +128,7 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
         coachSession: cs
           ? {
               checkInAt: cs.checkInAt,
-              checkOutAt: cs.checkOutAt,
-              flagged: !cs.checkInWithinFence || cs.checkOutWithinFence === false,
+              flagged: !cs.checkInWithinFence,
             }
           : null,
       };
@@ -220,15 +219,13 @@ attendanceRouter.get('/session', async (req, res) => {
   );
   const visit = user.role === 'coach' ? await coachVisit(user.id, batchId, date) : null;
   const needsCheckIn = !!visit && !visit.checkedIn;
-  // After checking out, coaches can still mark the rest of the day; it locks from the next day.
-  const checkedOut = !!visit?.checkedOut && date < todayInAppTz();
   const edit = canEdit(user.role, date);
   ok(res, {
     batch: { id: batch.id, name: batch.name, ...timesOn(batch, date) },
     date,
     isScheduledDay: batch.weekdays.includes(isoWeekday(date)),
     cancelled: cancellation,
-    editable: !cancellation && edit.allowed && !needsCheckIn && !checkedOut,
+    editable: !cancellation && edit.allowed && !needsCheckIn,
     /** Coaches mark attendance only for sessions they checked in to. */
     needsCheckIn,
     lockedReason: cancellation
@@ -237,9 +234,7 @@ attendanceRouter.get('/session', async (req, res) => {
         ? edit.reason
         : needsCheckIn
           ? 'Check in to this session to mark attendance.'
-          : checkedOut
-            ? CHECKED_OUT_LOCK
-            : null,
+          : null,
     students: rows.map((r) => ({
       ...r,
       ...(history.get(r.studentId) ?? { recent: [], rate30: null }),
@@ -285,20 +280,17 @@ async function recentAttendance(batchId: string, studentIds: string[], date: Iso
   return out;
 }
 
-const CHECKED_OUT_LOCK =
-  'You checked out of this session and the day is over, so attendance is locked. Ask an admin to make changes.';
-
-/** Has this coach checked in (GPS) to the batch's session that day, and checked out since? */
+/** Has this coach checked in (GPS) to the batch's session that day? */
 async function coachVisit(coachId: string, batchId: string, date: IsoDate) {
   const row = await db.query.coachSessions.findFirst({
-    columns: { id: true, checkOutAt: true },
+    columns: { id: true },
     where: and(
       eq(coachSessions.coachId, coachId),
       eq(coachSessions.batchId, batchId),
       eq(coachSessions.date, date),
     ),
   });
-  return { checkedIn: !!row, checkedOut: !!row?.checkOutAt };
+  return { checkedIn: !!row };
 }
 
 function canEdit(role: 'admin' | 'coach', date: string): { allowed: boolean; reason?: string } {
@@ -308,7 +300,8 @@ function canEdit(role: 'admin' | 'coach', date: string): { allowed: boolean; rea
   if (role === 'coach' && diffDays(date, today) > COACH_ATTENDANCE_EDIT_WINDOW_DAYS) {
     return {
       allowed: false,
-      reason: `Coaches can edit attendance up to ${COACH_ATTENDANCE_EDIT_WINDOW_DAYS} day(s) after the session. Ask an admin to correct older records.`,
+      reason:
+        'Coaches can mark attendance on the day of the session. Ask an admin to change an earlier day.',
     };
   }
   return { allowed: true };
@@ -340,9 +333,6 @@ attendanceRouter.put('/session', async (req, res) => {
     if (!visit.checkedIn) {
       throw AppError.unprocessable('Check in to this session before marking attendance.');
     }
-    // After checking out, coaches can still mark it the same day; after that only admins can.
-    if (visit.checkedOut && body.date < todayInAppTz())
-      throw AppError.unprocessable(CHECKED_OUT_LOCK);
   }
 
   const roster = await expectedRoster(body.batchId, body.date);

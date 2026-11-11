@@ -14,8 +14,8 @@ export const INVOICE_PREFIX = 'ATQ';
 /** Default geofence radius for a location when none is provided. */
 export const DEFAULT_GEOFENCE_RADIUS_M = 200;
 
-/** Coaches may edit student attendance up to this many days after the session; admins anytime. */
-export const COACH_ATTENDANCE_EDIT_WINDOW_DAYS = 1;
+/** Coaches may edit student attendance up to this many days after the session (0: that day only); admins anytime. */
+export const COACH_ATTENDANCE_EDIT_WINDOW_DAYS = 0;
 
 export const REFRESH_COOKIE_NAME = 'atq_rt';
 export const REFRESH_COOKIE_PATH = '/api/v1/auth';

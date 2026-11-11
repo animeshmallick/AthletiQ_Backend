@@ -1,7 +1,4 @@
 import { describe, expect, it } from '@jest/globals';
-import { and, eq } from 'drizzle-orm';
-import { db } from '../../src/db/client';
-import { coachSessions } from '../../src/db/schema';
 import { as, makeAcademy, makeBatch, makeStudent, setToday, checkIn } from '../helpers/factories';
 
 // 2026-03-09 is a Monday. Batches run Mon–Sat; students train every day their batch runs.
@@ -22,7 +19,7 @@ async function setup() {
 }
 
 describe('student attendance', () => {
-  it('lets the coach mark after check-out the same day, then locks it; admins can still correct it', async () => {
+  it('lets the coach mark all day, locks it for them from the next day; admins can still correct it', async () => {
     setToday(MON);
     const { admin, coach, batch, s1 } = await setup();
     await checkIn(coach.id, batch.id, MON);
@@ -34,17 +31,14 @@ describe('student attendance', () => {
     });
     await api.put('/api/v1/attendance/session', mark('present')).expect(200);
 
-    await db
-      .update(coachSessions)
-      .set({ checkOutAt: new Date(`${MON}T02:35:00Z`) })
-      .where(and(eq(coachSessions.coachId, coach.id), eq(coachSessions.date, MON)));
-
-    // Same day, after checking out: still open (e.g. to fix a mark on the way home).
-    const sameDay = await api
+    // Later the same day: still open (there is no check-out).
+    setToday(MON, '15:00:00');
+    const evening = await as(coach);
+    const sameDay = await evening
       .get(`/api/v1/attendance/session?batchId=${batch.id}&date=${MON}`)
       .expect(200);
     expect(sameDay.body.data).toMatchObject({ editable: true, lockedReason: null });
-    await api.put('/api/v1/attendance/session', mark('late')).expect(200);
+    await evening.put('/api/v1/attendance/session', mark('late')).expect(200);
 
     // Next day: locked for the coach.
     setToday('2026-03-10');
@@ -54,7 +48,7 @@ describe('student attendance', () => {
       .expect(200);
     expect(sheet.body.data).toMatchObject({
       editable: false,
-      lockedReason: expect.stringMatching(/checked out of this session and the day is over/),
+      lockedReason: expect.stringMatching(/on the day of the session/),
     });
     const refused = await nextDay.put('/api/v1/attendance/session', mark('absent')).expect(422);
     expect(refused.body.error.message).toMatch(/Ask an admin/);
@@ -263,7 +257,7 @@ describe('student attendance', () => {
         present: 1,
         attendanceComplete: true,
         hasLessonPlan: false,
-        coachSession: expect.objectContaining({ flagged: false, checkOutAt: null }),
+        coachSession: expect.objectContaining({ flagged: false }),
       }),
     ]);
     const all = await (
@@ -344,9 +338,9 @@ describe('student attendance', () => {
   });
 });
 
-describe('coach GPS check-in / check-out', () => {
+describe('coach GPS check-in', () => {
   // Location is at 12.9716, 77.5946 with a 200 m radius.
-  it('records an in-fence session with duration', async () => {
+  it('records an in-fence check-in; the session counts its scheduled length', async () => {
     setToday(MON, '00:30:00'); // 06:00 IST
     const { coach, batch } = await setup();
     const api = await as(coach);
@@ -367,8 +361,9 @@ describe('coach GPS check-in / check-out', () => {
     expect(inRes.body.data.session).toMatchObject({
       checkInWithinFence: true,
       flagged: false,
-      durationMinutes: null,
+      durationMinutes: 120, // 06:00–08:00
     });
+    expect(inRes.body.data.session.checkOutAt).toBeUndefined();
     expect(inRes.body.data.message).toMatch(/^Checked in at/);
     await api
       .post('/api/v1/coach-sessions/check-in', {
@@ -378,26 +373,10 @@ describe('coach GPS check-in / check-out', () => {
       })
       .expect(409);
 
-    setToday(MON, '02:30:00'); // 08:00 IST — access tokens expire after 15 min, so sign in again
-    const later = await as(coach);
-    const outRes = await later
-      .post('/api/v1/coach-sessions/check-out', {
-        batchId: batch.id,
-        latitude: 12.9716,
-        longitude: 77.5946,
-      })
-      .expect(200);
-    expect(outRes.body.data.session).toMatchObject({
-      checkOutWithinFence: true,
-      durationMinutes: 120,
-    });
-    await later
-      .post('/api/v1/coach-sessions/check-out', {
-        batchId: batch.id,
-        latitude: 12.9716,
-        longitude: 77.5946,
-      })
-      .expect(409);
+    // Check-out no longer exists.
+    await api
+      .post('/api/v1/coach-sessions/check-out', { batchId: batch.id, latitude: 1, longitude: 1 })
+      .expect(404);
   });
 
   it('accepts but flags readings outside the geofence for admin review', async () => {
@@ -414,14 +393,6 @@ describe('coach GPS check-in / check-out', () => {
       .expect(200);
     expect(res.body.data.session.flagged).toBe(true);
     expect(res.body.data.message).toMatch(/flagged for review/);
-    const out = await api
-      .post('/api/v1/coach-sessions/check-out', {
-        batchId: batch.id,
-        latitude: 13.5,
-        longitude: 77.5946,
-      })
-      .expect(200);
-    expect(out.body.data.message).toMatch(/check-out has been flagged/);
 
     const adminApi = await as(admin);
     const flagged = await adminApi
@@ -456,13 +427,6 @@ describe('coach GPS check-in / check-out', () => {
       .expect(404);
     await api
       .post('/api/v1/coach-sessions/check-in', {
-        batchId: batch.id,
-        latitude: 12.9716,
-        longitude: 77.5946,
-      })
-      .expect(422);
-    await api
-      .post('/api/v1/coach-sessions/check-out', {
         batchId: batch.id,
         latitude: 12.9716,
         longitude: 77.5946,
@@ -504,11 +468,9 @@ describe('coach GPS check-in / check-out', () => {
     setToday('2026-03-11');
     const later = await as(coach);
     const list = await later.get('/api/v1/coach-sessions').expect(200);
-    expect(list.body.data.summary).toMatchObject({
-      sessions: 1,
-      missingCheckOut: 1,
-      totalHours: 0,
-    });
+    // Hours: the scheduled length of each session checked in to.
+    expect(list.body.data.summary).toMatchObject({ sessions: 1, totalHours: 2 });
+    expect(list.body.data.summary.missingCheckOut).toBeUndefined();
     await later.get('/api/v1/coach-sessions?from=2020-01-01&to=2026-03-11').expect(400);
   });
 });
@@ -547,49 +509,5 @@ describe('calendar', () => {
     )
       .get('/api/v1/attendance/calendar?from=2026-03-10&to=2026-03-09')
       .expect(400);
-  });
-});
-
-describe('admin check-out', () => {
-  it('lets an admin close a session a coach forgot to check out of', async () => {
-    setToday(MON, '04:00:00'); // 09:30 IST
-    const { coach, admin, otherCoach, batch } = await setup();
-    await (
-      await as(coach)
-    )
-      .post('/api/v1/coach-sessions/check-in', {
-        batchId: batch.id,
-        latitude: 12.9716,
-        longitude: 77.5946,
-      })
-      .expect(200);
-    const list = await (
-      await as(admin)
-    )
-      .get(`/api/v1/coach-sessions?from=${MON}&to=${MON}`)
-      .expect(200);
-    const id = list.body.data.sessions[0].id as string;
-
-    await (await as(otherCoach)).post(`/api/v1/coach-sessions/${id}/check-out`, {}).expect(403);
-    const adminApi = await as(admin);
-    await adminApi
-      .post(`/api/v1/coach-sessions/${id}/check-out`, { at: '2026-03-08T10:00:00Z' })
-      .expect(400); // before check-in
-    await adminApi
-      .post(`/api/v1/coach-sessions/${id}/check-out`, { at: '2026-03-09T09:00:00Z' })
-      .expect(400); // future
-    const res = await adminApi
-      .post(`/api/v1/coach-sessions/${id}/check-out`, {
-        at: '2026-03-09T04:00:30Z',
-        reason: 'Forgot',
-      })
-      .expect(200);
-    expect(res.body.data).toMatchObject({
-      checkOutAt: '2026-03-09T04:00:30.000Z',
-      checkOutLat: null,
-      note: expect.stringContaining('Checked out by'),
-    });
-    expect(res.body.data.note).toContain('Forgot');
-    await adminApi.post(`/api/v1/coach-sessions/${id}/check-out`, {}).expect(409);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { db } from '../../src/db/client';
 import {
   coachSessions,
@@ -45,7 +45,7 @@ describe('task helpers', () => {
 });
 
 describe('coach session tasks over a day', () => {
-  it('moves from planning to check-in, attendance and check-out', async () => {
+  it('moves from planning to check-in and attendance (no check-out)', async () => {
     const a = await academyToday();
 
     // Every session today has its own check-in to-do: "later today" until 15 min before.
@@ -75,22 +75,12 @@ describe('coach session tasks over a day', () => {
       detail: `${a.batch.name} · 0 of 1 marked`,
     });
 
-    // Session over, still checked in.
+    // Session over: attendance is still open, and there is nothing to check out of.
     setToday(MON, at('08:20'));
     const late = await tasksFor(a.coachUser);
-    expect(kinds(late)).toEqual(['attendance', 'check-out']);
+    expect(kinds(late)).toEqual(['attendance']);
     expect(find(late, 'attendance')!.severity).toBe('warning');
-    expect(find(late, 'check-out')).toMatchObject({
-      title: `Check out of ${a.batch.name}`,
-      detail: 'Session ended at 8:00 am',
-      link: '/',
-    });
-    const adminLate = await tasksFor(a.adminUser);
-    expect(kinds(adminLate)).toEqual(['check-out']);
-    expect(find(adminLate, 'check-out')).toMatchObject({
-      title: `${a.coach.name} hasn't checked out`,
-      link: '/coach-sessions',
-    });
+    expect(kinds(await tasksFor(a.adminUser))).toEqual([]);
 
     setToday(MON, at('08:40'));
     expect(find(await tasksFor(a.adminUser), 'attendance')).toMatchObject({
@@ -98,13 +88,7 @@ describe('coach session tasks over a day', () => {
       detail: `${a.coach.name} · ${a.batch.name} · 0 of 1 marked`,
     });
 
-    // Checked out: the coach can still mark it today, so the to-do stays; also an admin follow-up.
-    await db
-      .update(coachSessions)
-      .set({ checkOutAt: new Date() })
-      .where(and(eq(coachSessions.coachId, a.coach.id), eq(coachSessions.date, MON)));
     expect(kinds(await tasksFor(a.coachUser))).toEqual(['attendance']);
-    expect(kinds(await tasksFor(a.adminUser))).toEqual(['attendance']);
   });
 
   it('skips cancelled sessions', async () => {

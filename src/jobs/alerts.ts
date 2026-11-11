@@ -41,7 +41,7 @@ const SYSTEM: AuthUser = {
  * Every minute:
  *  - 15 min before a session → coach reminder,
  *  - 30 min after start with no check-in → coach + admins,
- *  - 30 min after the end with anything pending (attendance, check-out, plan) → coach + admins.
+ *  - 30 min after the end with anything pending (attendance, plan) → coach + admins.
  */
 export async function runSessionAlerts(now: Date = new Date()) {
   if (!pushEnabled()) return { sent: 0 };
@@ -101,7 +101,6 @@ export async function runSessionAlerts(now: Date = new Date()) {
       if (s.expectedStudents > 0 && s.marked < s.expectedStudents) {
         pending.push(`attendance ${s.marked}/${s.expectedStudents}`);
       }
-      if (s.coachSession && !s.coachSession.checkOutAt) pending.push('not checked out');
       if (!s.hasLessonPlan) pending.push('no lesson plan');
       if (pending.length) {
         const coach = await notifyOnce(`wrapup-coach:${b.id}:${today}`, [b.coach.id], {

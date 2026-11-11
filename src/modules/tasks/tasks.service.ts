@@ -30,7 +30,6 @@ export interface Task {
     | 'missed-check-in'
     | 'attendance'
     | 'lesson-plan'
-    | 'check-out'
     | 'feedback'
     | 'registrations'
     | 'flagged-check-ins'
@@ -143,17 +142,6 @@ async function sessionTasks(user: AuthUser, now: Date): Promise<Task[]> {
           : `Session at ${at}`,
         link: `/lesson-plans?batch=${b.id}&plan=1`,
         screen: '/lesson-plans',
-      });
-    }
-    if (s.coachSession && !s.coachSession.checkOutAt && mins >= end + 15) {
-      tasks.push({
-        id: `check-out:${b.id}:${today}`,
-        kind: 'check-out',
-        severity: 'warning',
-        title: admin ? `${b.coach.name} hasn't checked out` : `Check out of ${b.name}`,
-        detail: `Session ended at ${clockLabel(b.endTime)}`,
-        link: admin ? `/coach-sessions` : '/',
-        screen: admin ? '/coach-sessions' : '/',
       });
     }
   }

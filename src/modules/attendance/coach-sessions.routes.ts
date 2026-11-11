@@ -1,5 +1,5 @@
 import { timesOn } from '../../lib/batch-times.js';
-import { and, asc, desc, eq, gte, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lte, or, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -14,7 +14,7 @@ import { isAdmin, isSubstituteFor } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { coveredBy, substitutesOn } from '../substitutions/coverage.js';
 import { assertNotCancelled, cancellationsIn } from './cancellations.js';
-import { notifyAdmins, notifyInBackground, notifyUsers } from '../push/push.service.js';
+import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
 
 export const coachSessionsRouter = Router();
 
@@ -52,13 +52,17 @@ function evaluate(
   return { distance, within: isWithinGeofence(distance, location.radiusMeters, accuracy) };
 }
 
+const toMin = (t: string) => {
+  const [h = 0, m = 0] = t.split(':').map(Number);
+  return h * 60 + m;
+};
+
+/** A check-in with its flag and the session's scheduled length (there is no check-out). */
 function present(s: typeof coachSessions.$inferSelect) {
   return {
     ...s,
-    flagged: !s.checkInWithinFence || s.checkOutWithinFence === false,
-    durationMinutes: s.checkOutAt
-      ? Math.round((s.checkOutAt.getTime() - s.checkInAt.getTime()) / 60_000)
-      : null,
+    flagged: !s.checkInWithinFence,
+    durationMinutes: Math.max(toMin(s.scheduledEnd) - toMin(s.scheduledStart), 0),
   };
 }
 
@@ -175,45 +179,6 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
   });
 });
 
-coachSessionsRouter.post('/check-out', requireCoach, async (req, res) => {
-  const user = currentUser(req);
-  const body = parse(GpsBody, req.body);
-  const { location } = await loadOwnBatchWithLocation(user.id, body.batchId);
-  const today = todayInAppTz();
-
-  const existing = await db.query.coachSessions.findFirst({
-    where: and(
-      eq(coachSessions.coachId, user.id),
-      eq(coachSessions.batchId, body.batchId),
-      eq(coachSessions.date, today),
-    ),
-  });
-  if (!existing) throw AppError.unprocessable('Check in before checking out');
-  if (existing.checkOutAt) throw AppError.conflict('You have already checked out of this session');
-
-  const { distance, within } = evaluate(location, body.latitude, body.longitude, body.accuracy);
-  const [session] = await db
-    .update(coachSessions)
-    .set({
-      checkOutAt: new Date(),
-      checkOutLat: body.latitude,
-      checkOutLng: body.longitude,
-      checkOutAccuracyM: body.accuracy ?? null,
-      checkOutDistanceM: distance,
-      checkOutWithinFence: within,
-      note: body.note ?? existing.note,
-    })
-    .where(eq(coachSessions.id, existing.id))
-    .returning();
-
-  ok(res, {
-    session: present(session!),
-    message: within
-      ? 'Checked out. Great session!'
-      : `Checked out, but you appear to be ${distance} m from ${location.name}. This check-out has been flagged for review.`,
-  });
-});
-
 // ─── History / admin review ──────────────────────────────────────────────────
 
 const ListQuery = z.object({
@@ -235,14 +200,7 @@ coachSessionsRouter.get('/', async (req, res) => {
   if (!isAdmin(user)) filters.push(eq(coachSessions.coachId, user.id));
   else if (q.coachId) filters.push(eq(coachSessions.coachId, q.coachId));
   if (q.batchId) filters.push(eq(coachSessions.batchId, q.batchId));
-  if (q.flagged === 'true') {
-    filters.push(
-      or(
-        eq(coachSessions.checkInWithinFence, false),
-        eq(coachSessions.checkOutWithinFence, false),
-      )!,
-    );
-  }
+  if (q.flagged === 'true') filters.push(eq(coachSessions.checkInWithinFence, false));
 
   const rows = await db
     .select({
@@ -270,7 +228,8 @@ coachSessionsRouter.get('/', async (req, res) => {
     batch: r.batch,
     location: r.location,
   }));
-  const totalMinutes = sessions.reduce((sum, s) => sum + (s.durationMinutes ?? 0), 0);
+  // Hours coached: each checked-in session counts its scheduled length.
+  const totalMinutes = sessions.reduce((sum, s) => sum + s.durationMinutes, 0);
   ok(res, {
     from,
     to,
@@ -279,7 +238,6 @@ coachSessionsRouter.get('/', async (req, res) => {
       sessions: sessions.length,
       flagged: sessions.filter((s) => s.flagged).length,
       unreviewedFlagged: sessions.filter((s) => s.flagged && !s.reviewedAt).length,
-      missingCheckOut: sessions.filter((s) => !s.checkOutAt && s.date < todayInAppTz()).length,
       totalHours: Math.round((totalMinutes / 60) * 10) / 10,
     },
   });
@@ -302,56 +260,4 @@ coachSessionsRouter.post('/:id/review', requireAdmin, async (req, res) => {
     metadata: { note },
   });
   ok(res, present(s));
-});
-
-/**
- * Admin: close a session a coach forgot to check out of (no GPS reading). The time defaults to now
- * and can be set earlier (e.g. the batch end time), never before the check-in or in the future.
- */
-coachSessionsRouter.post('/:id/check-out', requireAdmin, async (req, res) => {
-  const { id } = parse(zIdParam, req.params);
-  const body = parse(
-    z.object({ at: z.iso.datetime({ offset: true }).optional(), reason: zOptionalText(300) }),
-    req.body,
-  );
-  const admin = currentUser(req);
-  const existing = await db.query.coachSessions.findFirst({ where: eq(coachSessions.id, id) });
-  if (!existing) throw AppError.notFound('Coach session');
-  if (existing.checkOutAt) throw AppError.conflict('This coach has already checked out');
-  const at = body.at ? new Date(body.at) : new Date();
-  if (at <= existing.checkInAt) throw AppError.badRequest('Check-out must be after the check-in');
-  if (at.getTime() > Date.now() + 60_000)
-    throw AppError.badRequest('Check-out cannot be in the future');
-
-  const note = [
-    existing.note,
-    `Checked out by ${admin.name}${body.reason ? `: ${body.reason}` : ''}`,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  const [saved] = await db
-    .update(coachSessions)
-    .set({ checkOutAt: at, note })
-    .where(and(eq(coachSessions.id, id), isNull(coachSessions.checkOutAt)))
-    .returning();
-  if (!saved) throw AppError.conflict('This coach has already checked out');
-  await audit({
-    ...auditCtx(req),
-    action: 'coach_session.checked_out_by_admin',
-    entityType: 'coach_session',
-    entityId: id,
-    metadata: { at: at.toISOString(), reason: body.reason },
-  });
-  const batch = await db.query.batches.findFirst({ where: eq(batches.id, existing.batchId) });
-  notifyInBackground(() =>
-    notifyUsers([existing.coachId], {
-      category: 'sessions',
-      icon: '🔒',
-      title: `Checked out of ${batch?.name ?? 'your session'}`,
-      body: `By ${admin.name}${body.reason ? ` · ${body.reason}` : ''}`,
-      link: '/coach-sessions',
-      tag: `checkout-${id}`,
-    }),
-  );
-  ok(res, present(saved));
 });
