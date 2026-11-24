@@ -290,7 +290,6 @@ async function lockRenewal(
     .select()
     .from(batchCycles)
     .where(and(eq(batchCycles.enrollmentId, e.id), eq(batchCycles.status, 'active')));
-  if (!c) throw AppError.notFound('Renewal');
   return { e, b, c };
 }
 
@@ -303,6 +302,7 @@ renewalsRouter.post('/:id/stop', async (req, res) => {
     throw AppError.forbidden('Only an admin can choose the next batch');
   const out = await db.transaction(async (tx) => {
     const { e, b, c } = await lockRenewal(tx, id, user);
+    if (!c) throw AppError.notFound('Renewal');
     // A coach can't replace what an admin planned.
     if (e.plannedEndOn && !isAdmin(user)) throw AppError.conflict('This is already stopped');
     if (c.endsOn < todayInAppTz()) throw AppError.conflict('This cycle has just ended. Try again.');
@@ -325,16 +325,17 @@ renewalsRouter.post('/:id/stop', async (req, res) => {
     const s = await tx.query.students.findFirst({ where: eq(students.id, e.studentId) });
     return { on: c.endsOn, name: s!.fullName, batch: b.name };
   });
-  notifyInBackground(() =>
-    notifyAdmins({
-      category: 'approvals',
-      icon: '⏹️',
-      title: `Renewal stopped · ${out.name}`,
-      body: `${out.batch}, after ${formatDisplayDate(out.on)} · ${user.name}: ${body.reason}`,
-      link: '/renewals?state=stopped',
-      tag: `renewal-${id}`,
-    }),
-  );
+  if (user.role !== 'admin')
+    notifyInBackground(() =>
+      notifyAdmins({
+        category: 'approvals',
+        icon: '⏹️',
+        title: `Renewal stopped · ${out.name}`,
+        body: `${out.batch}, after ${formatDisplayDate(out.on)} · ${user.name}: ${body.reason}`,
+        link: '/renewals?state=stopped',
+        tag: `renewal-${id}`,
+      }),
+    );
   ok(res, { on: out.on });
 });
 

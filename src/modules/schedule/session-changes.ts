@@ -28,6 +28,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db, type DbOrTx } from '../../db/client.js';
 import {
+  batchCycles,
   batchSubstitutions,
   batches,
   coachSessions,
@@ -62,6 +63,7 @@ import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { cycleFor } from '../billing/cycle.js';
 import { monthContaining } from '../cycles/cycle-math.js';
+import { cycleProgress } from '../cycles/progress.js';
 import { anchorOf } from '../cycles/cycles.js';
 import { notifyAdmins, notifyInBackground, notifyUsers } from '../push/push.service.js';
 import {
@@ -210,23 +212,41 @@ async function hasRecords(batchId: string, date: IsoDate, tx: DbOrTx) {
  * the session belongs to.
  */
 export async function affectedStudents(tx: DbOrTx, batchId: string, session: ScheduledSession) {
-  const day = rosterDay(session);
+  return affectedOf(await currentMembers(tx, [batchId]), batchId, session);
+}
+
+/** Members of the batches who haven't left yet. */
+async function currentMembers(tx: DbOrTx, batchIds: string[]) {
   const today = todayInAppTz();
-  const rows = await tx
-    .select({ e: enrollments, fullName: students.fullName })
+  return tx
+    .select({ e: enrollments, fullName: students.fullName, leftOn: students.leftOn })
     .from(enrollments)
     .innerJoin(students, eq(students.id, enrollments.studentId))
     .where(
       and(
-        eq(enrollments.batchId, batchId),
-        lte(enrollments.effectiveFrom, day),
-        or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, maxDate(day, today))),
-        or(isNull(enrollments.plannedEndOn), gte(enrollments.plannedEndOn, day)),
-        or(isNull(students.leftOn), gte(students.leftOn, maxDate(day, today))),
+        inArray(enrollments.batchId, batchIds),
+        or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, today)),
+        or(isNull(students.leftOn), gte(students.leftOn, today)),
       ),
     );
-  return rows
-    .filter(({ e }) => belongsTo(e, session))
+}
+
+function affectedOf(
+  members: Awaited<ReturnType<typeof currentMembers>>,
+  batchId: string,
+  session: ScheduledSession,
+) {
+  const day = rosterDay(session);
+  return members
+    .filter(
+      ({ e, leftOn }) =>
+        e.batchId === batchId &&
+        e.effectiveFrom <= day &&
+        (!e.effectiveTo || e.effectiveTo >= day) &&
+        (!e.plannedEndOn || e.plannedEndOn >= day) &&
+        (!leftOn || leftOn >= day) &&
+        belongsTo(e, session),
+    )
     .map(({ e, fullName }) => {
       const month = cycleFor(anchorOf(e), monthContaining(anchorOf(e), day));
       // Their month, or their last day when they leave before it ends.
@@ -785,14 +805,17 @@ sessionChangesRouter.post('/:id/cancel', async (req, res) => {
 
 // ─── Missed sessions ─────────────────────────────────────────────────────────
 
-const missedScope = (user: AuthUser) => (isAdmin(user) ? undefined : eq(batches.coachId, user.id));
+/** Whose missed sessions: every batch's (the nightly job too), or a coach's own. */
+type MissedScope = { role: 'admin' } | Pick<AuthUser, 'id' | 'role'>;
+const missedScope = (user: MissedScope) =>
+  'id' in user && user.role !== 'admin' ? eq(batches.coachId, user.id) : undefined;
 
 /**
  * Missed sessions not yet rescheduled or closed (open), and ended sessions with neither a check-in
  * nor attendance that an admin still has to confirm (unconfirmed). Batches with a course only,
  * from the day it was set up.
  */
-export async function missedSessions(user: AuthUser, now: Date = new Date()) {
+export async function missedSessions(user: MissedScope, now: Date = new Date()) {
   const today = todayInAppTz(now);
   const list = await db
     .select({
@@ -810,7 +833,8 @@ export async function missedSessions(user: AuthUser, now: Date = new Date()) {
   const from = addDays(today, -ADMIN_DAYS);
   const inRange = <T extends { batchId: string; date: IsoDate }>(rows: T[]) =>
     new Map(rows.map((r) => [`${r.batchId}:${r.date}`, r]));
-  const [schedule, cancels, checkIns, marks] = await Promise.all([
+  const [members, schedule, cancels, checkIns, marks] = await Promise.all([
+    currentMembers(db, ids),
     scheduleFor(list, from, addDays(today, ADMIN_DAYS)),
     db
       .select()
@@ -835,7 +859,7 @@ export async function missedSessions(user: AuthUser, now: Date = new Date()) {
       const key = `${b.id}:${s.date}`;
       const c = off.get(key);
       if (c ? c.closedAt : held.has(key) || instantAt(s.date, s.endTime) > now) continue;
-      const people = await affectedStudents(db, b.id, s);
+      const people = affectedOf(members, b.id, s);
       if (!people.length) continue;
       const original = rosterDay(s);
       const row = {
@@ -859,8 +883,41 @@ export async function missedSessions(user: AuthUser, now: Date = new Date()) {
   return { open: open.sort(byDate), unconfirmed: unconfirmed.sort(byDate) };
 }
 
+/**
+ * A missed session is optional when every student expected still gets their full count in that
+ * cycle without it (a 13th or 14th session was missed).
+ */
+async function markOptional<
+  T extends { batch: { id: string }; date: IsoDate; originalDate: IsoDate },
+>(open: T[]): Promise<(T & { optional: boolean })[]> {
+  if (!open.length) return [];
+  const first = open.map((m) => m.originalDate).reduce(minDate);
+  const cycles = await db
+    .select()
+    .from(batchCycles)
+    .where(
+      and(
+        inArray(batchCycles.batchId, [...new Set(open.map((m) => m.batch.id))]),
+        gte(batchCycles.endsOn, first),
+        inArray(batchCycles.status, ['active', 'completed']),
+      ),
+    );
+  const progress = await cycleProgress(cycles);
+  return open.map((m) => {
+    const hit = cycles
+      .filter((c) => c.batchId === m.batch.id)
+      .flatMap((c) => progress.get(c.id) ?? [])
+      .filter((p) => p.sessions.some((s) => s.date === m.date));
+    return {
+      ...m,
+      optional: hit.length > 0 && hit.every((p) => p.conducted + p.upcoming >= p.target),
+    };
+  });
+}
+
 sessionChangesRouter.get('/missed', async (req, res) => {
-  ok(res, await missedSessions(currentUser(req)));
+  const { open, unconfirmed } = await missedSessions(currentUser(req));
+  ok(res, { open: await markOptional(open), unconfirmed });
 });
 
 const KeyBody = z.object({ batchId: zId, date: zIsoDate });

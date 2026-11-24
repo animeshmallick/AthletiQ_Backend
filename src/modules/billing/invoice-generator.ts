@@ -157,6 +157,15 @@ async function createCycleInvoice(
   }
   try {
     return await db.transaction(async (tx) => {
+      // The list was read a moment ago: never bill a month starting after the membership's last day
+      // (the student may have exited, or had the renewal stopped, meanwhile).
+      const [m] = await tx
+        .select({ to: enrollments.effectiveTo, planned: enrollments.plannedEndOn })
+        .from(enrollments)
+        .where(eq(enrollments.id, e.id))
+        .for('update');
+      const last = m?.to ?? m?.planned;
+      if (!m || (last && cycle.periodStart > last)) return 'exists' as const;
       const number = await nextInvoiceNumber(tx, cycle.issueDate);
       await tx.insert(invoices).values({
         number,

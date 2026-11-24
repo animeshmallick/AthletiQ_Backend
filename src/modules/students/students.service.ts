@@ -15,6 +15,7 @@ import {
 import { addDays, minDate, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { cycleFor, nextUpcomingCycle } from '../billing/cycle.js';
 import { openFirstCycle, syncCycles } from '../cycles/cycles.js';
+import { sessionOn } from '../schedule/schedule.js';
 import { AppError } from '../../lib/errors.js';
 import type { Paise } from '../../lib/money.js';
 
@@ -338,6 +339,7 @@ export async function getStudentDetail(studentId: string) {
         startTime: batches.startTime,
         endTime: batches.endTime,
         dayTimes: batches.dayTimes,
+        weekdays: batches.weekdays,
         status: makeupSessions.status,
       })
       .from(makeupSessions)
@@ -425,10 +427,14 @@ export async function getStudentDetail(studentId: string) {
         ...h
       }) => h,
     ),
-    upcomingMakeups: upcomingMakeups.map(({ dayTimes, ...m }) => ({
-      ...m,
-      ...timesOn({ ...m, dayTimes }, m.date),
-    })),
+    upcomingMakeups: await Promise.all(
+      upcomingMakeups.map(async ({ dayTimes, weekdays, ...m }) => {
+        // That day's real time, when the session was moved to another time.
+        const timing = { ...m, id: m.batchId, weekdays, dayTimes };
+        const { startTime, endTime } = (await sessionOn(timing, m.date)) ?? timesOn(timing, m.date);
+        return { ...m, startTime, endTime };
+      }),
+    ),
     billing: invoiceSummary[0] ?? { outstanding: 0, overdue: 0, paid: 0, invoiceCount: 0 },
   };
 }

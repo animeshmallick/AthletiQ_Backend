@@ -641,7 +641,8 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
     const open = await tx
       .select()
       .from(enrollments)
-      .where(and(eq(enrollments.studentId, id), isNull(enrollments.effectiveTo)));
+      .where(and(eq(enrollments.studentId, id), isNull(enrollments.effectiveTo)))
+      .for('update');
     const latestStart = open.reduce((m, e) => (e.effectiveFrom > m ? e.effectiveFrom : m), '');
     if (open.length && body.leftOn < latestStart) {
       throw AppError.badRequest(

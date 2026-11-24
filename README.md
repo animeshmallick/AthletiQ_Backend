@@ -87,7 +87,11 @@ tests/
 
 ### Attendance
 
-- Session roster = home-batch students whose training days include the weekday + one-off makeups.
+- Session roster = home-batch students whose training days include the weekday + approved one-off makeups (no
+  longer offered).
+- Cycles: course months × the student's own billing months, counted in sessions conducted, renewed
+  nightly (`modules/cycles`). Missed sessions are rescheduled within 30 days
+  (`modules/schedule/session-changes`); invoices written off at an exit are `lost`.
 - Coaches edit up to 1 day back; admins anytime (audited).
 - Coach check-in/out is validated against the batch location's geofence; out-of-range readings are
   accepted but flagged for admin review.
@@ -106,22 +110,22 @@ tests/
 
 ## API overview (`/api/v1`)
 
-| Area                  | Endpoints                                                                                                                              |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth                  | `POST auth/login · refresh · logout · accept-invite · reset-password · change-password`, `GET auth/me · invite · password-reset`       |
-| Users (admin)         | `GET/POST users`, `GET/PATCH users/:id`, `POST users/:id/status · access-link`, `PATCH users/me`                                       |
-| Academy               | `locations`, `fee-plans`, `batches` (+ `/:id/roster`), `settings`                                                                      |
-| Students              | `GET/POST students`, `GET/PATCH students/:id`, `POST students/:id/transfer · leave · makeups`, `DELETE students/:id/makeups/:makeupId` |
-| Attendance            | `GET attendance/overview · session · register · students/:id`, `PUT attendance/session`                                                |
-| Coach sessions        | `GET coach-sessions/today`, `POST coach-sessions/check-in · check-out`, `GET coach-sessions`, `POST coach-sessions/:id/review`         |
-| Lesson plans          | `lessons/stages`, `lessons/events` (+ `/order`), `GET lessons/plans`, `GET/PUT/DELETE lessons/plans/day`, `POST lessons/plans/copy`    |
-| Feedback              | `GET feedback/template · week`, `GET/PUT feedback/students/:id/weeks/:weekStart`, `GET feedback/students/:id (+ /trends)`              |
-| Billing               | `GET invoices (+ /:id, /:id/pdf)`, `POST invoices/:id/share · payments · cancel`, `POST invoices/:id/payments/:pid/revert · refund`    |
-| Finance               | `GET finance/summary · projection`                                                                                                     |
-| Registrations (admin) | `GET registrations (+ /:id)`, `POST registrations/:id/approve · reject`                                                                |
-| Admin ops             | `POST admin/jobs/invoices/run`, `GET admin/jobs/runs · audit-logs`                                                                     |
-| Public                | `GET public/invoices/:id/pdf?e&s` (signed link), `public/register/*`                                                                   |
-| Health                | `GET /health` (liveness), `GET /ready` (DB check)                                                                                      |
+| Area                  | Endpoints                                                                                                                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Auth                  | `POST auth/login · refresh · logout · accept-invite · reset-password · change-password`, `GET auth/me · invite · password-reset`    |
+| Users (admin)         | `GET/POST users`, `GET/PATCH users/:id`, `POST users/:id/status · access-link`, `PATCH users/me`                                    |
+| Academy               | `locations`, `fee-plans`, `batches` (+ `/:id/roster`), `settings`                                                                   |
+| Students              | `GET/POST students`, `GET/PATCH students/:id`, `POST students/:id/transfer · leave`, `DELETE students/:id/makeups/:makeupId`        |
+| Attendance            | `GET attendance/overview · session · register · students/:id`, `PUT attendance/session`                                             |
+| Coach sessions        | `GET coach-sessions/today`, `POST coach-sessions/check-in · check-out`, `GET coach-sessions`, `POST coach-sessions/:id/review`      |
+| Lesson plans          | `lessons/stages`, `lessons/events` (+ `/order`), `GET lessons/plans`, `GET/PUT/DELETE lessons/plans/day`, `POST lessons/plans/copy` |
+| Feedback              | `GET feedback/template · week`, `GET/PUT feedback/students/:id/weeks/:weekStart`, `GET feedback/students/:id (+ /trends)`           |
+| Billing               | `GET invoices (+ /:id, /:id/pdf)`, `POST invoices/:id/share · payments · cancel`, `POST invoices/:id/payments/:pid/revert · refund` |
+| Finance               | `GET finance/summary · projection`                                                                                                  |
+| Registrations (admin) | `GET registrations (+ /:id)`, `POST registrations/:id/approve · reject`                                                             |
+| Admin ops             | `POST admin/jobs/invoices/run`, `GET admin/jobs/runs · audit-logs`                                                                  |
+| Public                | `GET public/invoices/:id/pdf?e&s` (signed link), `public/register/*`                                                                |
+| Health                | `GET /health` (liveness), `GET /ready` (DB check)                                                                                   |
 
 ### Clients
 
