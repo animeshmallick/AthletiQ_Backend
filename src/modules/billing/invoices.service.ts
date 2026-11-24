@@ -168,7 +168,6 @@ export function toPdfData(inv: InvoiceDetail): InvoicePdfData {
     batchName: inv.batchName,
     baseAmount: inv.baseAmount,
     discountAmount: inv.discountAmount,
-    creditAmount: inv.creditAmount,
     totalAmount: inv.totalAmount,
     student: inv.student,
     payment: completed

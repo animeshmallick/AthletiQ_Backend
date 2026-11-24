@@ -100,10 +100,21 @@ export const enrollments = pgTable(
      * those, but they count as billed so a later fee never back-bills them.
      */
     lastFreeCycle: integer().notNull().default(0),
+    /**
+     * Planned last day (renewal stopped, or a future leaving date). The student is a full member
+     * until then; nothing starting after it is billed. The nightly job then closes the membership.
+     */
+    plannedEndOn: date({ mode: 'string' }),
+    plannedReason: text(),
+    plannedById: uuid().references(() => users.id, { onDelete: 'set null' }),
+    plannedAt: tz(),
+    /** Continue in this batch from the next day (its seat is held). Null: they leave. */
+    plannedMoveToId: uuid().references(() => batches.id, { onDelete: 'set null' }),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
     ...timestamps,
   },
   (t) => [
+    index('enrollments_planned_end_idx').on(t.plannedEndOn),
     index('enrollments_student_idx').on(t.studentId, t.effectiveFrom),
     index('enrollments_batch_idx').on(t.batchId),
     uniqueIndex('enrollments_one_open_per_batch_uq')
@@ -137,8 +148,6 @@ export const makeupSessions = pgTable(
     date: date({ mode: 'string' }).notNull(),
     /** Optional: the regular session being made up for. */
     missedDate: date({ mode: 'string' }),
-    /** The membership this makeup counts towards (the student's batch whose session it replaces). */
-    homeBatchId: uuid().references(() => batches.id, { onDelete: 'set null' }),
     reason: text(),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
     /** Coach requests wait for an admin; admin bookings are approved immediately. */

@@ -28,11 +28,6 @@ export function timesOn(b: Timed, day: number | IsoDate): { startTime: string; e
     : { startTime: b.startTime, endTime: b.endTime };
 }
 
-/** The batch as it runs on a date: its start/end replaced with that day's time. */
-export function onDay<T extends Timed>(b: T, day: IsoDate): T {
-  return { ...b, ...timesOn(b, day) };
-}
-
 /**
  * Keeps only overrides for days the batch runs that actually differ from the default, so
  * "same as usual" never lingers as an override when the default later changes.

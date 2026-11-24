@@ -141,7 +141,7 @@ export async function dashboardFor(user: AuthUser, today: IsoDate = todayInAppTz
           // Each checked-in session counts its scheduled length (there is no check-out).
           minutes: sql<number>`coalesce(sum(extract(epoch from (${coachSessions.scheduledEnd} - ${coachSessions.scheduledStart})) / 60), 0)::int`,
           onTime: sql<number>`count(*) filter (where (${coachSessions.checkInAt} at time zone 'Asia/Kolkata')::time <= ${coachSessions.scheduledStart} + interval '10 minutes')::int`,
-          flagged: sql<number>`count(*) filter (where ${coachSessions.checkInWithinFence} = false)::int`,
+          flagged: sql<number>`count(*) filter (where not ${coachSessions.checkInWithinFence} or ${coachSessions.outsideTime})::int`,
         })
         .from(coachSessions)
         .innerJoin(batches, eq(batches.id, coachSessions.batchId))

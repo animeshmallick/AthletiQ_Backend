@@ -1,24 +1,29 @@
 /**
- * Rescheduling a session and adding extra sessions.
+ * Rescheduling missed sessions, and (admins) moving or adding sessions.
  *
- * Who: admins, the batch's coach, or an approved substitute for the session's day.
- *  - Admin → in effect immediately.
- *  - Coach / substitute with at least 24 hours' notice (counted to the earlier of the old and the
- *    new start) → in effect immediately, admins are told. Less notice → waits for an admin.
- *  - Pending requests expire when the session they're about was due to start.
+ *  - Coach, or the substitute covering that day: only a missed (cancelled / not held) session, to
+ *    any future day within 30 days of its original date. In effect at once; admins are told.
+ *  - Admin: also after the 30 days, moving a session in advance, and extra sessions.
  *
- * Where to: a future day within ±14 days of the regular day (extra sessions: any future day up to
- * 60 days ahead) that the batch doesn't normally run and has no other moved / extra session. A
- * same-day time change is allowed until the session starts. Same location (a batch has one).
- *
- * Blocked when the coach running it is busy then, or the session already started, was cancelled,
- * or has attendance / a check-in. Warned (can still go ahead) when another batch at the location
- * overlaps or some students have another batch then.
- *
- * Booked makeups and the session's own lesson-plan copy move with the session.
+ * Always at the same location, on a day the batch has no session, with the coach free then.
+ * Warned (and confirmable): students outside their billing month, a shared ground, students with
+ * another batch at that time. A session is identified by (batch, date); a moved one keeps the
+ * roster and the cycle of its original day.
  */
-import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, or, sql, type SQL } from 'drizzle-orm';
-import { aliasedTable } from 'drizzle-orm';
+import {
+  aliasedTable,
+  and,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, type DbOrTx } from '../../db/client.js';
@@ -40,8 +45,11 @@ import { clockLabel, timesOn, type DayTimes } from '../../lib/batch-times.js';
 import {
   addDays,
   diffDays,
+  eachDay,
   formatDisplayDate,
   instantAt,
+  maxDate,
+  minDate,
   todayInAppTz,
   type IsoDate,
 } from '../../lib/dates.js';
@@ -52,8 +60,12 @@ import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { getBatchOrThrow, isAdmin, isSubstituteFor } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
+import { cycleFor } from '../billing/cycle.js';
+import { monthContaining } from '../cycles/cycle-math.js';
+import { anchorOf } from '../cycles/cycles.js';
 import { notifyAdmins, notifyInBackground, notifyUsers } from '../push/push.service.js';
 import {
+  belongsTo,
   isRegularDay,
   memberSessions,
   rosterDay,
@@ -62,15 +74,14 @@ import {
   type ScheduledSession,
 } from './schedule.js';
 
-/** How far from its regular day a session can move. */
-export const MOVE_WINDOW_DAYS = 14;
-/** How far ahead an extra session can be planned. */
-export const EXTRA_DAYS_AHEAD = 60;
-/** Coaches with at least this much notice don't need an admin. */
-export const NOTICE_HOURS = 24;
+/** Days after a missed session's original date in which a coach can reschedule it. */
+export const RESCHEDULE_DAYS = 30;
+/** How far from the original day an admin can place a session (and how far ahead extras go). */
+export const ADMIN_DAYS = 90;
 const LOCK = 0x53434847; // "SCHG": one schedule change at a time, so two can't claim a day.
 
 type Batch = Awaited<ReturnType<typeof getBatchOrThrow>>;
+type Slot = { date: IsoDate; startTime: string; endTime: string };
 
 export interface ChangeRequest {
   /** The session being moved, by its current date; absent for a new extra session. */
@@ -78,30 +89,12 @@ export interface ChangeRequest {
   date: IsoDate;
   startTime: string;
   endTime: string;
-  reason?: string | null;
 }
 
 export interface Warning {
-  code: 'location-overlap' | 'students-busy';
+  code: 'outside-window' | 'location-overlap' | 'students-busy';
   message: string;
-  batches?: { id: string; name: string }[];
-  students?: { id: string; fullName: string; batchName: string }[];
-}
-
-export interface Evaluation {
-  errors: string[];
-  warnings: Warning[];
-  kind: 'reschedule' | 'extra';
-  /** The regular day being moved (reschedule), else null. */
-  originalDate: IsoDate | null;
-  /** The session's current date when it is being moved again, or moved for the first time. */
-  fromDate: IsoDate | null;
-  /** An approved change this one replaces (moving a moved / extra session again). */
-  replaces: string | null;
-  needsApproval: boolean;
-  noticeHours: number | null;
-  /** Who runs the session on the new day. */
-  coachId: string;
+  students?: { id: string; fullName: string; detail: string }[];
 }
 
 const toMin = (t: string) => {
@@ -109,34 +102,31 @@ const toMin = (t: string) => {
   return h * 60 + m;
 };
 const norm = (t: string) => (t.length === 5 ? `${t}:00` : t);
-const overlaps = (
-  a: { startTime: string; endTime: string },
-  b: { startTime: string; endTime: string },
-) => toMin(a.startTime) < toMin(b.endTime) && toMin(b.startTime) < toMin(a.endTime);
-const nice = (d: IsoDate) => formatDisplayDate(d);
-const span = (t: { startTime: string; endTime: string }) =>
-  `${clockLabel(t.startTime)}–${clockLabel(t.endTime)}`;
+const overlaps = (a: Omit<Slot, 'date'>, b: Omit<Slot, 'date'>) =>
+  toMin(a.startTime) < toMin(b.endTime) && toMin(b.startTime) < toMin(a.endTime);
+const nice = formatDisplayDate;
+const span = (t: Omit<Slot, 'date'>) => `${clockLabel(t.startTime)}–${clockLabel(t.endTime)}`;
 
-/** Loads a batch through the given handle (inside a transaction, never the pool). */
 async function batchIn(tx: DbOrTx, id: string): Promise<Batch> {
   const b = await tx.query.batches.findFirst({ where: eq(batches.id, id) });
   if (!b) throw AppError.notFound('Batch');
   return b;
 }
 
+/** Approved substitutions in effect on `date`. */
+const covering = (date: IsoDate) =>
+  and(
+    eq(batchSubstitutions.status, 'approved'),
+    lte(batchSubstitutions.fromDate, date),
+    gte(batchSubstitutions.toDate, date),
+  );
+
 /** The coach running the batch's session on `date`: an approved substitute, else its coach. */
 async function coachOn(batch: Batch, date: IsoDate, tx: DbOrTx): Promise<string> {
   const [sub] = await tx
     .select({ id: batchSubstitutions.substituteCoachId })
     .from(batchSubstitutions)
-    .where(
-      and(
-        eq(batchSubstitutions.batchId, batch.id),
-        eq(batchSubstitutions.status, 'approved'),
-        lte(batchSubstitutions.fromDate, date),
-        gte(batchSubstitutions.toDate, date),
-      ),
-    )
+    .where(and(eq(batchSubstitutions.batchId, batch.id), covering(date)))
     .limit(1);
   return sub?.id ?? batch.coachId;
 }
@@ -144,70 +134,11 @@ async function coachOn(batch: Batch, date: IsoDate, tx: DbOrTx): Promise<string>
 const timing = {
   id: batches.id,
   name: batches.name,
-  coachId: batches.coachId,
-  locationId: batches.locationId,
   weekdays: batches.weekdays,
   startTime: batches.startTime,
   endTime: batches.endTime,
   dayTimes: batches.dayTimes,
 };
-
-/** The coach's other sessions on `date` (own batches they still run that day + batches covered). */
-async function coachBusy(
-  coachId: string,
-  date: IsoDate,
-  exceptBatch: string,
-  tx: DbOrTx,
-): Promise<{ name: string; startTime: string; endTime: string }[]> {
-  const covered = tx
-    .select({ id: batchSubstitutions.batchId })
-    .from(batchSubstitutions)
-    .where(
-      and(
-        eq(batchSubstitutions.status, 'approved'),
-        lte(batchSubstitutions.fromDate, date),
-        gte(batchSubstitutions.toDate, date),
-      ),
-    );
-  const coverSubs = tx
-    .select({ id: batchSubstitutions.batchId })
-    .from(batchSubstitutions)
-    .where(
-      and(
-        eq(batchSubstitutions.substituteCoachId, coachId),
-        eq(batchSubstitutions.status, 'approved'),
-        lte(batchSubstitutions.fromDate, date),
-        gte(batchSubstitutions.toDate, date),
-      ),
-    );
-  const list = await tx
-    .select(timing)
-    .from(batches)
-    .where(
-      and(
-        eq(batches.isActive, true),
-        ne(batches.id, exceptBatch),
-        or(
-          // Their own batch, unless someone else covers it that day…
-          and(eq(batches.coachId, coachId), sql`${batches.id} not in ${covered}`),
-          // …or a batch they cover.
-          inArray(batches.id, coverSubs),
-        ),
-      ),
-    );
-  const sched = await scheduleFor(list, date, date, tx);
-  const cancelled = await cancelledOn(
-    list.map((b) => b.id),
-    date,
-    tx,
-  );
-  return list.flatMap((b) => {
-    const s = sched.get(b.id)?.[0];
-    return s && !cancelled.has(b.id)
-      ? [{ name: b.name, startTime: s.startTime, endTime: s.endTime }]
-      : [];
-  });
-}
 
 async function cancelledOn(batchIds: string[], date: IsoDate, tx: DbOrTx) {
   if (!batchIds.length) return new Set<string>();
@@ -220,146 +151,197 @@ async function cancelledOn(batchIds: string[], date: IsoDate, tx: DbOrTx) {
   return new Set(rows.map((r) => r.batchId));
 }
 
-/** Attendance marks or a check-in on the batch's session that day (it happened). */
-async function hasRecords(batchId: string, date: IsoDate, tx: DbOrTx) {
-  const [marks, checkIns] = await Promise.all([
-    tx.$count(
-      studentAttendance,
-      and(eq(studentAttendance.batchId, batchId), eq(studentAttendance.date, date)),
-    ),
-    tx.$count(coachSessions, and(eq(coachSessions.batchId, batchId), eq(coachSessions.date, date))),
+/** The running (not cancelled) sessions of these batches that overlap a slot. */
+async function running(where: SQL | undefined, at: Slot, tx: DbOrTx) {
+  const list = await tx
+    .select(timing)
+    .from(batches)
+    .where(and(eq(batches.isActive, true), where));
+  const ids = list.map((b) => b.id);
+  const [sched, off] = await Promise.all([
+    scheduleFor(list, at.date, at.date, tx),
+    cancelledOn(ids, at.date, tx),
   ]);
+  return list.flatMap((b) => {
+    const s = sched.get(b.id)?.[0];
+    return s && !off.has(b.id) && overlaps(s, at) ? [{ batch: b, session: s }] : [];
+  });
+}
+
+/** A session the coach runs at that time: own batches they still run that day, and covers. */
+async function coachBusy(coachId: string, at: Slot, exceptBatch: string, tx: DbOrTx) {
+  const subs = await tx
+    .select({ batchId: batchSubstitutions.batchId, coach: batchSubstitutions.substituteCoachId })
+    .from(batchSubstitutions)
+    .where(covering(at.date));
+  const covered = subs.filter((s) => s.coach !== coachId).map((s) => s.batchId);
+  const mine = subs.filter((s) => s.coach === coachId).map((s) => s.batchId);
+  const [first] = await running(
+    and(
+      ne(batches.id, exceptBatch),
+      or(
+        and(
+          eq(batches.coachId, coachId),
+          covered.length ? sql`${batches.id} not in ${covered}` : undefined,
+        ),
+        mine.length ? inArray(batches.id, mine) : undefined,
+      ),
+    ),
+    at,
+    tx,
+  );
+  return first ?? null;
+}
+
+async function hasRecords(batchId: string, date: IsoDate, tx: DbOrTx) {
+  const marks = await tx.$count(
+    studentAttendance,
+    and(eq(studentAttendance.batchId, batchId), eq(studentAttendance.date, date)),
+  );
+  const checkIns = await tx.$count(
+    coachSessions,
+    and(eq(coachSessions.batchId, batchId), eq(coachSessions.date, date)),
+  );
   return marks > 0 || checkIns > 0;
 }
 
-/** Students of the session who have another batch overlapping the new time. */
-async function busyStudents(
-  batch: Batch,
-  rosterOn: IsoDate,
-  at: { date: IsoDate; startTime: string; endTime: string },
-  tx: DbOrTx,
-) {
-  const members = await tx
-    .select({
-      studentId: enrollments.studentId,
-      trainingDays: enrollments.trainingDays,
-      fullName: students.fullName,
-    })
+/**
+ * Students of a session (by its roster day) who are still in the batch, with the billing month
+ * the session belongs to.
+ */
+export async function affectedStudents(tx: DbOrTx, batchId: string, session: ScheduledSession) {
+  const day = rosterDay(session);
+  const today = todayInAppTz();
+  const rows = await tx
+    .select({ e: enrollments, fullName: students.fullName })
     .from(enrollments)
     .innerJoin(students, eq(students.id, enrollments.studentId))
     .where(
       and(
-        eq(enrollments.batchId, batch.id),
-        lte(enrollments.effectiveFrom, rosterOn),
-        or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, rosterOn)),
-        or(isNull(students.leftOn), gte(students.leftOn, rosterOn)),
+        eq(enrollments.batchId, batchId),
+        lte(enrollments.effectiveFrom, day),
+        or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, maxDate(day, today))),
+        or(isNull(enrollments.plannedEndOn), gte(enrollments.plannedEndOn, day)),
+        or(isNull(students.leftOn), gte(students.leftOn, maxDate(day, today))),
       ),
     );
-  const ids = members.map((m) => m.studentId);
-  if (!ids.length) return [];
+  return rows
+    .filter(({ e }) => belongsTo(e, session))
+    .map(({ e, fullName }) => {
+      const month = cycleFor(anchorOf(e), monthContaining(anchorOf(e), day));
+      // Their month, or their last day when they leave before it ends.
+      const until = e.plannedEndOn ? minDate(e.plannedEndOn, month.periodEnd) : month.periodEnd;
+      return { id: e.studentId, fullName, until, enrollment: e };
+    });
+}
+type Affected = Awaited<ReturnType<typeof affectedStudents>>;
+
+async function busyStudents(list: Affected, batchId: string, at: Slot, tx: DbOrTx) {
+  if (!list.length) return [];
   const others = await tx
-    .select({
-      studentId: enrollments.studentId,
-      batchId: enrollments.batchId,
-      effectiveFrom: enrollments.effectiveFrom,
-      effectiveTo: enrollments.effectiveTo,
-      trainingDays: enrollments.trainingDays,
-      batchName: batches.name,
-    })
+    .select({ e: enrollments, name: batches.name })
     .from(enrollments)
     .innerJoin(batches, eq(batches.id, enrollments.batchId))
     .where(
       and(
-        inArray(enrollments.studentId, ids),
-        ne(enrollments.batchId, batch.id),
+        inArray(
+          enrollments.studentId,
+          list.map((s) => s.id),
+        ),
+        ne(enrollments.batchId, batchId),
         eq(batches.isActive, true),
         lte(enrollments.effectiveFrom, at.date),
         or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, at.date)),
       ),
     );
-  const out: { id: string; fullName: string; batchName: string }[] = [];
-  for (const m of members) {
-    const mine = others.filter((o) => o.studentId === m.studentId);
-    if (!mine.length) continue;
-    const sessions = await memberSessions(mine, at.date, at.date, tx);
-    const clash = sessions.find((s) => overlaps(s, at));
-    if (clash)
-      out.push({
-        id: m.studentId,
-        fullName: m.fullName,
-        batchName: mine.find((o) => o.batchId === clash.batchId)!.batchName,
-      });
-  }
-  return out;
-}
-
-/** Other batches at the same location running at an overlapping time that day. */
-async function locationOverlap(
-  batch: Batch,
-  at: { date: IsoDate; startTime: string; endTime: string },
-  tx: DbOrTx,
-) {
-  const list = await tx
-    .select(timing)
-    .from(batches)
-    .where(
-      and(
-        eq(batches.locationId, batch.locationId),
-        eq(batches.isActive, true),
-        ne(batches.id, batch.id),
-      ),
-    );
-  const sched = await scheduleFor(list, at.date, at.date, tx);
-  const cancelled = await cancelledOn(
-    list.map((b) => b.id),
+  if (!others.length) return [];
+  const sessions = await memberSessions(
+    others.map((o) => o.e),
+    at.date,
     at.date,
     tx,
   );
-  return list.filter((b) => {
-    const s = sched.get(b.id)?.[0];
-    return s && !cancelled.has(b.id) && overlaps(s, at);
+  const hits = sessions.filter((s) => overlaps(s, at));
+  return list.flatMap((s) => {
+    const o = others.find((x) => x.e.studentId === s.id && hits.some((h) => belongsTo(x.e, h)));
+    return o ? [{ id: s.id, fullName: s.fullName, detail: o.name }] : [];
   });
 }
 
-/**
- * Checks a change without making it: blocking errors, confirmable warnings, and whether it needs
- * an admin. `ignoreChange` leaves a pending request out of the "day already taken" check (when
- * it is the one being approved).
- */
+/** Why the batch can't have this session on that day and time, or null. */
+async function slotBlocker(
+  batch: Batch,
+  at: Slot,
+  current: ScheduledSession | null,
+  allowSameDay: boolean,
+  now: Date,
+  tx: DbOrTx,
+): Promise<string | null> {
+  if (instantAt(at.date, at.startTime) <= now) return 'Choose a time in the future.';
+  const original = current ? rosterDay(current) : null;
+  const sameDay = allowSameDay && original === at.date;
+  if (!sameDay && isRegularDay(batch, at.date))
+    return `${batch.name} already runs on ${nice(at.date)}. Choose a day it doesn’t run.`;
+  const [taken] = await tx
+    .select({ id: sessionChanges.id })
+    .from(sessionChanges)
+    .where(
+      and(
+        eq(sessionChanges.batchId, batch.id),
+        eq(sessionChanges.date, at.date),
+        eq(sessionChanges.status, 'approved'),
+        current?.changeId ? ne(sessionChanges.id, current.changeId) : undefined,
+      ),
+    );
+  if (taken) return `${batch.name} already has a session on ${nice(at.date)}.`;
+  const coachId = await coachOn(batch, at.date, tx);
+  const busy = await coachBusy(coachId, at, batch.id, tx);
+  if (busy) return `The coach already has ${busy.batch.name} at ${span(busy.session)} that day.`;
+  return null;
+}
+
+/** Checks a change without making it. */
 export async function evaluate(
   user: AuthUser,
   batch: Batch,
   req: ChangeRequest,
-  {
-    now = new Date(),
-    tx = db,
-    ignoreChange,
-  }: { now?: Date; tx?: DbOrTx; ignoreChange?: string } = {},
-): Promise<Evaluation> {
+  { now = new Date(), tx = db }: { now?: Date; tx?: DbOrTx } = {},
+) {
   const errors: string[] = [];
   const warnings: Warning[] = [];
-  const at = { date: req.date, startTime: norm(req.startTime), endTime: norm(req.endTime) };
+  const at: Slot = { date: req.date, startTime: norm(req.startTime), endTime: norm(req.endTime) };
   const admin = isAdmin(user);
 
-  let current: ScheduledSession | null = null;
-  if (req.sessionDate) {
-    current = await sessionOn(batch, req.sessionDate, tx);
-    if (!current)
-      throw AppError.unprocessable(`${batch.name} has no session on ${nice(req.sessionDate)}`);
-  }
-  const kind: Evaluation['kind'] = current?.kind === 'extra' || !current ? 'extra' : 'reschedule';
-  const originalDate = kind === 'reschedule' ? (current!.originalDate ?? current!.date) : null;
+  const current = req.sessionDate ? await sessionOn(batch, req.sessionDate, tx) : null;
+  if (req.sessionDate && !current)
+    throw AppError.unprocessable(`${batch.name} has no session on ${nice(req.sessionDate)}`);
+  const extra = !current || current.kind === 'extra';
+  const original = current ? rosterDay(current) : null;
+  const [cancellation] = current
+    ? await tx
+        .select()
+        .from(sessionCancellations)
+        .where(
+          and(
+            eq(sessionCancellations.batchId, batch.id),
+            eq(sessionCancellations.date, current.date),
+          ),
+        )
+    : [];
+  const missed = !!cancellation;
 
+  if (!admin && extra) errors.push('Only an admin can add or move extra sessions.');
+  else if (!admin && !missed)
+    errors.push('Only a missed session can be rescheduled. Cancel it first, or ask an admin.');
   if (toMin(at.endTime) <= toMin(at.startTime))
     errors.push('The session must end after it starts.');
   if (!batch.isActive) errors.push(`${batch.name} is inactive.`);
 
-  // The session being moved must not have started, been cancelled or have records.
   if (current) {
-    if (instantAt(current.date, current.startTime) <= now)
+    if (cancellation?.closedAt)
+      errors.push('This missed session was closed, so it isn’t rescheduled any more.');
+    if (!missed && instantAt(current.date, current.startTime) <= now)
       errors.push('This session has already started.');
-    if ((await cancelledOn([batch.id], current.date, tx)).size)
-      errors.push('This session was cancelled. Restore it before moving it.');
     if (await hasRecords(batch.id, current.date, tx))
       errors.push('Attendance or a check-in is already recorded for this session.');
     if (
@@ -368,73 +350,53 @@ export async function evaluate(
       current.endTime === at.endTime
     )
       errors.push('That is when the session already runs.');
-  }
-
-  // The new day and time.
-  if (instantAt(at.date, at.startTime) <= now) errors.push('Choose a time in the future.');
-  if (originalDate) {
-    if (Math.abs(diffDays(originalDate, at.date)) > MOVE_WINDOW_DAYS)
-      errors.push(`A session can move up to ${MOVE_WINDOW_DAYS} days from its regular day.`);
-  } else if (diffDays(todayInAppTz(now), at.date) > EXTRA_DAYS_AHEAD) {
-    errors.push(`Extra sessions can be planned up to ${EXTRA_DAYS_AHEAD} days ahead.`);
-  }
-  const sameDay = originalDate === at.date;
-  if (!sameDay && isRegularDay(batch, at.date))
-    errors.push(`${batch.name} already runs on ${nice(at.date)}. Choose a day it doesn't run.`);
-  if (!sameDay) {
-    const taken = await tx
-      .select({ id: sessionChanges.id, status: sessionChanges.status })
-      .from(sessionChanges)
-      .where(
-        and(
-          eq(sessionChanges.batchId, batch.id),
-          eq(sessionChanges.date, at.date),
-          inArray(sessionChanges.status, ['pending', 'approved']),
-          current?.changeId ? ne(sessionChanges.id, current.changeId) : undefined,
-          ignoreChange ? ne(sessionChanges.id, ignoreChange) : undefined,
-        ),
-      );
-    if (taken.length)
+    if (missed && at.date <= original!) errors.push('Choose a day after the missed session.');
+    const limit = admin ? ADMIN_DAYS : RESCHEDULE_DAYS;
+    if (Math.abs(diffDays(original!, at.date)) > limit)
       errors.push(
-        taken[0]!.status === 'pending'
-          ? `A change to ${nice(at.date)} is already waiting for approval.`
-          : `${batch.name} already has a moved or extra session on ${nice(at.date)}.`,
+        admin
+          ? `Choose a day within ${ADMIN_DAYS} days of ${nice(original!)}.`
+          : `It can be rescheduled up to ${nice(addDays(original!, RESCHEDULE_DAYS))}. Ask an admin for a later day.`,
       );
-  }
-  if (originalDate && !current?.changeId) {
-    // A regular session with a pending request can't get a second one.
-    const [pending] = await tx
-      .select({ id: sessionChanges.id })
-      .from(sessionChanges)
-      .where(
-        and(
-          eq(sessionChanges.batchId, batch.id),
-          eq(sessionChanges.originalDate, originalDate),
-          eq(sessionChanges.status, 'pending'),
-          ignoreChange ? ne(sessionChanges.id, ignoreChange) : undefined,
-        ),
-      );
-    if (pending) errors.push('A change to this session is already waiting for approval.');
-  }
+  } else if (diffDays(todayInAppTz(now), at.date) > ADMIN_DAYS)
+    errors.push(`Extra sessions can be planned up to ${ADMIN_DAYS} days ahead.`);
 
-  // The coach running it must be free then.
-  const coachId = await coachOn(batch, at.date, tx);
-  const busy = (await coachBusy(coachId, at.date, batch.id, tx)).find((b) => overlaps(b, at));
-  if (busy)
-    errors.push(
-      `${coachId === user.id ? 'You' : 'The coach'} already coach${coachId === user.id ? '' : 'es'} ${busy.name} at ${span(busy)} that day.`,
-    );
+  const blocked = await slotBlocker(batch, at, current, !missed && !extra, now, tx);
+  if (blocked) errors.push(blocked);
 
-  // Warnings.
-  const sharing = await locationOverlap(batch, at, tx);
+  const affected = await affectedStudents(
+    tx,
+    batch.id,
+    current ?? {
+      batchId: batch.id,
+      ...at,
+      kind: 'extra',
+      originalDate: null,
+      changeId: null,
+    },
+  );
+  const outside = current ? affected.filter((s) => at.date > s.until) : [];
+  if (outside.length)
+    warnings.push({
+      code: 'outside-window',
+      message: `After the billing month of ${outside.length} student${outside.length === 1 ? '' : 's'}. They can still attend, free.`,
+      students: outside.map((s) => ({
+        id: s.id,
+        fullName: s.fullName,
+        detail: `until ${nice(s.until)}`,
+      })),
+    });
+  const sharing = await running(
+    and(eq(batches.locationId, batch.locationId), ne(batches.id, batch.id)),
+    at,
+    tx,
+  );
   if (sharing.length)
     warnings.push({
       code: 'location-overlap',
-      message: `${sharing.map((b) => b.name).join(', ')} also run${sharing.length === 1 ? 's' : ''} at this location then.`,
-      batches: sharing.map((b) => ({ id: b.id, name: b.name })),
+      message: `${sharing.map((s) => s.batch.name).join(', ')} also run${sharing.length === 1 ? 's' : ''} at this location then.`,
     });
-  const rosterOn = current ? rosterDay(current) : at.date;
-  const clashing = await busyStudents(batch, rosterOn, at, tx);
+  const clashing = await busyStudents(affected, batch.id, at, tx);
   if (clashing.length)
     warnings.push({
       code: 'students-busy',
@@ -442,34 +404,68 @@ export async function evaluate(
       students: clashing,
     });
 
-  // Notice and approval.
-  const starts = [instantAt(at.date, at.startTime)];
-  if (current) starts.push(instantAt(current.date, current.startTime));
-  const earliest = Math.min(...starts.map((d) => d.getTime()));
-  const noticeHours = Math.floor((earliest - now.getTime()) / 3_600_000);
-  const needsApproval = !admin && noticeHours < NOTICE_HOURS;
-  if (needsApproval && current?.changeId)
-    errors.push(
-      'This session was already moved. With less than 24 hours to go, ask an admin to change it.',
-    );
-
   return {
     errors,
     warnings,
-    kind,
-    originalDate,
+    kind: extra ? ('extra' as const) : ('reschedule' as const),
+    originalDate: extra ? null : original,
     fromDate: current?.date ?? null,
     replaces: current?.changeId ?? null,
-    needsApproval,
-    noticeHours,
-    coachId,
+    missed,
+    affected: affected.length,
+  };
+}
+
+/**
+ * Days a missed session can go to, and the "smart" ones: inside the billing month of every
+ * student it affects.
+ */
+export async function smartDates(
+  user: AuthUser,
+  batch: Batch,
+  sessionDate: IsoDate,
+  time: { startTime?: string; endTime?: string },
+  now: Date = new Date(),
+) {
+  const current = await sessionOn(batch, sessionDate);
+  if (!current)
+    throw AppError.unprocessable(`${batch.name} has no session on ${nice(sessionDate)}`);
+  const original = rosterDay(current);
+  const affected = await affectedStudents(db, batch.id, current);
+  const from = maxDate(todayInAppTz(now), addDays(original, 1));
+  const to = addDays(original, RESCHEDULE_DAYS);
+  const slot = {
+    startTime: norm(time.startTime ?? current.startTime),
+    endTime: norm(time.endTime ?? current.endTime),
+  };
+  const days = [];
+  for (const date of from <= to ? eachDay(from, to) : []) {
+    const blocked = await slotBlocker(batch, { date, ...slot }, current, false, now, db);
+    const outside = affected.filter((s) => date > s.until).map((s) => s.fullName);
+    days.push({
+      date,
+      blocked,
+      outside,
+      smart: !blocked && !outside.length && affected.length > 0,
+    });
+  }
+  const smart = days.filter((d) => d.smart).length;
+  return {
+    sessionDate,
+    originalDate: original,
+    students: affected.length,
+    days,
+    message: !affected.length
+      ? 'No students are affected by this session.'
+      : smart
+        ? null
+        : 'No day suits every student’s billing month. You can still pick any available day.',
   };
 }
 
 /** Moves booked makeups and the session's own lesson plan from one day to another. */
 async function carryOver(batchId: string, from: IsoDate, to: IsoDate, tx: DbOrTx) {
   if (from === to) return;
-  // Rejected requests on the new day would collide; they're history only.
   await tx
     .delete(makeupSessions)
     .where(
@@ -492,72 +488,43 @@ async function carryOver(batchId: string, from: IsoDate, to: IsoDate, tx: DbOrTx
     .where(and(eq(sessionPlans.batchId, batchId), eq(sessionPlans.date, from)));
 }
 
-/** Puts an approved change into effect (or its replacement), carrying makeups and plans along. */
-async function putInEffect(
-  tx: DbOrTx,
-  batchId: string,
-  e: Pick<Evaluation, 'fromDate' | 'replaces'>,
-  to: IsoDate,
-) {
-  if (e.fromDate) await carryOver(batchId, e.fromDate, to, tx);
+/**
+ * A moved / extra session leaves its day: a cancellation recorded there goes with it (the audit
+ * log keeps it), so a later session on that day doesn't start out cancelled.
+ */
+async function vacate(tx: DbOrTx, changeId: string) {
+  const [c] = await tx
+    .update(sessionChanges)
+    .set({ status: 'cancelled' })
+    .where(eq(sessionChanges.id, changeId))
+    .returning();
+  if (c && c.date !== c.originalDate)
+    await tx
+      .delete(sessionCancellations)
+      .where(
+        and(eq(sessionCancellations.batchId, c.batchId), eq(sessionCancellations.date, c.date)),
+      );
 }
 
 // ─── Listing ─────────────────────────────────────────────────────────────────
 
 const requester = aliasedTable(users, 'requester');
-const reviewer = aliasedTable(users, 'reviewer');
 const coach = aliasedTable(users, 'coach');
-
-const select = {
-  id: sessionChanges.id,
-  kind: sessionChanges.kind,
-  originalDate: sessionChanges.originalDate,
-  date: sessionChanges.date,
-  startTime: sessionChanges.startTime,
-  endTime: sessionChanges.endTime,
-  status: sessionChanges.status,
-  reason: sessionChanges.reason,
-  reviewNote: sessionChanges.reviewNote,
-  reviewedAt: sessionChanges.reviewedAt,
-  createdAt: sessionChanges.createdAt,
-  batch: {
-    id: batches.id,
-    name: batches.name,
-    weekdays: batches.weekdays,
-    startTime: batches.startTime,
-    endTime: batches.endTime,
-    dayTimes: batches.dayTimes,
-  },
-  location: {
-    id: batches.locationId,
-    name: sql<string>`(select l.name from ${locations} l where l.id = ${batches.locationId})`,
-  },
-  coach: { id: coach.id, name: coach.name },
-  requestedBy: { id: requester.id, name: requester.name },
-  reviewedBy: { id: reviewer.id, name: reviewer.name },
-};
 
 interface Person {
   id: string;
   name: string;
 }
-/** One change with its batch and people (typed by hand: inference gives up on four joins). */
-interface ChangeRowFull {
+interface ChangeRowFull extends Slot {
   id: string;
   kind: 'reschedule' | 'extra';
   originalDate: IsoDate | null;
-  date: IsoDate;
-  startTime: string;
-  endTime: string;
-  status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired';
+  status: 'approved' | 'cancelled';
   reason: string | null;
-  reviewNote: string | null;
-  reviewedAt: Date | null;
   createdAt: Date;
   batch: {
     id: string;
     name: string;
-    weekdays: number[];
     startTime: string;
     endTime: string;
     dayTimes: DayTimes;
@@ -565,32 +532,43 @@ interface ChangeRowFull {
   location: Person;
   coach: Person;
   requestedBy: Person;
-  reviewedBy: { id: string | null; name: string | null } | null;
 }
 
 export async function listChanges(where: SQL | undefined) {
   const rows: ChangeRowFull[] = await db
-    .select(select)
+    .select({
+      id: sessionChanges.id,
+      kind: sessionChanges.kind,
+      originalDate: sessionChanges.originalDate,
+      date: sessionChanges.date,
+      startTime: sessionChanges.startTime,
+      endTime: sessionChanges.endTime,
+      status: sessionChanges.status,
+      reason: sessionChanges.reason,
+      createdAt: sessionChanges.createdAt,
+      batch: {
+        id: batches.id,
+        name: batches.name,
+        startTime: batches.startTime,
+        endTime: batches.endTime,
+        dayTimes: batches.dayTimes,
+      },
+      location: { id: locations.id, name: locations.name },
+      coach: { id: coach.id, name: coach.name },
+      requestedBy: { id: requester.id, name: requester.name },
+    })
     .from(sessionChanges)
     .innerJoin(batches, eq(batches.id, sessionChanges.batchId))
+    .innerJoin(locations, eq(locations.id, batches.locationId))
     .innerJoin(coach, eq(coach.id, batches.coachId))
     .innerJoin(requester, eq(requester.id, sessionChanges.requestedById))
-    .leftJoin(reviewer, eq(reviewer.id, sessionChanges.reviewedById))
     .where(where)
-    .orderBy(
-      sql`case ${sessionChanges.status} when 'pending' then 0 when 'approved' then 1 else 2 end`,
-      desc(sessionChanges.date),
-    )
+    .orderBy(desc(sessionChanges.date))
     .limit(300);
   return rows.map(({ batch, ...r }) => ({
     ...r,
     batch: { id: batch.id, name: batch.name, startTime: batch.startTime, endTime: batch.endTime },
-    reviewedBy: r.reviewedBy?.id ? r.reviewedBy : null,
-    /** The regular time of the moved session (reschedule), for "from → to" labels. */
-    from:
-      r.originalDate && r.kind === 'reschedule'
-        ? { date: r.originalDate, ...timesOn(batch, r.originalDate) }
-        : null,
+    from: r.originalDate ? { date: r.originalDate, ...timesOn(batch, r.originalDate) } : null,
   }));
 }
 type ChangeView = Awaited<ReturnType<typeof listChanges>>[number];
@@ -601,15 +579,6 @@ async function one(id: string) {
   return row;
 }
 
-/** Changes a coach can see: their batches' (as coach) and the ones they asked for. */
-function visibleTo(user: AuthUser): SQL | undefined {
-  if (isAdmin(user)) return undefined;
-  return or(eq(batches.coachId, user.id), eq(sessionChanges.requestedById, user.id));
-}
-
-// ─── Notices ─────────────────────────────────────────────────────────────────
-
-const LINK = '/session-changes';
 const describe = (r: ChangeView) =>
   r.kind === 'extra'
     ? `Extra session ${nice(r.date)} ${span(r)}`
@@ -617,31 +586,24 @@ const describe = (r: ChangeView) =>
       ? `${nice(r.date)} now ${span(r)}`
       : `${nice(r.originalDate!)} → ${nice(r.date)} ${span(r)}`;
 
-function noticePeople(r: ChangeView, actorId: string, title: string) {
+/** Tells the batch's coach, that day's substitute and (for a coach's change) the admins. */
+function notice(r: ChangeView, actor: AuthUser, title: string) {
   notifyInBackground(async () => {
-    const people = [...new Set([r.coach.id, r.requestedBy.id])].filter((x) => x !== actorId);
-    // A substitute covering the new day hears about it too.
     const [sub] = await db
       .select({ id: batchSubstitutions.substituteCoachId })
       .from(batchSubstitutions)
-      .where(
-        and(
-          eq(batchSubstitutions.batchId, r.batch.id),
-          eq(batchSubstitutions.status, 'approved'),
-          lte(batchSubstitutions.fromDate, r.date),
-          gte(batchSubstitutions.toDate, r.date),
-        ),
-      );
-    if (sub && sub.id !== actorId && !people.includes(sub.id)) people.push(sub.id);
-    if (!people.length) return;
-    await notifyUsers(people, {
-      category: 'sessions',
+      .where(and(eq(batchSubstitutions.batchId, r.batch.id), covering(r.date)));
+    const message = {
+      category: 'sessions' as const,
       icon: '🗓️',
       title: `${title} · ${r.batch.name}`,
-      body: `${describe(r)}${r.reviewNote ? ` — ${r.reviewNote}` : r.reason ? ` — ${r.reason}` : ''}`,
+      body: `${describe(r)}${r.reason ? ` — ${r.reason}` : ''}`,
       link: `/batches/${r.batch.id}`,
       tag: `session-change-${r.id}`,
-    });
+    };
+    const people = [r.coach.id, sub?.id].filter((x): x is string => !!x && x !== actor.id);
+    await notifyUsers(people, message);
+    if (!isAdmin(actor)) await notifyAdmins({ ...message, body: `${actor.name}: ${message.body}` });
   });
 }
 
@@ -670,25 +632,34 @@ export const batchSessionChangesRouter = Router();
 
 batchSessionChangesRouter.get('/:id/session-changes', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const q = parse(z.object({ from: zIsoDate.optional(), to: zIsoDate.optional() }), req.query);
   const user = currentUser(req);
   const batch = await getBatchOrThrow(id);
   if (!isAdmin(user) && batch.coachId !== user.id && !(await isSubstituteFor(user.id, id)))
     throw AppError.notFound('Batch');
-  const from = q.from ?? addDays(todayInAppTz(), -30);
-  const to = q.to ?? addDays(todayInAppTz(), EXTRA_DAYS_AHEAD);
   ok(
     res,
     await listChanges(
       and(
         eq(sessionChanges.batchId, id),
-        or(
-          and(gte(sessionChanges.date, from), lte(sessionChanges.date, to)),
-          and(gte(sessionChanges.originalDate, from), lte(sessionChanges.originalDate, to)),
-        ),
+        eq(sessionChanges.status, 'approved'),
+        gte(sessionChanges.date, addDays(todayInAppTz(), -30)),
       ),
     ),
   );
+});
+
+const SmartQuery = z.object({
+  sessionDate: zIsoDate,
+  startTime: zTime.optional(),
+  endTime: zTime.optional(),
+});
+
+batchSessionChangesRouter.get('/:id/smart-dates', async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const q = parse(SmartQuery, req.query);
+  const user = currentUser(req);
+  const batch = await assertMayChange(user, id, q.sessionDate);
+  ok(res, await smartDates(user, batch, q.sessionDate, q));
 });
 
 batchSessionChangesRouter.post('/:id/session-changes/preview', async (req, res) => {
@@ -697,231 +668,67 @@ batchSessionChangesRouter.post('/:id/session-changes/preview', async (req, res) 
   const user = currentUser(req);
   const batch = await assertMayChange(user, id, body.sessionDate ?? body.date);
   const e = await evaluate(user, batch, body);
-  ok(res, {
-    ok: !e.errors.length,
-    errors: e.errors,
-    warnings: e.warnings,
-    kind: e.kind,
-    originalDate: e.originalDate,
-    needsApproval: e.needsApproval,
-    noticeHours: e.noticeHours,
-  });
+  ok(res, { ok: !e.errors.length, ...e });
 });
 
 batchSessionChangesRouter.post('/:id/session-changes', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const body = parse(ChangeBody, req.body);
   const user = currentUser(req);
-  const batch = await assertMayChange(user, id, body.sessionDate ?? body.date);
+  await assertMayChange(user, id, body.sessionDate ?? body.date);
 
-  const { changeId, e } = await db.transaction(async (tx) => {
+  const { changeId, kind } = await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(${LOCK})`);
+    const batch = await batchIn(tx, id);
     const e = await evaluate(user, batch, body, { tx });
     if (e.errors.length) throw AppError.unprocessable(e.errors[0]!, { errors: e.errors });
     if (e.warnings.length && !body.confirm)
-      throw AppError.conflict('Please confirm: ' + e.warnings.map((w) => w.message).join(' '), {
+      throw AppError.conflict(`Please confirm: ${e.warnings.map((w) => w.message).join(' ')}`, {
         warnings: e.warnings,
       });
-    const approved = !e.needsApproval;
-    // Moving a moved / extra session again: the old change steps aside first, which frees its
-    // day (live changes are unique per batch and day).
-    if (e.replaces)
-      await tx
-        .update(sessionChanges)
-        .set({ status: 'cancelled' })
-        .where(eq(sessionChanges.id, e.replaces));
+    // Moving a moved / extra session again: the old change steps aside first.
+    if (e.replaces) await vacate(tx, e.replaces);
     const [row] = await tx
       .insert(sessionChanges)
       .values({
-        batchId: batch.id,
+        batchId: id,
         kind: e.kind,
         originalDate: e.originalDate,
         date: body.date,
         startTime: norm(body.startTime),
         endTime: norm(body.endTime),
-        status: approved ? 'approved' : 'pending',
         reason: body.reason ?? null,
         requestedById: user.id,
-        reviewedById: approved ? user.id : null,
-        reviewedAt: approved ? new Date() : null,
       })
       .returning({ id: sessionChanges.id });
-    if (approved) await putInEffect(tx, batch.id, e, body.date);
+    if (e.fromDate) await carryOver(id, e.fromDate, body.date, tx);
     await audit(
       {
         ...auditCtx(req),
-        action: approved ? 'session.rescheduled' : 'session.reschedule_requested',
+        action: e.kind === 'extra' ? 'session.extra_added' : 'session.rescheduled',
         entityType: 'batch',
-        entityId: batch.id,
-        metadata: {
-          changeId: row!.id,
-          kind: e.kind,
-          from: e.fromDate,
-          originalDate: e.originalDate,
-          date: body.date,
-          startTime: body.startTime,
-          endTime: body.endTime,
-          replaces: e.replaces,
-          noticeHours: e.noticeHours,
-          warnings: e.warnings.map((w) => w.code),
-        },
+        entityId: id,
+        metadata: { changeId: row!.id, ...e, ...body },
       },
       tx,
     );
-    return { changeId: row!.id, e };
+    return { changeId: row!.id, kind: e.kind };
   });
 
   const row = await one(changeId);
-  if (e.needsApproval)
-    notifyInBackground(() =>
-      notifyAdmins({
-        category: 'approvals',
-        icon: '🗓️',
-        actions: [{ label: 'Review', link: LINK }],
-        title: `${row.kind === 'extra' ? 'Extra session' : 'Reschedule'} request · ${row.batch.name}`,
-        body: `${user.name ?? 'A coach'}: ${describe(row)} (${e.noticeHours} h notice)`,
-        link: LINK,
-        tag: `session-change-${changeId}`,
-      }),
-    );
-  else {
-    if (!isAdmin(user))
-      notifyInBackground(() =>
-        notifyAdmins({
-          category: 'sessions',
-          icon: '🗓️',
-          title: `${row.kind === 'extra' ? 'Extra session added' : 'Session moved'} · ${row.batch.name}`,
-          body: `${user.name ?? 'A coach'}: ${describe(row)}`,
-          link: `/batches/${row.batch.id}`,
-          tag: `session-change-${changeId}`,
-        }),
-      );
-    noticePeople(row, user.id, row.kind === 'extra' ? 'Extra session added' : 'Session moved');
-  }
-  created(res, { ...row, warnings: e.warnings });
+  notice(row, user, kind === 'extra' ? 'Extra session' : 'Session rescheduled');
+  created(res, row);
 });
 
 /** Mounted at /session-changes. */
 export const sessionChangesRouter = Router();
 
-const ListQuery = z.object({
-  status: z.enum(['pending', 'approved', 'rejected', 'cancelled', 'expired']).optional(),
-  batchId: zId.optional(),
-});
-
-sessionChangesRouter.get('/', async (req, res) => {
-  const user = currentUser(req);
-  const q = parse(ListQuery, req.query);
-  await expireStale();
-  ok(
-    res,
-    await listChanges(
-      and(
-        visibleTo(user),
-        q.status ? eq(sessionChanges.status, q.status) : undefined,
-        q.batchId ? eq(sessionChanges.batchId, q.batchId) : undefined,
-      ),
-    ),
-  );
-});
-
-const ReviewBody = z.object({ note: zOptionalText(300), confirm: z.boolean().optional() });
-
-sessionChangesRouter.post('/:id/approve', requireAdmin, async (req, res) => {
-  const { id } = parse(zIdParam, req.params);
-  const { note, confirm } = parse(ReviewBody, req.body ?? {});
-  const user = currentUser(req);
-  await db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(${LOCK})`);
-    const c = await tx.query.sessionChanges.findFirst({ where: eq(sessionChanges.id, id) });
-    if (!c) throw AppError.notFound('Session change');
-    if (c.status !== 'pending') throw AppError.conflict(`This request was already ${c.status}`);
-    const batch = await batchIn(tx, c.batchId);
-    // Re-check now: things may have changed since it was asked for.
-    const e = await evaluate(
-      user,
-      batch,
-      {
-        sessionDate: c.originalDate ?? undefined,
-        date: c.date,
-        startTime: c.startTime,
-        endTime: c.endTime,
-      },
-      { tx, ignoreChange: c.id },
-    );
-    if (e.errors.length) throw AppError.unprocessable(e.errors[0]!, { errors: e.errors });
-    if (e.warnings.length && !confirm)
-      throw AppError.conflict('Please confirm: ' + e.warnings.map((w) => w.message).join(' '), {
-        warnings: e.warnings,
-      });
-    await tx
-      .update(sessionChanges)
-      .set({
-        status: 'approved',
-        reviewedById: user.id,
-        reviewedAt: new Date(),
-        reviewNote: note ?? null,
-      })
-      .where(eq(sessionChanges.id, id));
-    await putInEffect(tx, c.batchId, e, c.date);
-    await audit(
-      {
-        ...auditCtx(req),
-        action: 'session.reschedule_approved',
-        entityType: 'batch',
-        entityId: c.batchId,
-        metadata: { changeId: id, note: note ?? null },
-      },
-      tx,
-    );
-  });
-  const row = await one(id);
-  noticePeople(
-    row,
-    user.id,
-    row.kind === 'extra' ? 'Extra session approved' : 'Reschedule approved',
-  );
-  ok(res, row);
-});
-
-sessionChangesRouter.post('/:id/reject', requireAdmin, async (req, res) => {
-  const { id } = parse(zIdParam, req.params);
-  const { note } = parse(ReviewBody, req.body ?? {});
-  const user = currentUser(req);
-  const [done] = await db
-    .update(sessionChanges)
-    .set({
-      status: 'rejected',
-      reviewedById: user.id,
-      reviewedAt: new Date(),
-      reviewNote: note ?? null,
-    })
-    .where(and(eq(sessionChanges.id, id), eq(sessionChanges.status, 'pending')))
-    .returning();
-  if (!done) {
-    await one(id);
-    throw AppError.conflict('This request was already handled');
-  }
-  await audit({
-    ...auditCtx(req),
-    action: 'session.reschedule_rejected',
-    entityType: 'batch',
-    entityId: done.batchId,
-    metadata: { changeId: id, note: note ?? null },
-  });
-  const row = await one(id);
-  noticePeople(row, user.id, 'Reschedule declined');
-  ok(res, row);
-});
-
 /**
- * Withdraws a pending request, or reverts an approved change before the session starts: a moved
- * session goes back to its regular day and time (makeups and plan with it); an extra session is
- * dropped (not while makeups are booked into it).
+ * Undoes a change before its session starts: a rescheduled session goes back to its original day
+ * (missed again, if it was missed); an extra session is dropped. Coaches: only their reschedules.
  */
 sessionChangesRouter.post('/:id/cancel', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const { note } = parse(ReviewBody, req.body ?? {});
   const user = currentUser(req);
   const now = new Date();
   await db.transaction(async (tx) => {
@@ -931,118 +738,208 @@ sessionChangesRouter.post('/:id/cancel', async (req, res) => {
     const batch = await batchIn(tx, c.batchId);
     const mine =
       isAdmin(user) ||
-      c.requestedById === user.id ||
-      batch.coachId === user.id ||
-      (await coachOn(batch, c.date, tx)) === user.id;
+      (c.kind === 'reschedule' &&
+        (batch.coachId === user.id || (await coachOn(batch, c.date, tx)) === user.id));
     if (!mine) throw AppError.notFound('Session change');
-    if (!['pending', 'approved'].includes(c.status))
-      throw AppError.conflict(`This change is already ${c.status}`);
-    if (c.status === 'approved') {
-      if (instantAt(c.date, c.startTime) <= now)
-        throw AppError.conflict('This session has already started.');
-      if (await hasRecords(c.batchId, c.date, tx))
-        throw AppError.conflict('Attendance or a check-in is already recorded for this session.');
-      if (c.kind === 'reschedule') {
-        const back = timesOn(batch, c.originalDate!).startTime;
-        if (instantAt(c.originalDate!, back) <= now)
-          throw AppError.conflict('The regular time has passed, so the session can’t go back.');
-        await carryOver(c.batchId, c.date, c.originalDate!, tx);
-      } else {
-        const booked = await tx.$count(
-          makeupSessions,
+    if (c.status !== 'approved') throw AppError.conflict('This change was already undone');
+    if (instantAt(c.date, c.startTime) <= now)
+      throw AppError.conflict('This session has already started.');
+    if (await hasRecords(c.batchId, c.date, tx))
+      throw AppError.conflict('Attendance or a check-in is already recorded for this session.');
+    if (c.kind === 'reschedule') {
+      const [missed] = await tx
+        .select({ id: sessionCancellations.id })
+        .from(sessionCancellations)
+        .where(
           and(
-            eq(makeupSessions.batchId, c.batchId),
-            eq(makeupSessions.date, c.date),
-            inArray(makeupSessions.status, ['pending', 'approved']),
+            eq(sessionCancellations.batchId, c.batchId),
+            eq(sessionCancellations.date, c.originalDate!),
           ),
         );
-        if (booked)
-          throw AppError.conflict(
-            `${booked} makeup${booked === 1 ? ' is' : 's are'} booked into this extra session. Move or cancel ${booked === 1 ? 'it' : 'them'} first.`,
-          );
-        await tx
-          .delete(sessionPlans)
-          .where(and(eq(sessionPlans.batchId, c.batchId), eq(sessionPlans.date, c.date)));
-      }
-    }
-    await tx
-      .update(sessionChanges)
-      .set({ status: 'cancelled', reviewNote: note ?? c.reviewNote })
-      .where(eq(sessionChanges.id, id));
+      const back = timesOn(batch, c.originalDate!).startTime;
+      if (!missed && instantAt(c.originalDate!, back) <= now)
+        throw AppError.conflict('The regular time has passed, so the session can’t go back.');
+      // A coach can't turn an admin's advance move back into a session.
+      if (!missed && !isAdmin(user)) throw AppError.forbidden('Ask an admin to undo this move.');
+      await carryOver(c.batchId, c.date, c.originalDate!, tx);
+    } else
+      await tx
+        .delete(sessionPlans)
+        .where(and(eq(sessionPlans.batchId, c.batchId), eq(sessionPlans.date, c.date)));
+    await vacate(tx, c.id);
     await audit(
       {
         ...auditCtx(req),
-        action:
-          c.status === 'approved' ? 'session.reschedule_reverted' : 'session.reschedule_withdrawn',
+        action: 'session.change_undone',
         entityType: 'batch',
         entityId: c.batchId,
-        metadata: { changeId: id, note: note ?? null },
+        metadata: { changeId: id, date: c.date, originalDate: c.originalDate },
       },
       tx,
     );
   });
   const row = await one(id);
-  noticePeople(
-    row,
-    user.id,
-    row.kind === 'extra' ? 'Extra session cancelled' : 'Session back to its usual time',
-  );
+  notice(row, user, row.kind === 'extra' ? 'Extra session dropped' : 'Reschedule undone');
   ok(res, row);
 });
 
-/** Pending requests whose session was due to start: expired. Safe to run any time. */
-export async function expireStale(now: Date = new Date()): Promise<number> {
-  const pending = await db
+// ─── Missed sessions ─────────────────────────────────────────────────────────
+
+const missedScope = (user: AuthUser) => (isAdmin(user) ? undefined : eq(batches.coachId, user.id));
+
+/**
+ * Missed sessions not yet rescheduled or closed (open), and ended sessions with neither a check-in
+ * nor attendance that an admin still has to confirm (unconfirmed). Batches with a course only,
+ * from the day it was set up.
+ */
+export async function missedSessions(user: AuthUser, now: Date = new Date()) {
+  const today = todayInAppTz(now);
+  const list = await db
     .select({
-      id: sessionChanges.id,
-      date: sessionChanges.date,
-      startTime: sessionChanges.startTime,
-      originalDate: sessionChanges.originalDate,
-      batchId: sessionChanges.batchId,
+      ...timing,
+      courseSetOn: batches.courseSetOn,
+      coach: { id: users.id, name: users.name },
     })
-    .from(sessionChanges)
+    .from(batches)
+    .innerJoin(users, eq(users.id, batches.coachId))
+    .where(
+      and(eq(batches.isActive, true), sql`${batches.courseMonths} is not null`, missedScope(user)),
+    );
+  if (!list.length) return { open: [], unconfirmed: [] };
+  const ids = list.map((b) => b.id);
+  const from = addDays(today, -ADMIN_DAYS);
+  const inRange = <T extends { batchId: string; date: IsoDate }>(rows: T[]) =>
+    new Map(rows.map((r) => [`${r.batchId}:${r.date}`, r]));
+  const [schedule, cancels, checkIns, marks] = await Promise.all([
+    scheduleFor(list, from, addDays(today, ADMIN_DAYS)),
+    db
+      .select()
+      .from(sessionCancellations)
+      .where(and(inArray(sessionCancellations.batchId, ids), gte(sessionCancellations.date, from))),
+    db
+      .select({ batchId: coachSessions.batchId, date: coachSessions.date })
+      .from(coachSessions)
+      .where(and(inArray(coachSessions.batchId, ids), gte(coachSessions.date, from))),
+    db
+      .selectDistinct({ batchId: studentAttendance.batchId, date: studentAttendance.date })
+      .from(studentAttendance)
+      .where(and(inArray(studentAttendance.batchId, ids), gte(studentAttendance.date, from))),
+  ]);
+  const off = inRange(cancels);
+  const held = inRange([...checkIns, ...marks]);
+  const open = [];
+  const unconfirmed = [];
+  for (const b of list) {
+    for (const s of schedule.get(b.id) ?? []) {
+      if (b.courseSetOn && rosterDay(s) < b.courseSetOn) continue;
+      const key = `${b.id}:${s.date}`;
+      const c = off.get(key);
+      if (c ? c.closedAt : held.has(key) || instantAt(s.date, s.endTime) > now) continue;
+      const people = await affectedStudents(db, b.id, s);
+      if (!people.length) continue;
+      const original = rosterDay(s);
+      const row = {
+        batch: { id: b.id, name: b.name, coach: b.coach },
+        date: s.date,
+        originalDate: original,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        students: people.length,
+        reason: c?.reason ?? null,
+        missed: c?.missed ?? false,
+        /** Coaches can reschedule until here; then only admins. */
+        coachUntil: addDays(original, RESCHEDULE_DAYS),
+        overdue: addDays(original, RESCHEDULE_DAYS) < today,
+      };
+      if (c) open.push(row);
+      else unconfirmed.push(row);
+    }
+  }
+  const byDate = (a: { date: string }, b: { date: string }) => a.date.localeCompare(b.date);
+  return { open: open.sort(byDate), unconfirmed: unconfirmed.sort(byDate) };
+}
+
+sessionChangesRouter.get('/missed', async (req, res) => {
+  ok(res, await missedSessions(currentUser(req)));
+});
+
+const KeyBody = z.object({ batchId: zId, date: zIsoDate });
+
+/** Admin: an unconfirmed session was missed (it can then be rescheduled). */
+sessionChangesRouter.post('/missed/confirm', requireAdmin, async (req, res) => {
+  const body = parse(KeyBody, req.body);
+  const user = currentUser(req);
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${LOCK})`);
+    const batch = await batchIn(tx, body.batchId);
+    const s = await sessionOn(batch, body.date, tx);
+    if (!s) throw AppError.unprocessable(`${batch.name} has no session that day`);
+    if (instantAt(s.date, s.endTime) > new Date())
+      throw AppError.unprocessable('This session isn’t over yet.');
+    if (await hasRecords(batch.id, body.date, tx))
+      throw AppError.conflict('Attendance or a check-in is recorded, so it was held.');
+    const [row] = await tx
+      .insert(sessionCancellations)
+      .values({
+        ...body,
+        reason: 'Missed by the coach',
+        missed: true,
+        cancelledById: user.id,
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (!row) throw AppError.conflict('This session is already marked as missed');
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'session.missed_confirmed',
+        entityType: 'batch',
+        entityId: batch.id,
+        metadata: body,
+      },
+      tx,
+    );
+  });
+  const batch = await getBatchOrThrow(body.batchId);
+  notifyInBackground(() =>
+    notifyUsers([batch.coachId], {
+      category: 'sessions',
+      icon: '📅',
+      title: `${batch.name} was missed on ${nice(body.date)}`,
+      body: `Reschedule it by ${nice(addDays(body.date, RESCHEDULE_DAYS))}.`,
+      link: '/missed-sessions',
+      tag: `missed-${batch.id}-${body.date}`,
+    }),
+  );
+  ok(res, { confirmed: true });
+});
+
+const CloseBody = KeyBody.extend({
+  reason: z.string().trim().min(3, 'Please give a reason').max(300),
+});
+
+/** Admin: a missed session won't be rescheduled. */
+sessionChangesRouter.post('/missed/close', requireAdmin, async (req, res) => {
+  const { batchId, date, reason } = parse(CloseBody, req.body);
+  const user = currentUser(req);
+  const [row] = await db
+    .update(sessionCancellations)
+    .set({ closedAt: new Date(), closedById: user.id, closedReason: reason })
     .where(
       and(
-        eq(sessionChanges.status, 'pending'),
-        lte(sessionChanges.date, addDays(todayInAppTz(now), 1)),
+        eq(sessionCancellations.batchId, batchId),
+        eq(sessionCancellations.date, date),
+        isNull(sessionCancellations.closedAt),
       ),
     )
-    .orderBy(asc(sessionChanges.date));
-  // Plus pending moves whose regular day comes first.
-  const early = await db
-    .select({
-      id: sessionChanges.id,
-      date: sessionChanges.date,
-      startTime: sessionChanges.startTime,
-      originalDate: sessionChanges.originalDate,
-      batchId: sessionChanges.batchId,
-    })
-    .from(sessionChanges)
-    .where(
-      and(
-        eq(sessionChanges.status, 'pending'),
-        lte(sessionChanges.originalDate, addDays(todayInAppTz(now), 1)),
-      ),
-    );
-  const all = new Map([...pending, ...early].map((r) => [r.id, r]));
-  if (!all.size) return 0;
-  const batchRows = await db
-    .select(timing)
-    .from(batches)
-    .where(inArray(batches.id, [...new Set([...all.values()].map((r) => r.batchId))]));
-  const byId = new Map(batchRows.map((b) => [b.id, b]));
-  const stale: string[] = [];
-  for (const r of all.values()) {
-    const starts = [instantAt(r.date, r.startTime)];
-    const b = byId.get(r.batchId);
-    if (r.originalDate && b)
-      starts.push(instantAt(r.originalDate, timesOn(b, r.originalDate).startTime));
-    if (Math.min(...starts.map((d) => d.getTime())) <= now.getTime()) stale.push(r.id);
-  }
-  if (stale.length)
-    await db
-      .update(sessionChanges)
-      .set({ status: 'expired' })
-      .where(and(inArray(sessionChanges.id, stale), eq(sessionChanges.status, 'pending')));
-  return stale.length;
-}
+    .returning();
+  if (!row) throw AppError.notFound('Missed session');
+  await audit({
+    ...auditCtx(req),
+    action: 'session.missed_closed',
+    entityType: 'batch',
+    entityId: batchId,
+    metadata: { date, reason },
+  });
+  ok(res, { closed: true });
+});

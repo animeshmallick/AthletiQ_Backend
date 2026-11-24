@@ -14,15 +14,12 @@ import {
   sql,
   type SQL,
   gte,
-  lte,
-  ne,
 } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import {
   batches,
-  courseRounds,
   enrollments,
   feePlans,
   invoices,
@@ -33,7 +30,7 @@ import {
   weeklyFeedback,
   skillAssessments,
 } from '../../db/schema/index.js';
-import { minDate, onDay, todayInAppTz, addDays } from '../../lib/dates.js';
+import { minDate, todayInAppTz, addDays } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok, pageMeta } from '../../lib/http.js';
 import {
@@ -54,16 +51,13 @@ import { billOnAcceptance } from '../billing/invoice-generator.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { createStudent, getStudentDetail, joinBatch, moveEnrollment } from './students.service.js';
 import {
-  noticeMakeupBooked,
   noticeStudentJoined,
   noticeStudentLeft,
   noticeStudentMovedOut,
 } from '../push/coach-notices.js';
-import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
-import { assertNotCancelled } from '../attendance/cancellations.js';
-import { releaseApplied } from '../courses/credits.js';
-import { closeRounds } from '../courses/rounds.js';
-import { requireSession } from '../schedule/schedule.js';
+import { notifyInBackground } from '../push/push.service.js';
+import { restartCycles } from '../cycles/cycles.js';
+import { endMembership, planEnd } from '../cycles/exits.js';
 
 export const studentsRouter = Router();
 
@@ -411,33 +405,12 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
           };
           rebill = true;
         }
-        await tx
+        const [moved] = await tx
           .update(enrollments)
           .set({ ...billing, effectiveFrom: body.joiningDate })
-          .where(eq(enrollments.id, e.id));
-        // The course counts from the corrected day (only while nothing has completed).
-        await tx
-          .update(courseRounds)
-          .set({ startedOn: body.joiningDate })
-          .where(
-            and(
-              eq(courseRounds.enrollmentId, e.id),
-              eq(courseRounds.roundNo, 1),
-              eq(courseRounds.status, 'active'),
-            ),
-          );
-        // Credit used on the cancelled invoices goes back to the membership.
-        for (const inv of await tx
-          .select({ id: invoices.id })
-          .from(invoices)
-          .where(
-            and(
-              eq(invoices.enrollmentId, e.id),
-              eq(invoices.status, 'cancelled'),
-              eq(invoices.cancelledReason, 'Joining date corrected'),
-            ),
-          ))
-          await releaseApplied(tx, inv.id);
+          .where(eq(enrollments.id, e.id))
+          .returning();
+        if (moved) await restartCycles(tx, moved);
       }
     }
 
@@ -616,14 +589,12 @@ studentsRouter.post('/:id/batches/:enrollmentId/leave', requireAdmin, async (req
       );
     if (body.leftOn < e.effectiveFrom)
       throw AppError.badRequest(`The last day cannot be before they joined (${e.effectiveFrom})`);
-    await tx.update(enrollments).set({ effectiveTo: body.leftOn }).where(eq(enrollments.id, e.id));
-    await closeRounds(tx, {
-      studentId: id,
-      enrollmentIds: [e.id],
-      leftOn: body.leftOn,
-      actorId: currentUser(req).id,
-      academy: false,
-    });
+    const actor = currentUser(req).id;
+    const today = todayInAppTz();
+    // A future day: a full member until then; the nightly job ends it.
+    if (body.leftOn > today)
+      await planEnd(tx, e, { on: body.leftOn, reason: body.reason, actorId: actor });
+    else await endMembership(tx, e, body.leftOn, body.reason, today);
     await tx
       .delete(makeupSessions)
       .where(
@@ -652,9 +623,9 @@ studentsRouter.post('/:id/batches/:enrollmentId/leave', requireAdmin, async (req
 const LeaveBody = z.object({ leftOn: zIsoDate, reason: zOptionalText(500) });
 
 /**
- * Marks a student as left the academy: every batch membership ends on `leftOn`, so cycles
- * starting after it are not billed; already-issued invoices are untouched. Future makeups are
- * cancelled.
+ * Marks a student as left the academy: every membership ends on `leftOn`. Months starting after
+ * it are never owed (their unpaid invoices are cancelled; paid ones are kept). With a future day
+ * the student stays active until then.
  */
 studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
@@ -677,27 +648,21 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
         `Leaving date cannot be before their latest batch started (${latestStart})`,
       );
     }
-    if (open.length)
-      await tx
-        .update(enrollments)
-        .set({ effectiveTo: body.leftOn })
-        .where(and(eq(enrollments.studentId, id), isNull(enrollments.effectiveTo)));
-    // Courses end too: in progress → left; a completion waiting for a decision → left, its credit
-    // owed back.
-    await closeRounds(tx, {
-      studentId: id,
-      enrollmentIds: open.map((e) => e.id),
-      leftOn: body.leftOn,
-      actorId: currentUser(req).id,
-      academy: true,
-    });
+    const today = todayInAppTz();
+    const actor = currentUser(req).id;
+    const later = body.leftOn > today && open.length > 0;
+    for (const e of open) {
+      if (later) await planEnd(tx, e, { on: body.leftOn, reason: body.reason, actorId: actor });
+      else await endMembership(tx, e, body.leftOn, body.reason, today);
+    }
     await tx
       .delete(makeupSessions)
       .where(and(eq(makeupSessions.studentId, id), gt(makeupSessions.date, body.leftOn)));
-    await tx
-      .update(students)
-      .set({ status: 'left', leftOn: body.leftOn, leftReason: body.reason })
-      .where(eq(students.id, id));
+    if (!later)
+      await tx
+        .update(students)
+        .set({ status: 'left', leftOn: body.leftOn, leftReason: body.reason })
+        .where(eq(students.id, id));
     await audit(
       {
         ...auditCtx(req),
@@ -717,137 +682,6 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
 });
 
 // ─── Makeups (one-off reschedules) ───────────────────────────────────────────
-
-const MakeupBody = z.object({
-  batchId: zId,
-  date: zIsoDate,
-  missedDate: zIsoDate.nullable().optional(),
-  reason: zOptionalText(500),
-  /** Which of the student's batches this makeup counts for (needed when they have several). */
-  homeBatchId: zId.nullable().optional(),
-});
-
-/**
- * The batch a makeup counts for: the one given, or the student's only batch on that day (other
- * than the one visited). With several, the caller must say when any of them has a course.
- */
-async function makeupHome(
-  studentId: string,
-  visited: string,
-  day: string,
-  given: string | null | undefined,
-) {
-  const options = await db
-    .select({
-      batchId: enrollments.batchId,
-      courseMonths: batches.courseMonths,
-      name: batches.name,
-    })
-    .from(enrollments)
-    .innerJoin(batches, eq(batches.id, enrollments.batchId))
-    .where(
-      and(
-        eq(enrollments.studentId, studentId),
-        ne(enrollments.batchId, visited),
-        lte(enrollments.effectiveFrom, day),
-        or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, day)),
-      ),
-    );
-  if (given) {
-    if (!options.some((o) => o.batchId === given))
-      throw AppError.badRequest('The makeup must count for one of the student’s other batches');
-    return given;
-  }
-  if (options.length === 1) return options[0]!.batchId;
-  if (options.length > 1 && options.some((o) => o.courseMonths))
-    throw new AppError('VALIDATION_ERROR', 'Choose which batch this makeup counts for', {
-      fields: [{ path: 'homeBatchId', message: options.map((o) => o.name).join(' or ') }],
-    });
-  return null;
-}
-
-/**
- * One-off session in another batch/day.
- *  - Admins: any batch, approved immediately.
- *  - Coaches (their own students): only in batches they coach, and it waits for an admin.
- */
-studentsRouter.post('/:id/makeups', async (req, res) => {
-  const { id } = parse(zIdParam, req.params);
-  const body = parse(MakeupBody, req.body);
-  const user = currentUser(req);
-  await assertStudentAccess(user, id);
-
-  const s = await db.query.students.findFirst({ where: eq(students.id, id) });
-  if (!s) throw AppError.notFound('Student');
-  if (s.status === 'left') throw AppError.unprocessable('Student has left the academy');
-
-  const batch = await db.query.batches.findFirst({ where: eq(batches.id, body.batchId) });
-  if (!batch?.isActive) throw AppError.unprocessable('Selected batch is not active');
-  await requireSession(batch, body.date);
-  if (body.date < s.joiningDate)
-    throw AppError.unprocessable('Makeup date is before the student joined');
-  const admin = user.role === 'admin';
-  if (!admin && batch.coachId !== user.id) {
-    throw AppError.forbidden(
-      'You can book makeups only in your own batches. Ask an admin to book another coach’s batch.',
-    );
-  }
-  await assertNotCancelled(batch.id, body.date);
-  const homeBatchId = await makeupHome(
-    id,
-    batch.id,
-    body.missedDate ?? body.date,
-    body.homeBatchId,
-  );
-
-  // A previously rejected request for the same session can be asked for again.
-  await db
-    .delete(makeupSessions)
-    .where(
-      and(
-        eq(makeupSessions.studentId, id),
-        eq(makeupSessions.batchId, body.batchId),
-        eq(makeupSessions.date, body.date),
-        eq(makeupSessions.status, 'rejected'),
-      ),
-    );
-  const [makeup] = await db
-    .insert(makeupSessions)
-    .values({
-      studentId: id,
-      ...body,
-      homeBatchId,
-      missedDate: body.missedDate ?? null,
-      createdById: user.id,
-      status: admin ? 'approved' : 'pending',
-      reviewedById: admin ? user.id : null,
-      reviewedAt: admin ? new Date() : null,
-    })
-    .returning();
-  await audit({
-    ...auditCtx(req),
-    action: admin ? 'student.makeup_booked' : 'student.makeup_requested',
-    entityType: 'student',
-    entityId: id,
-    metadata: body,
-  });
-  if (admin) {
-    notifyInBackground(() => noticeMakeupBooked(id, body.batchId, body.date, user.id));
-  } else {
-    notifyInBackground(() =>
-      notifyAdmins({
-        category: 'approvals',
-        icon: '🔁',
-        actions: [{ label: 'Review', link: '/makeups' }],
-        title: `Makeup request for ${s.fullName}`,
-        body: `${batch.name} ${onDay(body.date)} · asked by ${user.name}. Approve or decline.`,
-        link: '/makeups',
-        tag: 'makeups',
-      }),
-    );
-  }
-  created(res, makeup);
-});
 
 studentsRouter.delete('/:id/makeups/:makeupId', async (req, res) => {
   const { id, makeupId } = parse(z.object({ id: zId, makeupId: zId }), req.params);

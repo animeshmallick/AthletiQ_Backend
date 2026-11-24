@@ -8,6 +8,7 @@ import { batches, sessionCancellations } from '../db/schema/index.js';
 import { todayInAppTz } from '../lib/dates.js';
 import { logger } from '../lib/logger.js';
 import { notifyUsers, pushEnabled } from '../modules/push/push.service.js';
+import { substitutesOn } from '../modules/substitutions/coverage.js';
 import { sessionsOnDay } from '../modules/schedule/schedule.js';
 
 /** "17:00:00" → "5:00 pm" */
@@ -28,10 +29,15 @@ export async function sendSessionReminders(today = todayInAppTz()) {
   ]);
   const off = new Set(cancelled.map((c) => c.batchId));
   const byCoach = new Map<string, typeof active>();
+  const subs = await substitutesOn(
+    active.map((b) => b.id),
+    today,
+  );
   for (const { batch: b, session } of await sessionsOnDay(active, today)) {
     if (off.has(b.id)) continue;
+    const runner = subs.get(b.id)?.id ?? b.coachId;
     const at = { ...b, startTime: session.startTime, endTime: session.endTime };
-    byCoach.set(b.coachId, [...(byCoach.get(b.coachId) ?? []), at]);
+    byCoach.set(runner, [...(byCoach.get(runner) ?? []), at]);
   }
   for (const [coachId, list] of byCoach) {
     list.sort((a, b) => a.startTime.localeCompare(b.startTime));

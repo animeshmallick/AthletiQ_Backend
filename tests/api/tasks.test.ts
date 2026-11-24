@@ -4,7 +4,6 @@ import { db } from '../../src/db/client';
 import {
   coachSessions,
   invoices,
-  makeupSessions,
   registrationRequests,
   sessionCancellations,
 } from '../../src/db/schema';
@@ -19,7 +18,6 @@ const at = (ist: string) => {
   const utc = h! * 60 + m! - 330;
   return `${String(Math.floor(utc / 60)).padStart(2, '0')}:${String(utc % 60).padStart(2, '0')}:00`;
 };
-// Course set-up is an academy to-do of its own (tested with courses); these tests are about sessions.
 const kinds = (r: { items: Task[] }) =>
   r.items
     .map((t) => t.kind)
@@ -139,7 +137,7 @@ describe('coach weekly report task', () => {
 });
 
 describe('admin academy-wide tasks', () => {
-  it('counts registrations, flagged check-ins, overdue fees and makeups', async () => {
+  it('counts registrations, flagged check-ins, overdue fees', async () => {
     setToday(MON, at('12:00'));
     const a = await makeAcademy();
     const admin = { ...a.admin, role: 'admin' as const };
@@ -177,13 +175,6 @@ describe('admin academy-wide tasks', () => {
     await billOnAcceptance(s.id);
     await db.update(invoices).set({ dueDate: '2026-04-01' });
     await db.update(invoices).set({ dueDate: '2026-03-01' }).where(eq(invoices.cycleNumber, 1));
-    await db.insert(makeupSessions).values({
-      studentId: s.id,
-      batchId: a.batch.id,
-      date: '2026-03-12',
-      status: 'pending',
-      createdById: a.coach.id,
-    });
 
     const one = await tasksFor(admin);
     expect(one.items.map((t) => t.title)).toEqual(
@@ -191,30 +182,21 @@ describe('admin academy-wide tasks', () => {
         '1 registration to review',
         '1 flagged check-in',
         '1 overdue invoice',
-        '1 makeup request to review',
       ]),
     );
 
     await registration('Arjun');
     await flagged('2026-03-06');
-    await db.insert(makeupSessions).values({
-      studentId: s.id,
-      batchId: a.batch.id,
-      date: '2026-03-13',
-      status: 'pending',
-      createdById: a.coach.id,
-    });
     await db.update(invoices).set({ dueDate: '2026-03-01' });
     const two = await tasksFor(admin);
     expect(two.items.map((t) => t.title)).toEqual(
       expect.arrayContaining([
         '2 registrations to review',
         '2 flagged check-ins',
-        '2 makeup requests to review',
         '2 overdue invoices',
       ]),
     );
-    expect(two.counts).toMatchObject({ '/registrations': 2, '/coach-sessions': 2, '/makeups': 2 });
+    expect(two.counts).toMatchObject({ '/registrations': 2, '/coach-sessions': 2 });
     // Critical first.
     const severities = two.items.map((t) => t.severity);
     expect(severities).toEqual(

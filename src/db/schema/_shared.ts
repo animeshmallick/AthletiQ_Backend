@@ -30,7 +30,14 @@ export const attendanceStatus = pgEnum('attendance_status', [
 
 export const feedbackStatus = pgEnum('feedback_status', ['draft', 'submitted']);
 
-export const invoiceStatus = pgEnum('invoice_status', ['due', 'paid', 'refunded', 'cancelled']);
+export const invoiceStatus = pgEnum('invoice_status', [
+  'due',
+  'paid',
+  'refunded',
+  'cancelled',
+  // Written off when a student exits: not collected, not income. Reversible by an admin.
+  'lost',
+]);
 export const paymentMode = pgEnum('payment_mode', [
   'cash',
   'upi',

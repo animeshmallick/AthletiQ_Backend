@@ -9,6 +9,7 @@ import {
   batches,
   coachSessions,
   locations,
+  sessionCancellations,
   studentAttendance,
   students,
   users,
@@ -32,8 +33,6 @@ import {
   sessionsOnDay,
 } from '../schedule/schedule.js';
 import { assertNotCancelled, cancellationsIn, getCancellation } from './cancellations.js';
-import { evaluateCourses } from '../courses/rounds.js';
-import { logger } from '../../lib/logger.js';
 
 export const attendanceRouter = Router();
 
@@ -138,7 +137,7 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
         coachSession: cs
           ? {
               checkInAt: cs.checkInAt,
-              flagged: !cs.checkInWithinFence,
+              flagged: !cs.checkInWithinFence || cs.outsideTime,
             }
           : null,
       };
@@ -373,6 +372,13 @@ attendanceRouter.put('/session', async (req, res) => {
   );
   const clears = body.records.filter((r) => r.status === null).map((r) => r.studentId);
   await db.transaction(async (tx) => {
+    // Serialised with cancelling this session.
+    await tx.select({ id: batches.id }).from(batches).where(eq(batches.id, batch.id)).for('update');
+    const off = await tx.$count(
+      sessionCancellations,
+      and(eq(sessionCancellations.batchId, batch.id), eq(sessionCancellations.date, body.date)),
+    );
+    if (off) throw AppError.unprocessable('This session was cancelled');
     if (clears.length)
       await tx
         .delete(studentAttendance)
@@ -420,16 +426,6 @@ attendanceRouter.put('/session', async (req, res) => {
     }
   });
 
-  // Course progress follows attendance right away (completion, or undoing one after a correction).
-  // Students marked here count for this batch, or (makeups) for their own batch.
-  try {
-    await evaluateCourses(todayInAppTz(), {
-      studentIds: body.records.map((r) => r.studentId),
-      actorId: user.id,
-    });
-  } catch (err) {
-    logger.error({ err }, 'Course evaluation after attendance failed (nightly run will retry)');
-  }
   ok(res, { saved: body.records.length });
 });
 

@@ -19,6 +19,7 @@ function enrolledOn(batchId: string, date: IsoDate) {
     eq(enrollments.batchId, batchId),
     lte(enrollments.effectiveFrom, date),
     or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, date)),
+    or(isNull(enrollments.plannedEndOn), gte(enrollments.plannedEndOn, date)),
     lte(students.joiningDate, date),
     or(isNull(students.leftOn), gte(students.leftOn, date)),
   );

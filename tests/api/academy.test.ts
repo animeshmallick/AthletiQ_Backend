@@ -4,6 +4,7 @@ import { db } from '../../src/db/client';
 import { invoices } from '../../src/db/schema';
 import { generateDueInvoices } from '../../src/modules/billing/invoice-generator';
 import {
+  bookMakeup,
   as,
   makeAcademy,
   makeBatch,
@@ -360,15 +361,7 @@ describe('batches', () => {
     const batch = await makeBatch(coach.id, location.id, { weekdays: [1, 2, 3, 5] });
     const regular = await makeStudent({ batchId: batch.id }, admin.id);
     const visitor = await makeStudent({ batchId: otherBatch.id }, admin.id);
-    await (
-      await as(admin)
-    )
-      .post(`/api/v1/students/${visitor.id}/makeups`, {
-        batchId: batch.id,
-        date: '2026-03-10',
-        reason: 'Exam',
-      })
-      .expect(201);
+    await bookMakeup(visitor.id, batch.id, '2026-03-10');
 
     const api = await as(coach);
     const tue = await api.get(`/api/v1/batches/${batch.id}/roster?date=2026-03-10`).expect(200); // Tuesday

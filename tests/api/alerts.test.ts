@@ -13,7 +13,6 @@ import type { PushMessage, PushSender } from '../../src/modules/push/fcm';
 import {
   noticeBatchAssigned,
   noticeBatchChanged,
-  noticeMakeupBooked,
   noticeSessionCancelled,
   noticeStudentJoined,
   noticeStudentLeft,
@@ -368,64 +367,6 @@ describe('coach notices', () => {
     expect(sent).toHaveLength(2);
   });
 
-  it('tells the coach when an admin books a makeup into their batch', async () => {
-    const sent = capture();
-    setToday(MON, at('12:00'));
-    const { admin, otherCoach, batch, otherBatch, plan } = await makeAcademy();
-    await device(otherCoach.id, 'other-coach-token-xxxxxxxxxxxx');
-    const s = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, fullName: 'Meera N' },
-      admin.id,
-    );
-    await (
-      await as(admin)
-    )
-      .post(`/api/v1/students/${s.id}/makeups`, { batchId: otherBatch.id, date: '2026-03-12' })
-      .expect(201);
-    await settle(sent, 1);
-    expect(sent[0]!.message).toMatchObject({
-      title: `Makeup student in ${otherBatch.name}`,
-      body: 'Meera N joins on Thursday',
-    });
-  });
-
-  it('tells admins about coach makeup requests and the coach about the decision', async () => {
-    const sent = capture();
-    setToday(MON, at('12:00'));
-    const { admin, coach, batch, plan } = await makeAcademy();
-    await device(coach.id, 'coach-device-token-xxxxxxxxxxxx');
-    await device(admin.id, 'admin-device-token-xxxxxxxxxxxx');
-    const s = await makeStudent(
-      { batchId: batch.id, feePlanId: plan.id, fullName: 'Ojas P' },
-      admin.id,
-    );
-    const coachApi = await as(coach);
-    const r1 = await coachApi
-      .post(`/api/v1/students/${s.id}/makeups`, { batchId: batch.id, date: '2026-03-10' })
-      .expect(201);
-    const r2 = await coachApi
-      .post(`/api/v1/students/${s.id}/makeups`, { batchId: batch.id, date: '2026-03-17' })
-      .expect(201);
-    await settle(sent, 2);
-    expect(sent[0]!.message.title).toMatch(/^Makeup request for /);
-    expect(sent[0]!.message).toMatchObject({
-      category: 'approvals',
-      actions: [{ label: 'Review', link: '/makeups' }],
-    });
-    const adminApi = await as(admin);
-    await adminApi.post(`/api/v1/makeups/${r1.body.data.id}/approve`).expect(200);
-    await settle(sent, 3);
-    expect(sent[2]!.message).toMatchObject({
-      title: 'Makeup approved',
-      body: expect.stringContaining('Ojas P'),
-    });
-    await adminApi
-      .post(`/api/v1/makeups/${r2.body.data.id}/reject`, { reason: 'Batch is full that day' })
-      .expect(200);
-    await settle(sent, 4);
-    expect(sent[3]!.message.title).toBe('Makeup not approved');
-  });
-
   it('stays quiet when there is nobody (or nothing new) to tell', async () => {
     const sent = capture();
     setToday(MON, at('12:00'));
@@ -438,13 +379,11 @@ describe('coach notices', () => {
     await noticeStudentLeft(gone, gone, MON);
     await noticeStudentMovedOut(gone, gone, batch.id, MON);
     await noticeSessionCancelled(gone, MON, admin.id, null);
-    await noticeMakeupBooked(gone, gone, MON, admin.id);
     // Same coach on both batches: the "joined" notice is enough.
     const second = await makeBatch(coach.id, location.id);
     const s = await makeStudent({ batchId: batch.id, feePlanId: plan.id }, admin.id);
     await noticeStudentMovedOut(s.id, batch.id, second.id, MON);
-    // Coach's own makeup / cancellation.
-    await noticeMakeupBooked(s.id, batch.id, MON, coach.id);
+    // Coach's own cancellation.
     await noticeSessionCancelled(batch.id, MON, coach.id, null);
     // A student with no name on record still reads well, and no reason is spelled out.
     await noticeSessionCancelled(batch.id, '2026-03-11', admin.id, null);

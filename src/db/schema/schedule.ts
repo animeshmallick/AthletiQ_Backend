@@ -10,7 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { id, timestamps, tz } from './_shared.js';
+import { id, timestamps } from './_shared.js';
 import { batches } from './academy.js';
 import { users } from './users.js';
 
@@ -22,20 +22,8 @@ import { users } from './users.js';
  */
 export const sessionChangeKind = pgEnum('session_change_kind', ['reschedule', 'extra']);
 
-/**
- * pending    waits for an admin (coach asked with less than 24 hours' notice).
- * approved   in effect: the session runs on `date` at `startTime`–`endTime`.
- * rejected   turned down by an admin.
- * cancelled  withdrawn / reverted before the session started.
- * expired    still pending when the session was due to start.
- */
-export const sessionChangeStatus = pgEnum('session_change_status', [
-  'pending',
-  'approved',
-  'rejected',
-  'cancelled',
-  'expired',
-]);
+/** approved: in effect. cancelled: undone, or replaced by a later change. */
+export const sessionChangeStatus = pgEnum('session_change_status', ['approved', 'cancelled']);
 
 /**
  * Changes to a batch's regular timetable. A moved or extra session is identified by its actual
@@ -57,25 +45,22 @@ export const sessionChanges = pgTable(
     date: date({ mode: 'string' }).notNull(),
     startTime: time().notNull(),
     endTime: time().notNull(),
-    status: sessionChangeStatus().notNull().default('pending'),
+    status: sessionChangeStatus().notNull().default('approved'),
     reason: text(),
     requestedById: uuid()
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),
-    reviewedById: uuid().references(() => users.id, { onDelete: 'set null' }),
-    reviewedAt: tz(),
-    reviewNote: text(),
     ...timestamps,
   },
   (t) => [
-    // One live (pending or in-effect) session per batch per day…
+    // One session in effect per batch per day…
     uniqueIndex('session_changes_batch_date_uq')
       .on(t.batchId, t.date)
-      .where(sql`${t.status} in ('pending', 'approved')`),
+      .where(sql`${t.status} = 'approved'`),
     // …and a regular session can only be moved once at a time.
     uniqueIndex('session_changes_batch_original_uq')
       .on(t.batchId, t.originalDate)
-      .where(sql`${t.status} in ('pending', 'approved') and ${t.originalDate} is not null`),
+      .where(sql`${t.status} = 'approved' and ${t.originalDate} is not null`),
     index('session_changes_date_idx').on(t.date),
     index('session_changes_status_idx').on(t.status),
     check(

@@ -4,7 +4,6 @@ import { db, type DbOrTx } from '../../db/client.js';
 import {
   batches,
   counters,
-  courseRounds,
   enrollments,
   feePlans,
   invoices,
@@ -15,6 +14,7 @@ import {
 } from '../../db/schema/index.js';
 import { addDays, minDate, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { cycleFor, nextUpcomingCycle } from '../billing/cycle.js';
+import { openFirstCycle, syncCycles } from '../cycles/cycles.js';
 import { AppError } from '../../lib/errors.js';
 import type { Paise } from '../../lib/money.js';
 
@@ -47,7 +47,8 @@ export async function assertJoinable(
   tx: DbOrTx = db,
   opts: { studentId?: string; excludeStudentId?: string } = {},
 ) {
-  const batch = await tx.query.batches.findFirst({ where: eq(batches.id, batchId) });
+  // Locked, so two people joining at the same moment can't both take the last seat.
+  const [batch] = await tx.select().from(batches).where(eq(batches.id, batchId)).for('update');
   if (!batch) throw AppError.unprocessable('Selected batch does not exist');
   if (!batch.isActive) throw AppError.unprocessable(`${batch.name} is inactive`);
   if (opts.studentId) {
@@ -63,19 +64,6 @@ export async function assertJoinable(
       )
       .limit(1);
     if (already) throw AppError.conflict(`Already in ${batch.name}`);
-    // A completed course waiting for a decision holds the seat: continue it through the decision.
-    const waiting = await tx.$count(
-      courseRounds,
-      and(
-        eq(courseRounds.batchId, batchId),
-        eq(courseRounds.studentId, opts.studentId),
-        eq(courseRounds.status, 'awaiting'),
-      ),
-    );
-    if (waiting && opts.excludeStudentId !== opts.studentId)
-      throw AppError.conflict(
-        `This student completed the course in ${batch.name} and is waiting for a decision. Re-admit them from Course decisions.`,
-      );
   }
   const [{ n } = { n: 0 }] = await tx
     .select({ n: sql<number>`count(*)::int` })
@@ -87,37 +75,18 @@ export async function assertJoinable(
         opts.excludeStudentId ? ne(enrollments.studentId, opts.excludeStudentId) : undefined,
       ),
     );
-  if (n + (await seatsHeld(tx, batchId, opts.excludeStudentId)) >= batch.capacity)
-    throw AppError.unprocessable(`${batch.name} is full (capacity ${batch.capacity})`);
-  return batch;
-}
-
-/** Seats held by students who completed the course and are waiting for a decision. */
-export async function seatsHeld(tx: DbOrTx, batchId: string, exceptStudentId?: string) {
-  return tx.$count(
-    courseRounds,
+  // Seats held for students moving here when their cycle ends.
+  const held = await tx.$count(
+    enrollments,
     and(
-      eq(courseRounds.batchId, batchId),
-      eq(courseRounds.status, 'awaiting'),
-      exceptStudentId ? ne(courseRounds.studentId, exceptStudentId) : undefined,
+      eq(enrollments.plannedMoveToId, batchId),
+      isNull(enrollments.effectiveTo),
+      opts.studentId ? ne(enrollments.studentId, opts.studentId) : undefined,
     ),
   );
-}
-
-/** Starts round 1 of a batch's course for a new membership (no-op without a course). */
-async function startCourse(
-  tx: DbOrTx,
-  e: { id: string; studentId: string; batchId: string; effectiveFrom: IsoDate },
-  courseMonths: number | null,
-) {
-  if (!courseMonths) return;
-  await tx.insert(courseRounds).values({
-    enrollmentId: e.id,
-    studentId: e.studentId,
-    batchId: e.batchId,
-    roundNo: 1,
-    startedOn: e.effectiveFrom,
-  });
+  if (n + held >= batch.capacity)
+    throw AppError.unprocessable(`${batch.name} is full (capacity ${batch.capacity})`);
+  return batch;
 }
 
 export async function assertActivePlan(feePlanId: string, tx: DbOrTx = db) {
@@ -126,6 +95,15 @@ export async function assertActivePlan(feePlanId: string, tx: DbOrTx = db) {
   if (!plan.isActive) throw AppError.unprocessable('Selected fee plan is inactive');
   return plan;
 }
+
+/** Clears a planned end (renewal stopped / future leaving date). */
+export const NO_PLAN = {
+  plannedEndOn: null,
+  plannedReason: null,
+  plannedById: null,
+  plannedAt: null,
+  plannedMoveToId: null,
+};
 
 /** A batch to join, with this student's own price adjustments. */
 export interface JoinInput {
@@ -163,8 +141,7 @@ export async function joinBatch(
       createdById: input.actorId,
     })
     .returning();
-  // Joining (or rejoining) always starts the course from round 1.
-  await startCourse(tx, row!, batch.courseMonths);
+  await openFirstCycle(tx, row!);
   return { enrollment: row!, batch };
 }
 
@@ -191,7 +168,7 @@ export async function moveEnrollment(
     toBatchId: string;
     effectiveFrom: IsoDate;
     reason: string | null;
-    actorId: string;
+    actorId: string | null;
     customMonthlyFee?: number | null;
     monthlyDiscount?: number;
   },
@@ -210,20 +187,11 @@ export async function moveEnrollment(
       `The move date must be after ${current.effectiveFrom}, when this membership started`,
     );
   }
-  const midCourse = await tx
-    .select({ id: courseRounds.id })
-    .from(courseRounds)
-    .where(and(eq(courseRounds.enrollmentId, current.id), eq(courseRounds.status, 'active')))
-    .limit(1);
-  if (midCourse.length)
-    throw AppError.unprocessable(
-      'This student is in the middle of the course. They can move once it is complete (or leave the batch now).',
-    );
   const batch = await assertJoinable(input.toBatchId, tx, { studentId: input.studentId });
 
   await tx
     .update(enrollments)
-    .set({ effectiveTo: addDays(input.effectiveFrom, -1) })
+    .set({ effectiveTo: addDays(input.effectiveFrom, -1), ...NO_PLAN })
     .where(eq(enrollments.id, current.id));
   const anchor = current.billingAnchorDate ?? current.effectiveFrom;
   const [next] = await tx
@@ -244,7 +212,8 @@ export async function moveEnrollment(
       createdById: input.actorId,
     })
     .returning();
-  await startCourse(tx, next!, batch.courseMonths);
+  await syncCycles(tx, current.id, todayInAppTz());
+  await openFirstCycle(tx, next!);
   return { previous: current, current: next!, batch };
 }
 
@@ -335,6 +304,7 @@ export async function getStudentDetail(studentId: string) {
         trainingDays: enrollments.trainingDays,
         effectiveFrom: enrollments.effectiveFrom,
         effectiveTo: enrollments.effectiveTo,
+        plannedEndOn: enrollments.plannedEndOn,
         reason: enrollments.reason,
         customMonthlyFee: enrollments.customMonthlyFee,
         monthlyDiscount: enrollments.monthlyDiscount,
@@ -356,7 +326,7 @@ export async function getStudentDetail(studentId: string) {
       .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
       .leftJoin(lastCycle, eq(lastCycle.enrollmentId, enrollments.id))
       .where(eq(enrollments.studentId, studentId))
-      .orderBy(desc(enrollments.effectiveFrom)),
+      .orderBy(desc(enrollments.effectiveFrom), asc(batches.name)),
     db
       .select({
         id: makeupSessions.id,
@@ -403,7 +373,7 @@ export async function getStudentDetail(studentId: string) {
           billingAnchorDate: h.billingAnchorDate,
           cycleOffset: h.cycleOffset,
           billingStartsOn: h.billingStartsOn,
-          leftOn: h.effectiveTo,
+          leftOn: h.effectiveTo ?? h.plannedEndOn,
           lastInvoicedCycle: h.lastInvoicedCycle,
         },
         today,
@@ -420,6 +390,8 @@ export async function getStudentDetail(studentId: string) {
         endTime: h.endTime,
         dayTimes: h.dayTimes,
         since: h.effectiveFrom,
+        /** Last day, when leaving or a stopped renewal is planned. */
+        plannedEndOn: h.plannedEndOn,
         plan: h.plan,
         customMonthlyFee: h.customMonthlyFee,
         monthlyDiscount: h.monthlyDiscount,

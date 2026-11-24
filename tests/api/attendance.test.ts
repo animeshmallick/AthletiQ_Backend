@@ -1,5 +1,13 @@
 import { describe, expect, it } from '@jest/globals';
-import { as, makeAcademy, makeBatch, makeStudent, setToday, checkIn } from '../helpers/factories';
+import {
+  bookMakeup,
+  as,
+  makeAcademy,
+  makeBatch,
+  makeStudent,
+  setToday,
+  checkIn,
+} from '../helpers/factories';
 
 // 2026-03-09 is a Monday. Batches run Mon–Sat; students train every day their batch runs.
 const MON = '2026-03-09';
@@ -201,11 +209,7 @@ describe('student attendance', () => {
       { batchId: otherBatch.id, feePlanId: plan.id, joiningDate: '2026-02-01' },
       admin.id,
     );
-    await (
-      await as(admin)
-    )
-      .post(`/api/v1/students/${visitor.id}/makeups`, { batchId: batch.id, date: TUE })
-      .expect(201);
+    await bookMakeup(visitor.id, batch.id, TUE);
     const api = await as(coach);
     await checkIn(coach.id, batch.id, MON, TUE);
     await api
@@ -257,7 +261,8 @@ describe('student attendance', () => {
         present: 1,
         attendanceComplete: true,
         hasLessonPlan: false,
-        coachSession: expect.objectContaining({ flagged: false }),
+        // Checked in at noon for a 6–8 am session.
+        coachSession: expect.objectContaining({ flagged: true }),
       }),
     ]);
     const all = await (

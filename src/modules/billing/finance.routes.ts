@@ -1,6 +1,7 @@
-import { and, desc, eq, gte, lt, lte, ne, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, lt, lte, notInArray, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
+import { APP_TIMEZONE } from '../../config/constants.js';
 import { db } from '../../db/client.js';
 import {
   enrollments,
@@ -71,6 +72,7 @@ financeRouter.get('/summary', async (req, res) => {
     byBatch,
     defaulters,
     receivers,
+    lost,
   ] = await Promise.all([
     db
       .select({
@@ -82,7 +84,7 @@ financeRouter.get('/summary', async (req, res) => {
       .where(
         and(
           ...scope,
-          ne(invoices.status, 'cancelled'),
+          notInArray(invoices.status, ['cancelled', 'lost']),
           gte(invoices.issueDate, from),
           lte(invoices.issueDate, to),
         ),
@@ -128,7 +130,13 @@ financeRouter.get('/summary', async (req, res) => {
         amount: sql<number>`sum(${invoices.totalAmount})::int`,
       })
       .from(invoices)
-      .where(and(...scope, ne(invoices.status, 'cancelled'), gte(invoices.issueDate, trendStart)))
+      .where(
+        and(
+          ...scope,
+          notInArray(invoices.status, ['cancelled', 'lost']),
+          gte(invoices.issueDate, trendStart),
+        ),
+      )
       .groupBy(sql`1`),
     db
       .select({
@@ -145,7 +153,7 @@ financeRouter.get('/summary', async (req, res) => {
         batchName: invoices.batchName,
         coachId: invoices.coachId,
         coachName: users.name,
-        billed: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} between ${from} and ${to} and ${invoices.status} <> 'cancelled'), 0)::int`,
+        billed: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} between ${from} and ${to} and ${invoices.status} not in ('cancelled', 'lost')), 0)::int`,
         outstanding: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due'), 0)::int`,
         overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due' and ${invoices.dueDate} < ${today}), 0)::int`,
       })
@@ -193,6 +201,20 @@ financeRouter.get('/summary', async (req, res) => {
       )
       .groupBy(payments.recordedById, users.name, users.lastRole)
       .orderBy(desc(sql`sum(${payments.amount})`)),
+    // Written off in the period (students who exited).
+    db
+      .select({
+        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(invoices)
+      .where(
+        and(
+          ...scope,
+          eq(invoices.status, 'lost'),
+          sql`(${invoices.lostAt} at time zone ${APP_TIMEZONE})::date between ${from} and ${to}`,
+        ),
+      ),
   ]);
 
   const months: string[] = [];
@@ -211,6 +233,8 @@ financeRouter.get('/summary', async (req, res) => {
       collected: c.amount,
       paymentsReceived: c.count,
       refunded: c.refunded,
+      lost: lost[0]!.amount,
+      lostCount: lost[0]!.count,
       ...outstanding[0]!,
       outstanding: outstanding[0]!.due + outstanding[0]!.overdue,
       collectionRate: b.amount > 0 ? Math.round((c.amount / b.amount) * 1000) / 10 : null,
@@ -258,7 +282,8 @@ financeRouter.get('/projection', async (req, res) => {
       billingAnchorDate: enrollments.billingAnchorDate,
       cycleOffset: enrollments.cycleOffset,
       billingStartsOn: enrollments.billingStartsOn,
-      leftOn: enrollments.effectiveTo,
+      // Only open memberships here: a planned end is the last day.
+      leftOn: enrollments.plannedEndOn,
       customMonthlyFee: enrollments.customMonthlyFee,
       monthlyDiscount: enrollments.monthlyDiscount,
       planFee: feePlans.monthlyFee,

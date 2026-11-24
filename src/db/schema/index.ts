@@ -13,4 +13,4 @@ export * from './funds.js';
 export * from './substitutions.js';
 export * from './skills.js';
 export * from './schedule.js';
-export * from './courses.js';
+export * from './cycles.js';

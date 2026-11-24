@@ -1,5 +1,3 @@
-import { evaluateDelivery, sendPaceDigest } from '../modules/courses/delivery.js';
-import { expireStale } from '../modules/schedule/session-changes.js';
 import cron, { type ScheduledTask } from 'node-cron';
 import { APP_TIMEZONE } from '../config/constants.js';
 import { env } from '../config/env.js';
@@ -60,23 +58,6 @@ export function startScheduler(): void {
     cron.schedule('* * * * *', () => runSafely('Session alerts', () => runSessionAlerts()), {
       timezone: APP_TIMEZONE,
       name: 'session-alerts',
-      noOverlap: true,
-    }),
-    // Monthly delivery: months at risk / short (after the night's billing run).
-    cron.schedule('45 0 * * *', () => runSafely('Session delivery', () => evaluateDelivery()), {
-      timezone: APP_TIMEZONE,
-      name: 'session-delivery',
-      noOverlap: true,
-    }),
-    cron.schedule('30 8 * * 1', () => runSafely('Course pace digest', () => sendPaceDigest()), {
-      timezone: APP_TIMEZONE,
-      name: 'course-pace-digest',
-      noOverlap: true,
-    }),
-    // Pending session changes lapse when their session was due to start.
-    cron.schedule('*/5 * * * *', () => runSafely('Expire session changes', () => expireStale()), {
-      timezone: APP_TIMEZONE,
-      name: 'session-change-expiry',
       noOverlap: true,
     }),
     cron.schedule('0 20 * * *', () => runSafely('Admin digest', () => sendAdminDigest()), {

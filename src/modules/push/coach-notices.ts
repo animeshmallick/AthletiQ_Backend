@@ -7,6 +7,7 @@ import { db } from '../../db/client.js';
 import { dayPhrase, onDay } from '../../lib/dates.js';
 import { batches, enrollments, locations, students } from '../../db/schema/index.js';
 import { clockLabel, scheduleLabel, timesOn } from '../../lib/batch-times.js';
+import { sessionOn } from '../schedule/schedule.js';
 import { notifyUsers } from './push.service.js';
 
 const DAY = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -181,6 +182,7 @@ export async function noticeSessionCancelled(
   const row = await batchWithLocation(batchId);
   if (!row || row.batch.coachId === byUserId) return;
   const { batch: b } = row;
+  const at = (await sessionOn(b, date)) ?? timesOn(b, date);
   await notifyUsers([b.coachId], {
     category: 'sessions',
     icon: restored ? '✅' : '🚫',
@@ -188,28 +190,9 @@ export async function noticeSessionCancelled(
       ? `${b.name} is on again ${onDay(date)}`
       : `${b.name} is cancelled ${onDay(date)}`,
     body: restored
-      ? `The session is running again · ${(({ startTime, endTime }) => `${clockLabel(startTime)}–${clockLabel(endTime)}`)(timesOn(b, date))}`
+      ? `The session is running again · ${clockLabel(at.startTime)}–${clockLabel(at.endTime)}`
       : `Reason: ${reason ?? 'not given'}`,
     link: `/calendar?date=${date}&view=day`,
     tag: `session-${b.id}-${date}`,
-  });
-}
-
-/** An admin booked a makeup student into a coach's batch (coach requests notify on approval). */
-export async function noticeMakeupBooked(
-  studentId: string,
-  batchId: string,
-  date: string,
-  byUserId: string,
-) {
-  const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
-  if (!b || b.coachId === byUserId) return;
-  await notifyUsers([b.coachId], {
-    category: 'students',
-    icon: '➕',
-    title: `Makeup student in ${b.name}`,
-    body: `${await studentName(studentId)} joins ${onDay(date)}`,
-    link: `/attendance?batch=${b.id}&date=${date}`,
-    tag: `makeup-${studentId}-${date}`,
   });
 }

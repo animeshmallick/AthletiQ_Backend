@@ -1,5 +1,5 @@
 {
-  "id": "960edbe4-ffbc-4860-97f7-d7fd4478f44e",
+  "id": "820f540f-0c9a-4bc4-97e1-27928521a831",
   "prevId": "feb967ea-9417-4393-9997-ed019ec84daa",
   "version": "7",
   "dialect": "postgresql",
@@ -541,6 +541,18 @@
           "notNull": true,
           "default": true
         },
+        "course_months": {
+          "name": "course_months",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "course_set_on": {
+          "name": "course_set_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -676,6 +688,10 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "batches_course_months_chk": {
+          "name": "batches_course_months_chk",
+          "value": "\"batches\".\"course_months\" is null or \"batches\".\"course_months\" between 1 and 60"
+        },
         "batches_time_chk": {
           "name": "batches_time_chk",
           "value": "\"batches\".\"end_time\" > \"batches\".\"start_time\""
@@ -1083,6 +1099,36 @@
           "notNull": true,
           "default": 0
         },
+        "planned_end_on": {
+          "name": "planned_end_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "planned_reason": {
+          "name": "planned_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "planned_by_id": {
+          "name": "planned_by_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "planned_at": {
+          "name": "planned_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "planned_move_to_id": {
+          "name": "planned_move_to_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_by_id": {
           "name": "created_by_id",
           "type": "uuid",
@@ -1105,6 +1151,21 @@
         }
       },
       "indexes": {
+        "enrollments_planned_end_idx": {
+          "name": "enrollments_planned_end_idx",
+          "columns": [
+            {
+              "expression": "planned_end_on",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "enrollments_student_idx": {
           "name": "enrollments_student_idx",
           "columns": [
@@ -1189,6 +1250,32 @@
             "id"
           ],
           "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "enrollments_planned_by_id_users_id_fk": {
+          "name": "enrollments_planned_by_id_users_id_fk",
+          "tableFrom": "enrollments",
+          "tableTo": "users",
+          "columnsFrom": [
+            "planned_by_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "enrollments_planned_move_to_id_batches_id_fk": {
+          "name": "enrollments_planned_move_to_id_batches_id_fk",
+          "tableFrom": "enrollments",
+          "tableTo": "batches",
+          "columnsFrom": [
+            "planned_move_to_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "enrollments_created_by_id_users_id_fk": {
@@ -1735,6 +1822,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "outside_time": {
+          "name": "outside_time",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "note": {
           "name": "note",
           "type": "text",
@@ -1929,6 +2023,31 @@
           "primaryKey": false,
           "notNull": false
         },
+        "missed": {
+          "name": "missed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "closed_at": {
+          "name": "closed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "closed_by_id": {
+          "name": "closed_by_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "closed_reason": {
+          "name": "closed_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1987,6 +2106,19 @@
           "tableTo": "users",
           "columnsFrom": [
             "cancelled_by_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "session_cancellations_closed_by_id_users_id_fk": {
+          "name": "session_cancellations_closed_by_id_users_id_fk",
+          "tableFrom": "session_cancellations",
+          "tableTo": "users",
+          "columnsFrom": [
+            "closed_by_id"
           ],
           "columnsTo": [
             "id"
@@ -2959,6 +3091,24 @@
           "primaryKey": false,
           "notNull": false
         },
+        "lost_reason": {
+          "name": "lost_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lost_at": {
+          "name": "lost_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lost_by_id": {
+          "name": "lost_by_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3137,6 +3287,19 @@
           "tableTo": "users",
           "columnsFrom": [
             "coach_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "invoices_lost_by_id_users_id_fk": {
+          "name": "invoices_lost_by_id_users_id_fk",
+          "tableFrom": "invoices",
+          "tableTo": "users",
+          "columnsFrom": [
+            "lost_by_id"
           ],
           "columnsTo": [
             "id"
@@ -6186,7 +6349,7 @@
           "typeSchema": "public",
           "primaryKey": false,
           "notNull": true,
-          "default": "'pending'"
+          "default": "'approved'"
         },
         "reason": {
           "name": "reason",
@@ -6199,24 +6362,6 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
-        },
-        "reviewed_by_id": {
-          "name": "reviewed_by_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reviewed_at": {
-          "name": "reviewed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "review_note": {
-          "name": "review_note",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -6251,7 +6396,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"session_changes\".\"status\" in ('pending', 'approved')",
+          "where": "\"session_changes\".\"status\" = 'approved'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -6273,7 +6418,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"session_changes\".\"status\" in ('pending', 'approved') and \"session_changes\".\"original_date\" is not null",
+          "where": "\"session_changes\".\"status\" = 'approved' and \"session_changes\".\"original_date\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -6335,19 +6480,6 @@
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
-        },
-        "session_changes_reviewed_by_id_users_id_fk": {
-          "name": "session_changes_reviewed_by_id_users_id_fk",
-          "tableFrom": "session_changes",
-          "tableTo": "users",
-          "columnsFrom": [
-            "reviewed_by_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6361,6 +6493,233 @@
         "session_changes_time_chk": {
           "name": "session_changes_time_chk",
           "value": "\"session_changes\".\"end_time\" > \"session_changes\".\"start_time\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.batch_cycles": {
+      "name": "batch_cycles",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "enrollment_id": {
+          "name": "enrollment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "student_id": {
+          "name": "student_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "round_no": {
+          "name": "round_no",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "first_month": {
+          "name": "first_month",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "months": {
+          "name": "months",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "per_month": {
+          "name": "per_month",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "starts_on": {
+          "name": "starts_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ends_on": {
+          "name": "ends_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "cycle_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "ended_on": {
+          "name": "ended_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "batch_cycles_round_uq": {
+          "name": "batch_cycles_round_uq",
+          "columns": [
+            {
+              "expression": "enrollment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "round_no",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "batch_cycles_one_active_uq": {
+          "name": "batch_cycles_one_active_uq",
+          "columns": [
+            {
+              "expression": "enrollment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"batch_cycles\".\"status\" = 'active'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "batch_cycles_student_idx": {
+          "name": "batch_cycles_student_idx",
+          "columns": [
+            {
+              "expression": "student_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "batch_cycles_batch_idx": {
+          "name": "batch_cycles_batch_idx",
+          "columns": [
+            {
+              "expression": "batch_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ends_on",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "batch_cycles_enrollment_id_enrollments_id_fk": {
+          "name": "batch_cycles_enrollment_id_enrollments_id_fk",
+          "tableFrom": "batch_cycles",
+          "tableTo": "enrollments",
+          "columnsFrom": [
+            "enrollment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "batch_cycles_student_id_students_id_fk": {
+          "name": "batch_cycles_student_id_students_id_fk",
+          "tableFrom": "batch_cycles",
+          "tableTo": "students",
+          "columnsFrom": [
+            "student_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "batch_cycles_batch_id_batches_id_fk": {
+          "name": "batch_cycles_batch_id_batches_id_fk",
+          "tableFrom": "batch_cycles",
+          "tableTo": "batches",
+          "columnsFrom": [
+            "batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "batch_cycles_range_chk": {
+          "name": "batch_cycles_range_chk",
+          "value": "\"batch_cycles\".\"ends_on\" >= \"batch_cycles\".\"starts_on\""
         }
       },
       "isRLSEnabled": false
@@ -6409,7 +6768,8 @@
         "due",
         "paid",
         "refunded",
-        "cancelled"
+        "cancelled",
+        "lost"
       ]
     },
     "public.job_run_status": {
@@ -6563,11 +6923,17 @@
       "name": "session_change_status",
       "schema": "public",
       "values": [
-        "pending",
         "approved",
-        "rejected",
-        "cancelled",
-        "expired"
+        "cancelled"
+      ]
+    },
+    "public.cycle_status": {
+      "name": "cycle_status",
+      "schema": "public",
+      "values": [
+        "active",
+        "completed",
+        "exited"
       ]
     }
   },

@@ -111,7 +111,7 @@ export async function batchInsights(
             string | null
           >`(array_agg(${invoices.id} order by ${invoices.dueDate}) filter (where ${invoices.status} = 'due'))[1]`,
           lastPaidAt: sql<string | null>`max(${invoices.paidAt})`,
-          monthIssued: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} >= ${month} and ${invoices.status} <> 'cancelled'), 0)::int`,
+          monthIssued: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} >= ${month} and ${invoices.status} not in ('cancelled', 'lost')), 0)::int`,
           monthCollected: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} >= ${month} and ${invoices.status} = 'paid'), 0)::int`,
         })
         .from(invoices)

@@ -9,6 +9,7 @@ import {
   coachSessions,
   feePlans,
   locations,
+  makeupSessions,
   skillAreas,
   skills,
   sportLevels,
@@ -241,6 +242,16 @@ export async function makeAcademy() {
     feePlanId: plan.id,
   });
   return { admin, coach, otherCoach, location, batch, otherBatch, plan };
+}
+
+/** A makeup booked before makeups were withdrawn (they are still honoured). */
+export async function bookMakeup(
+  studentId: string,
+  batchId: string,
+  date: string,
+  reason = 'Exam',
+) {
+  await db.insert(makeupSessions).values({ studentId, batchId, date, reason });
 }
 
 /** Records an on-site check-in so the coach may mark attendance for those sessions. */

@@ -93,7 +93,7 @@ export const batches = pgTable(
      * yet (students just keep training month to month).
      */
     courseMonths: smallint(),
-    /** When the course length was last set: nobody completes before this day because of it. */
+    /** When the course length was last set: missed sessions are tracked from this day. */
     courseSetOn: date({ mode: 'string' }),
     ...timestamps,
   },

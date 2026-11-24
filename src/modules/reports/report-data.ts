@@ -370,7 +370,9 @@ export async function loadStudentReports(
         .sort((a, b) => b.date.localeCompare(a.date))[0]?.date ?? null;
 
     // ── Fees ──
-    const sBills = (billsBy.get(s.id) ?? []).filter((b) => b.status !== 'cancelled');
+    const sBills = (billsBy.get(s.id) ?? []).filter(
+      (b) => b.status !== 'cancelled' && b.status !== 'lost',
+    );
     const billed = sBills.reduce((n, b) => n + b.amount, 0);
     const paidBills = sBills.filter((b) => b.status === 'paid' && b.paidOn);
     const paid = paidBills.reduce((n, b) => n + b.amount, 0);

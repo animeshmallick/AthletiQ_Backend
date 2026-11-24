@@ -3,21 +3,22 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import {
+  batches,
   coachSessions,
   sessionCancellations,
   studentAttendance,
   users,
 } from '../../db/schema/index.js';
-import { addDays, diffDays, todayInAppTz, type IsoDate } from '../../lib/dates.js';
+import { addDays, diffDays, onDay, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate } from '../../lib/validation.js';
 import { currentUser } from '../../middleware/auth.js';
-import { assertBatchAccess } from '../access/access.js';
+import { assertBatchAccess, getBatchOrThrow } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { noticeSessionCancelled } from '../push/coach-notices.js';
-import { notifyInBackground } from '../push/push.service.js';
-import { requireSession } from '../schedule/schedule.js';
+import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
+import { requireSession, sessionOn } from '../schedule/schedule.js';
 
 /** Cancellation for one session, or null. */
 export async function getCancellation(batchId: string, date: IsoDate) {
@@ -113,32 +114,54 @@ cancellationsRouter.post('/:id/cancellations', async (req, res) => {
     );
   }
 
-  const [marks, checkIns] = await Promise.all([
-    db.$count(
-      studentAttendance,
-      and(eq(studentAttendance.batchId, id), eq(studentAttendance.date, body.date)),
-    ),
-    db.$count(coachSessions, and(eq(coachSessions.batchId, id), eq(coachSessions.date, body.date))),
-  ]);
-  if (marks > 0 || checkIns > 0) {
-    throw AppError.unprocessable(
-      'Attendance or a coach check-in is already recorded for this session, so it happened. Correct those records instead of cancelling.',
-      { attendance: marks, checkIns },
-    );
-  }
+  const row = await db.transaction(async (tx) => {
+    // Serialised with check-ins and attendance of this batch, so both can't be recorded.
+    await tx.select({ id: batches.id }).from(batches).where(eq(batches.id, id)).for('update');
+    const [marks, checkIns] = await Promise.all([
+      tx.$count(
+        studentAttendance,
+        and(eq(studentAttendance.batchId, id), eq(studentAttendance.date, body.date)),
+      ),
+      tx.$count(
+        coachSessions,
+        and(eq(coachSessions.batchId, id), eq(coachSessions.date, body.date)),
+      ),
+    ]);
+    if (marks > 0 || checkIns > 0) {
+      throw AppError.unprocessable(
+        'Attendance or a coach check-in is already recorded for this session, so it happened. Correct those records instead of cancelling.',
+        { attendance: marks, checkIns },
+      );
+    }
 
-  const [row] = await db
-    .insert(sessionCancellations)
-    .values({ batchId: id, date: body.date, reason: body.reason, cancelledById: user.id })
-    .returning();
-  await audit({
-    ...auditCtx(req),
-    action: 'session.cancelled',
-    entityType: 'batch',
-    entityId: id,
-    metadata: body,
+    const [added] = await tx
+      .insert(sessionCancellations)
+      .values({ batchId: id, date: body.date, reason: body.reason, cancelledById: user.id })
+      .returning();
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'session.cancelled',
+        entityType: 'batch',
+        entityId: id,
+        metadata: body,
+      },
+      tx,
+    );
+    return added;
   });
   notifyInBackground(() => noticeSessionCancelled(id, body.date, user.id, body.reason));
+  if (user.role === 'coach')
+    notifyInBackground(() =>
+      notifyAdmins({
+        category: 'sessions',
+        icon: '🚫',
+        title: `${batch.name} is cancelled ${onDay(body.date)}`,
+        body: `${user.name}: ${body.reason}. It can be rescheduled.`,
+        link: '/missed-sessions',
+        tag: `session-${id}-${body.date}`,
+      }),
+    );
   created(res, row);
 });
 
@@ -146,6 +169,9 @@ cancellationsRouter.delete('/:id/cancellations/:date', async (req, res) => {
   const { id, date } = parse(z.object({ id: zId, date: zIsoDate }), req.params);
   const user = currentUser(req);
   await assertBatchAccess(user, id, { on: date });
+  // Rescheduled: undo that first, or the batch would run twice for one session.
+  if (!(await sessionOn(await getBatchOrThrow(id), date)))
+    throw AppError.conflict('This session was rescheduled. Undo the reschedule first.');
   const [row] = await db
     .delete(sessionCancellations)
     .where(and(eq(sessionCancellations.batchId, id), eq(sessionCancellations.date, date)))

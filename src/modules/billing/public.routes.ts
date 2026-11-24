@@ -11,11 +11,7 @@ import { z } from 'zod';
 import { AppError } from '../../lib/errors.js';
 import { parse, zIdParam } from '../../lib/validation.js';
 import { describeReportLink, openReportLink } from '../reports/reports.routes.js';
-import {
-  buildCertificate,
-  certificateData,
-  verifyCertificateLink,
-} from '../courses/certificate.js';
+import { buildCertificate, certificateData, verifyCertificateLink } from '../cycles/certificate.js';
 import { getAcademySettings } from '../settings/settings.js';
 import { renderInvoicePdf } from './invoice-pdf.js';
 import { getInvoiceForUser, invoicePdfData } from './invoices.service.js';
@@ -57,7 +53,8 @@ function sendInline(res: Response, pdf: Buffer, filename: string) {
 async function signedInvoice(id: string, e: string, s: string) {
   if (!verifyInvoiceLink(id, e, s)) throw new AppError('FORBIDDEN', EXPIRED);
   const inv = await getInvoiceForUser(SYSTEM, id);
-  if (inv.status === 'cancelled') throw AppError.notFound('Invoice');
+  // Written-off invoices are closed for the family too.
+  if (inv.status === 'cancelled' || inv.status === 'lost') throw AppError.notFound('Invoice');
   return inv;
 }
 

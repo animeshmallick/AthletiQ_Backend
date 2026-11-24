@@ -23,15 +23,13 @@ import { substitutionsRouter } from './modules/substitutions/substitutions.route
 import { activityRouter } from './modules/activity/activity.routes.js';
 import { studentsRouter } from './modules/students/students.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
-import { makeupsRouter } from './modules/makeups/makeups.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { reportsRouter } from './modules/reports/reports.routes.js';
 import { fundsRouter } from './modules/funds/funds.routes.js';
 import { clientEventsRouter } from './modules/activity/client-events.js';
 import { skillsRouter } from './modules/skills/skills.routes.js';
 import { sportsRouter } from './modules/skills/sports.routes.js';
-import { coursesRouter } from './modules/courses/courses.routes.js';
-import { deliveryRouter } from './modules/courses/delivery.js';
+import { cyclesRouter, renewalsRouter } from './modules/cycles/cycles.routes.js';
 import {
   batchSessionChangesRouter,
   sessionChangesRouter,
@@ -55,8 +53,8 @@ export function apiRouter(): Router {
   api.use('/batches', cancellationsRouter);
   api.use('/batches', batchSessionChangesRouter);
   api.use('/session-changes', sessionChangesRouter);
-  api.use('/courses', coursesRouter);
-  api.use('/delivery', deliveryRouter);
+  api.use('/cycles', cyclesRouter);
+  api.use('/renewals', renewalsRouter);
   api.use('/batches', batchesRouter);
   api.use('/fee-plans', feePlansRouter);
   api.use('/students', studentsRouter);
@@ -79,7 +77,6 @@ export function apiRouter(): Router {
   // Admin only
   api.use('/registrations', requireAdmin, registrationsRouter);
   api.use('/admin', requireAdmin, adminRouter);
-  api.use('/makeups', requireAdmin, makeupsRouter);
 
   return api;
 }

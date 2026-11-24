@@ -31,6 +31,12 @@ export const sessionCancellations = pgTable(
     date: date({ mode: 'string' }).notNull(),
     reason: text().notNull(),
     cancelledById: uuid().references(() => users.id, { onDelete: 'set null' }),
+    /** True: it was never cancelled; the coach missed it (confirmed by an admin). */
+    missed: boolean().notNull().default(false),
+    /** An admin decided it won't be rescheduled. */
+    closedAt: tz(),
+    closedById: uuid().references(() => users.id, { onDelete: 'set null' }),
+    closedReason: text(),
     ...timestamps,
   },
   (t) => [uniqueIndex('session_cancellations_batch_date_uq').on(t.batchId, t.date)],
@@ -92,6 +98,8 @@ export const coachSessions = pgTable(
     checkInAccuracyM: doublePrecision(),
     checkInDistanceM: integer().notNull(),
     checkInWithinFence: boolean().notNull(),
+    /** Checked in outside the session's time (30 min before the start → its end). */
+    outsideTime: boolean().notNull().default(false),
 
     note: text(),
     /** Admin review of flagged sessions. */

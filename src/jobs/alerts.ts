@@ -57,11 +57,13 @@ export async function runSessionAlerts(now: Date = new Date()) {
     const start = toMinutes(b.startTime);
     const end = toMinutes(b.endTime);
     const at = clockLabel(b.startTime);
+    // Whoever runs it today: the approved substitute, else the batch's coach.
+    const runner = s.substitute ?? b.coach;
     const attendanceLink = `/attendance?batch=${b.id}&date=${today}`;
 
     if (!s.coachSession && mins >= start - 15 && mins < start) {
       if (
-        await notifyOnce(`remind:${b.id}:${today}`, [b.coach.id], {
+        await notifyOnce(`remind:${b.id}:${today}`, [runner.id], {
           category: 'sessions',
           icon: '⏰',
           actions: [{ label: 'Check in', link: '/' }],
@@ -75,7 +77,7 @@ export async function runSessionAlerts(now: Date = new Date()) {
     }
 
     if (!s.coachSession && mins >= start + 30 && mins < end) {
-      const coach = await notifyOnce(`nocheckin-coach:${b.id}:${today}`, [b.coach.id], {
+      const coach = await notifyOnce(`nocheckin-coach:${b.id}:${today}`, [runner.id], {
         category: 'sessions',
         icon: '📍',
         actions: [{ label: 'Check in now', link: '/' }],
@@ -87,7 +89,7 @@ export async function runSessionAlerts(now: Date = new Date()) {
       const admin = await notifyOnce(`nocheckin-admin:${b.id}:${today}`, admins, {
         category: 'sessions',
         icon: '⚠️',
-        title: `${b.coach.name} hasn't checked in`,
+        title: `${runner.name} hasn't checked in`,
         body: `${b.name} started at ${at} · ${b.location.name}`,
         link: `/calendar?date=${today}&view=day`,
         tag: `nocheckin-${b.id}`,
@@ -103,7 +105,7 @@ export async function runSessionAlerts(now: Date = new Date()) {
       }
       if (!s.hasLessonPlan) pending.push('no lesson plan');
       if (pending.length) {
-        const coach = await notifyOnce(`wrapup-coach:${b.id}:${today}`, [b.coach.id], {
+        const coach = await notifyOnce(`wrapup-coach:${b.id}:${today}`, [runner.id], {
           category: 'sessions',
           icon: '📝',
           actions: [{ label: 'Finish up', link: attendanceLink }],
@@ -115,7 +117,7 @@ export async function runSessionAlerts(now: Date = new Date()) {
         const admin = await notifyOnce(`wrapup-admin:${b.id}:${today}`, admins, {
           category: 'sessions',
           icon: '📝',
-          title: `${b.name} (${b.coach.name}) has pending items`,
+          title: `${b.name} (${runner.name}) has pending items`,
           body: pending.join(' · '),
           link: `/calendar?date=${today}&view=day`,
           tag: `wrapup-${b.id}`,

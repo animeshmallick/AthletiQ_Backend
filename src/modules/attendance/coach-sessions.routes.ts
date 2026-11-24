@@ -2,8 +2,14 @@ import { and, asc, desc, eq, gte, lte, or, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { batches, coachSessions, locations, users } from '../../db/schema/index.js';
-import { addDays, diffDays, todayInAppTz } from '../../lib/dates.js';
+import {
+  batches,
+  coachSessions,
+  locations,
+  sessionCancellations,
+  users,
+} from '../../db/schema/index.js';
+import { addDays, diffDays, instantAt, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok } from '../../lib/http.js';
 import { distanceMeters, isWithinGeofence } from '../../lib/geo.js';
@@ -17,6 +23,9 @@ import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
 import { mayRunOnSql, sessionOn, sessionOrigin, sessionsOnDay } from '../schedule/schedule.js';
 
 export const coachSessionsRouter = Router();
+
+/** Check-ins earlier than this before the start (or after the end) are flagged. */
+const EARLY_MINUTES = 30;
 
 const GpsBody = z.object({
   batchId: zId,
@@ -61,7 +70,7 @@ const toMin = (t: string) => {
 function present(s: typeof coachSessions.$inferSelect) {
   return {
     ...s,
-    flagged: !s.checkInWithinFence,
+    flagged: !s.checkInWithinFence || s.outsideTime,
     durationMinutes: Math.max(toMin(s.scheduledEnd) - toMin(s.scheduledStart), 0),
   };
 }
@@ -143,34 +152,54 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
   await assertNotCancelled(batch.id, today);
 
   const { distance, within } = evaluate(location, body.latitude, body.longitude, body.accuracy);
-  const [session] = await db
-    .insert(coachSessions)
-    .values({
-      coachId: user.id,
-      batchId: batch.id,
-      locationId: location.id,
-      date: today,
-      scheduledStart: planned.startTime,
-      scheduledEnd: planned.endTime,
-      checkInAt: new Date(),
-      checkInLat: body.latitude,
-      checkInLng: body.longitude,
-      checkInAccuracyM: body.accuracy ?? null,
-      checkInDistanceM: distance,
-      checkInWithinFence: within,
-      note: body.note,
-    })
-    .onConflictDoNothing()
-    .returning();
+  const now = Date.now();
+  const opens = instantAt(today, planned.startTime).getTime() - EARLY_MINUTES * 60_000;
+  const outsideTime = now < opens || now > instantAt(today, planned.endTime).getTime();
+  const session = await db.transaction(async (tx) => {
+    // Serialised with cancelling this session.
+    await tx.select({ id: batches.id }).from(batches).where(eq(batches.id, batch.id)).for('update');
+    const off = await tx.$count(
+      sessionCancellations,
+      and(eq(sessionCancellations.batchId, batch.id), eq(sessionCancellations.date, today)),
+    );
+    if (off) throw AppError.unprocessable('This session was cancelled');
+    const [added] = await tx
+      .insert(coachSessions)
+      .values({
+        coachId: user.id,
+        batchId: batch.id,
+        locationId: location.id,
+        date: today,
+        scheduledStart: planned.startTime,
+        scheduledEnd: planned.endTime,
+        checkInAt: new Date(),
+        checkInLat: body.latitude,
+        checkInLng: body.longitude,
+        checkInAccuracyM: body.accuracy ?? null,
+        checkInDistanceM: distance,
+        checkInWithinFence: within,
+        outsideTime,
+        note: body.note,
+      })
+      .onConflictDoNothing()
+      .returning();
+    return added;
+  });
   if (!session) throw AppError.conflict('You have already checked in for this session');
-  if (!within) {
+  if (!within || outsideTime) {
+    const why = [
+      within ? null : `${distance} m from ${location.name}`,
+      outsideTime
+        ? `session time is ${planned.startTime.slice(0, 5)}–${planned.endTime.slice(0, 5)}`
+        : null,
+    ].filter(Boolean);
     notifyInBackground(() =>
       notifyAdmins({
         category: 'sessions',
         icon: '🚩',
         actions: [{ label: 'Review', link: '/coach-sessions' }],
-        title: `${user.name} checked in away from the venue`,
-        body: `${distance} m from ${location.name} · ${batch.name}. Review the check-in.`,
+        title: `${user.name} checked in ${within ? 'outside session time' : 'away from the venue'}`,
+        body: `${why.join(' · ')} · ${batch.name}. Review the check-in.`,
         link: '/coach-sessions',
         tag: `flag-${session.id}`,
       }),
@@ -186,6 +215,11 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
 });
 
 // ─── History / admin review ──────────────────────────────────────────────────
+
+const FLAGGED = or(
+  eq(coachSessions.checkInWithinFence, false),
+  eq(coachSessions.outsideTime, true),
+)!;
 
 const ListQuery = z.object({
   coachId: zId.optional(),
@@ -206,7 +240,7 @@ coachSessionsRouter.get('/', async (req, res) => {
   if (!isAdmin(user)) filters.push(eq(coachSessions.coachId, user.id));
   else if (q.coachId) filters.push(eq(coachSessions.coachId, q.coachId));
   if (q.batchId) filters.push(eq(coachSessions.batchId, q.batchId));
-  if (q.flagged === 'true') filters.push(eq(coachSessions.checkInWithinFence, false));
+  if (q.flagged === 'true') filters.push(FLAGGED);
 
   const rows = await db
     .select({

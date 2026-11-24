@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { batches, invoices, locations, payments, students } from '../../db/schema/index.js';
-import { addDays, addMonthsClamped, todayInAppTz } from '../../lib/dates.js';
+import { addDays, addMonthsClamped, minDate, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok, pageMeta } from '../../lib/http.js';
 import {
@@ -29,14 +29,14 @@ import {
 } from './invoices.service.js';
 import { activeAdminIds, notifyInBackground, notifyUsers } from '../push/push.service.js';
 import { formatInr } from '../../lib/money.js';
+import { appendNote } from '../cycles/exits.js';
 import { postFeeSplit, reverseFeeSplit } from '../funds/ledger.js';
 import { noticeFeeShares, noticeSharesReversed } from '../funds/notices.js';
-import { releaseApplied } from '../courses/credits.js';
 
 export const invoicesRouter = Router();
 
 const ListQuery = zPagination.extend({
-  status: z.enum(['due', 'overdue', 'paid', 'refunded', 'cancelled', 'open']).optional(),
+  status: z.enum(['due', 'overdue', 'paid', 'refunded', 'cancelled', 'lost', 'open']).optional(),
   studentId: zId.optional(),
   batchId: zId.optional(),
   coachId: zId.optional(),
@@ -187,8 +187,8 @@ invoicesRouter.get('/:id/pdf', async (req, res) => {
 invoicesRouter.post('/:id/share', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const inv = await getInvoiceForUser(currentUser(req), id);
-  if (inv.status === 'cancelled')
-    throw AppError.unprocessable('Cancelled invoices cannot be shared');
+  if (inv.status === 'cancelled' || inv.status === 'lost')
+    throw AppError.unprocessable('Cancelled or lost invoices cannot be shared');
   await audit({ ...auditCtx(req), action: 'invoice.shared', entityType: 'invoice', entityId: id });
   ok(res, await buildShare(inv));
 });
@@ -224,8 +224,9 @@ invoicesRouter.post('/:id/payments', async (req, res) => {
   const inv = await getInvoiceForUser(signedIn, id); // access check
   if (body.paidOn > todayInAppTz())
     throw AppError.badRequest('Payment date cannot be in the future');
-  if (body.paidOn < inv.periodStart)
-    throw AppError.badRequest('Payment date cannot be before the billing period started');
+  // Invoices can be issued (and paid) before their period starts, e.g. at acceptance.
+  if (body.paidOn < minDate(inv.issueDate, inv.periodStart))
+    throw AppError.badRequest('Payment date cannot be before the invoice was issued');
 
   await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(invoices).where(eq(invoices.id, id)).for('update');
@@ -335,8 +336,6 @@ for (const action of ['revert', 'refund'] as const) {
         .update(invoices)
         .set(action === 'revert' ? { status: 'due', paidAt: null } : { status: 'refunded' })
         .where(eq(invoices.id, id));
-      // Refunded: the month is undone, so credit used on it goes back to the student.
-      if (action === 'refund') await releaseApplied(tx, id);
       await reverseFeeSplit(
         tx,
         paymentId,
@@ -372,8 +371,6 @@ invoicesRouter.post('/:id/cancel', requireAdmin, async (req, res) => {
       .update(invoices)
       .set({ status: 'cancelled', cancelledReason: reason })
       .where(eq(invoices.id, id));
-    // Credit used on it goes back to the student (next invoice, or owed back).
-    await releaseApplied(tx, id);
     await audit(
       {
         ...auditCtx(req),
@@ -381,6 +378,38 @@ invoicesRouter.post('/:id/cancel', requireAdmin, async (req, res) => {
         entityType: 'invoice',
         entityId: id,
         metadata: { reason },
+      },
+      tx,
+    );
+  });
+  ok(res, await getInvoiceForUser(currentUser(req), id));
+});
+
+/** Admin only: a written-off invoice is collected after all → due again. */
+invoicesRouter.post('/:id/restore-lost', requireAdmin, async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const { reason } = parse(ReversalBody, req.body);
+  await db.transaction(async (tx) => {
+    const [inv] = await tx.select().from(invoices).where(eq(invoices.id, id)).for('update');
+    if (!inv) throw AppError.notFound('Invoice');
+    if (inv.status !== 'lost') throw AppError.conflict('Only lost invoices can be restored');
+    await tx
+      .update(invoices)
+      .set({ status: 'due', lostReason: null, lostAt: null, lostById: null })
+      .where(eq(invoices.id, id));
+    await appendNote(
+      tx,
+      inv.studentId,
+      `${inv.number} (${formatInr(inv.totalAmount)}) is being collected again: ${reason}.`,
+      todayInAppTz(),
+    );
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'invoice.lost_restored',
+        entityType: 'invoice',
+        entityId: id,
+        metadata: { reason, lostReason: inv.lostReason },
       },
       tx,
     );
@@ -402,13 +431,12 @@ invoicesRouter.post('/:id/adjust', requireAdmin, async (req, res) => {
     const [inv] = await tx.select().from(invoices).where(eq(invoices.id, id)).for('update');
     if (!inv) throw AppError.notFound('Invoice');
     if (inv.status !== 'due') throw AppError.conflict('Only unpaid invoices can be adjusted');
-    // Credit already taken off stays; the discount can cover the rest.
-    if (discountAmount > inv.baseAmount - inv.creditAmount) {
+    if (discountAmount > inv.baseAmount) {
       throw new AppError('VALIDATION_ERROR', 'Discount cannot exceed the invoice amount', {
         fields: [{ path: 'discountAmount', message: 'Cannot exceed the invoice amount' }],
       });
     }
-    const totalAmount = inv.baseAmount - discountAmount - inv.creditAmount;
+    const totalAmount = inv.baseAmount - discountAmount;
     await tx
       .update(invoices)
       .set({

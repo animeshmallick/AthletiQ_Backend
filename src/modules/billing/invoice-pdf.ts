@@ -15,13 +15,11 @@ export interface InvoicePdfData {
   dueDate: string;
   periodStart: string;
   periodEnd: string;
-  status: 'due' | 'paid' | 'refunded' | 'cancelled';
+  status: 'due' | 'paid' | 'refunded' | 'cancelled' | 'lost';
   feePlanName: string;
   batchName: string | null;
   baseAmount: number;
   discountAmount: number;
-  /** Credit from an earlier month taken off (unused course sessions, shortfalls). */
-  creditAmount?: number;
   totalAmount: number;
   student: {
     fullName: string;
@@ -181,8 +179,8 @@ export function renderInvoicePdf(inv: InvoicePdfData, academy: AcademySettings):
     const watermark =
       inv.status === 'paid'
         ? { t: 'PAID', c: C.paid }
-        : inv.status === 'cancelled'
-          ? { t: 'CANCELLED', c: C.void }
+        : inv.status === 'cancelled' || inv.status === 'lost'
+          ? { t: inv.status === 'lost' ? 'CLOSED' : 'CANCELLED', c: C.void }
           : inv.status === 'refunded'
             ? { t: 'REFUNDED', c: C.void }
             : null;
@@ -237,8 +235,8 @@ export function renderInvoicePdf(inv: InvoicePdfData, academy: AcademySettings):
       ? { text: 'PAID', color: C.paid }
       : inv.status === 'refunded'
         ? { text: 'REFUNDED', color: C.void }
-        : inv.status === 'cancelled'
-          ? { text: 'CANCELLED', color: C.void }
+        : inv.status === 'cancelled' || inv.status === 'lost'
+          ? { text: inv.status === 'lost' ? 'CLOSED' : 'CANCELLED', color: C.void }
           : overdue
             ? { text: 'OVERDUE', color: C.overdue }
             : { text: 'PAYMENT DUE', color: C.due };
@@ -385,8 +383,6 @@ export function renderInvoicePdf(inv: InvoicePdfData, academy: AcademySettings):
     );
     if (inv.discountAmount > 0)
       line('Discount', 'Applied to this month', '', `- ${money(inv.discountAmount)}`, C.paid);
-    if (inv.creditAmount)
-      line('Credit', 'From an earlier month', '', `- ${money(inv.creditAmount)}`, C.paid);
 
     // Totals
     const tx = right - 250;
@@ -406,7 +402,6 @@ export function renderInvoicePdf(inv: InvoicePdfData, academy: AcademySettings):
     totalRow('Subtotal', money(inv.baseAmount));
     if (inv.discountAmount > 0)
       totalRow('Discount', `- ${money(inv.discountAmount)}`, false, C.paid);
-    if (inv.creditAmount) totalRow('Credit', `- ${money(inv.creditAmount)}`, false, C.paid);
     doc.roundedRect(tx - 10, y - 2, right - tx + 10, 28, 5).fill(C.brandSoft);
     y += 6;
     totalRow(isReceipt ? 'Amount paid' : 'Total due', money(inv.totalAmount), true, C.brand);
