@@ -3,6 +3,7 @@ import {
   type AnyPgColumn,
   boolean,
   check,
+  date,
   doublePrecision,
   index,
   integer,
@@ -87,9 +88,20 @@ export const batches = pgTable(
       .notNull()
       .references(() => sports.id, { onDelete: 'restrict' }),
     isActive: boolean().notNull().default(true),
+    /**
+     * Course length in whole months (target = days a week × 4 × months). Null: no course set up
+     * yet (students just keep training month to month).
+     */
+    courseMonths: smallint(),
+    /** When the course length was last set: nobody completes before this day because of it. */
+    courseSetOn: date({ mode: 'string' }),
     ...timestamps,
   },
   (t) => [
+    check(
+      'batches_course_months_chk',
+      sql`${t.courseMonths} is null or ${t.courseMonths} between 1 and 60`,
+    ),
     uniqueIndex('batches_name_lower_uq').on(sql`lower(${t.name})`),
     index('batches_coach_idx').on(t.coachId),
     index('batches_location_idx').on(t.locationId),

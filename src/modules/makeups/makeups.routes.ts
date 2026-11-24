@@ -16,6 +16,7 @@ import { currentUser } from '../../middleware/auth.js';
 import { getCancellation } from '../attendance/cancellations.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { notifyInBackground, notifyUsers } from '../push/push.service.js';
+import { requireSession, sessionOn } from '../schedule/schedule.js';
 
 export const makeupsRouter = Router();
 
@@ -46,6 +47,7 @@ makeupsRouter.get('/', async (req, res) => {
       batch: {
         id: batches.id,
         name: batches.name,
+        weekdays: batches.weekdays,
         startTime: batches.startTime,
         endTime: batches.endTime,
         dayTimes: batches.dayTimes,
@@ -75,12 +77,19 @@ makeupsRouter.get('/', async (req, res) => {
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(q.status === 'pending' ? asc(makeupSessions.date) : desc(makeupSessions.createdAt))
     .limit(200);
+  // The batch's time on the makeup day (a moved / extra session at its own time).
+  const times = new Map<string, { startTime: string; endTime: string }>();
+  await Promise.all(
+    rows.map(async (r) => {
+      const s = await sessionOn(r.batch, r.date);
+      times.set(r.id, s ?? timesOn(r.batch, r.date));
+    }),
+  );
   ok(
     res,
-    rows.map(({ batch: { dayTimes, ...batch }, ...r }) => ({
+    rows.map(({ batch: { dayTimes: _dt, weekdays: _wd, ...batch }, ...r }) => ({
       ...r,
-      // The batch's time on the makeup day.
-      batch: { ...batch, ...timesOn({ ...batch, dayTimes }, r.date) },
+      batch: { ...batch, ...times.get(r.id)! },
       // The session is with a different coach than the student's regular one.
       otherCoach: !!r.homeCoach?.id && r.homeCoach.id !== r.batchCoach.id,
     })),
@@ -101,6 +110,7 @@ makeupsRouter.post('/:id/approve', async (req, res) => {
   if (m.date < todayInAppTz()) throw AppError.unprocessable('This session date has already passed');
   const batch = await db.query.batches.findFirst({ where: eq(batches.id, m.batchId) });
   if (!batch?.isActive) throw AppError.unprocessable('That batch is no longer active');
+  await requireSession(batch, m.date);
   const cancelled = await getCancellation(m.batchId, m.date);
   if (cancelled) throw AppError.unprocessable(`That session was cancelled (${cancelled.reason})`);
 

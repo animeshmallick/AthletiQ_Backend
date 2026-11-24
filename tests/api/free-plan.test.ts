@@ -33,6 +33,7 @@ describe('the built-in free plan', () => {
         startTime: '07:00',
         endTime: '08:00',
         capacity: 30,
+        courseMonths: 3,
         sportId: batch.sportId,
         feePlanId: free.id,
       })
@@ -79,6 +80,7 @@ describe('excluding free students from the students list', () => {
           startTime: '07:00',
           endTime: '08:00',
           capacity: 30,
+          courseMonths: 3,
           sportId: batch.sportId,
           feePlanId: free.id,
         })

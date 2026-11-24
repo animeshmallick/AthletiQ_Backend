@@ -38,6 +38,8 @@ export const invoices = pgTable(
     baseAmount: integer().notNull(),
     discountAmount: integer().notNull().default(0),
     totalAmount: integer().notNull(),
+    /** Course / shortfall credit taken off this invoice: total = base − discount − credit. */
+    creditAmount: integer().notNull().default(0),
 
     status: invoiceStatus().notNull().default('due'),
     paidAt: tz(),
@@ -52,7 +54,10 @@ export const invoices = pgTable(
     index('invoices_status_due_idx').on(t.status, t.dueDate),
     index('invoices_issue_date_idx').on(t.issueDate),
     index('invoices_coach_idx').on(t.coachId),
-    check('invoices_amounts_chk', sql`${t.totalAmount} >= 0 and ${t.discountAmount} >= 0`),
+    check(
+      'invoices_amounts_chk',
+      sql`${t.totalAmount} >= 0 and ${t.discountAmount} >= 0 and ${t.creditAmount} >= 0`,
+    ),
   ],
 );
 

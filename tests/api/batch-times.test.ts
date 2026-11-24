@@ -63,6 +63,7 @@ describe('batch times (API)', () => {
       startTime: '17:00',
       endTime: '18:30',
       capacity: 10,
+      courseMonths: 3,
       sportId: batch.sportId,
       feePlanId: plan.id,
     };

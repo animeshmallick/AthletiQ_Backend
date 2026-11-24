@@ -4,6 +4,7 @@ import { db, type DbOrTx } from '../../db/client.js';
 import {
   batches,
   counters,
+  courseRounds,
   enrollments,
   feePlans,
   invoices,
@@ -62,6 +63,19 @@ export async function assertJoinable(
       )
       .limit(1);
     if (already) throw AppError.conflict(`Already in ${batch.name}`);
+    // A completed course waiting for a decision holds the seat: continue it through the decision.
+    const waiting = await tx.$count(
+      courseRounds,
+      and(
+        eq(courseRounds.batchId, batchId),
+        eq(courseRounds.studentId, opts.studentId),
+        eq(courseRounds.status, 'awaiting'),
+      ),
+    );
+    if (waiting && opts.excludeStudentId !== opts.studentId)
+      throw AppError.conflict(
+        `This student completed the course in ${batch.name} and is waiting for a decision. Re-admit them from Course decisions.`,
+      );
   }
   const [{ n } = { n: 0 }] = await tx
     .select({ n: sql<number>`count(*)::int` })
@@ -73,9 +87,37 @@ export async function assertJoinable(
         opts.excludeStudentId ? ne(enrollments.studentId, opts.excludeStudentId) : undefined,
       ),
     );
-  if (n >= batch.capacity)
+  if (n + (await seatsHeld(tx, batchId, opts.excludeStudentId)) >= batch.capacity)
     throw AppError.unprocessable(`${batch.name} is full (capacity ${batch.capacity})`);
   return batch;
+}
+
+/** Seats held by students who completed the course and are waiting for a decision. */
+export async function seatsHeld(tx: DbOrTx, batchId: string, exceptStudentId?: string) {
+  return tx.$count(
+    courseRounds,
+    and(
+      eq(courseRounds.batchId, batchId),
+      eq(courseRounds.status, 'awaiting'),
+      exceptStudentId ? ne(courseRounds.studentId, exceptStudentId) : undefined,
+    ),
+  );
+}
+
+/** Starts round 1 of a batch's course for a new membership (no-op without a course). */
+async function startCourse(
+  tx: DbOrTx,
+  e: { id: string; studentId: string; batchId: string; effectiveFrom: IsoDate },
+  courseMonths: number | null,
+) {
+  if (!courseMonths) return;
+  await tx.insert(courseRounds).values({
+    enrollmentId: e.id,
+    studentId: e.studentId,
+    batchId: e.batchId,
+    roundNo: 1,
+    startedOn: e.effectiveFrom,
+  });
 }
 
 export async function assertActivePlan(feePlanId: string, tx: DbOrTx = db) {
@@ -121,6 +163,8 @@ export async function joinBatch(
       createdById: input.actorId,
     })
     .returning();
+  // Joining (or rejoining) always starts the course from round 1.
+  await startCourse(tx, row!, batch.courseMonths);
   return { enrollment: row!, batch };
 }
 
@@ -166,6 +210,15 @@ export async function moveEnrollment(
       `The move date must be after ${current.effectiveFrom}, when this membership started`,
     );
   }
+  const midCourse = await tx
+    .select({ id: courseRounds.id })
+    .from(courseRounds)
+    .where(and(eq(courseRounds.enrollmentId, current.id), eq(courseRounds.status, 'active')))
+    .limit(1);
+  if (midCourse.length)
+    throw AppError.unprocessable(
+      'This student is in the middle of the course. They can move once it is complete (or leave the batch now).',
+    );
   const batch = await assertJoinable(input.toBatchId, tx, { studentId: input.studentId });
 
   await tx
@@ -191,6 +244,7 @@ export async function moveEnrollment(
       createdById: input.actorId,
     })
     .returning();
+  await startCourse(tx, next!, batch.courseMonths);
   return { previous: current, current: next!, batch };
 }
 

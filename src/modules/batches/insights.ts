@@ -17,17 +17,16 @@ import {
   students,
   users,
 } from '../../db/schema/index.js';
-import { timesOn, type DayTimes } from '../../lib/batch-times.js';
+import { type DayTimes } from '../../lib/batch-times.js';
 import {
   addDays,
-  eachDay,
-  isoWeekday,
   startOfIsoWeek,
   startOfMonth,
   todayInAppTz,
   type IsoDate,
 } from '../../lib/dates.js';
 import { cancellationsIn } from '../attendance/cancellations.js';
+import { scheduleFor, sessionOrigin } from '../schedule/schedule.js';
 import { loadBatchPlan } from '../lessons/lessons.routes.js';
 import { effectiveMonthlyFee } from '../students/students.service.js';
 
@@ -184,7 +183,11 @@ export async function batchInsights(
         ),
     ]);
 
-  const cancelled = await cancellationsIn([b.id], from8w, addDays(today, 14));
+  const [cancelled, timetable] = await Promise.all([
+    cancellationsIn([b.id], from8w, addDays(today, 14)),
+    scheduleFor([b], from8w, addDays(today, 14)),
+  ]);
+  const planned = new Map((timetable.get(b.id) ?? []).map((s) => [s.date, s]));
   const byStudent = <T extends { studentId: string }>(rows: T[]) =>
     new Map(rows.map((r) => [r.studentId, r]));
   const att = byStudent(attendance);
@@ -236,7 +239,7 @@ export async function batchInsights(
 
   // ── Sessions ──
   const scheduled = (from: IsoDate, to: IsoDate) =>
-    eachDay(from, to).filter((d) => b.weekdays.includes(isoWeekday(d)));
+    [...planned.keys()].filter((d) => d >= from && d <= to);
   const marksOn = new Map(recentMarks.map((r) => [r.date, r]));
   const checkInOn = new Map(checkIns.map((c) => [c.date, c]));
   const planOn = new Set(plans.map((p) => p.date));
@@ -245,9 +248,12 @@ export async function batchInsights(
   const session = (d: IsoDate) => {
     const m = marksOn.get(d);
     const c = checkInOn.get(d);
+    const p = planned.get(d)!;
     return {
       date: d,
-      ...timesOn(b, d),
+      startTime: p.startTime,
+      endTime: p.endTime,
+      origin: sessionOrigin(p),
       cancelled: cancelled.get(`${b.id}:${d}`) ?? null,
       substitute: subOn(d),
       marked: m?.marked ?? 0,

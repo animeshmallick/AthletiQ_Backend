@@ -137,6 +137,8 @@ export const makeupSessions = pgTable(
     date: date({ mode: 'string' }).notNull(),
     /** Optional: the regular session being made up for. */
     missedDate: date({ mode: 'string' }),
+    /** The membership this makeup counts towards (the student's batch whose session it replaces). */
+    homeBatchId: uuid().references(() => batches.id, { onDelete: 'set null' }),
     reason: text(),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
     /** Coach requests wait for an admin; admin bookings are approved immediately. */

@@ -14,7 +14,6 @@ import {
 } from '../../db/schema/index.js';
 import {
   addDays,
-  eachDay,
   isoWeekday,
   startOfIsoWeek,
   todayInAppTz,
@@ -27,6 +26,7 @@ import { currentUser, requireCoach } from '../../middleware/auth.js';
 import { assertStudentAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { cancellationsIn } from '../attendance/cancellations.js';
+import { memberSessions } from '../schedule/schedule.js';
 import { answersSchema, CURRENT_WEEKLY_TEMPLATE, getTemplate } from './templates/index.js';
 import type { AuthUser } from '../auth/auth.types.js';
 
@@ -97,13 +97,9 @@ async function attendanceForWeek(
     end,
   );
   let scheduled = makeups.filter((m) => !cancelled.has(`${m.batchId}:${m.date}`)).length;
-  for (const day of eachDay(weekStart, end)) {
-    const e = enrolls.find(
-      (x) => x.effectiveFrom <= day && (x.effectiveTo === null || x.effectiveTo >= day),
-    );
-    if (e?.trainingDays.includes(isoWeekday(day)) && !cancelled.has(`${e.batchId}:${day}`))
-      scheduled++;
-  }
+  // Home sessions as they actually ran (moved and extra sessions on their own day).
+  for (const s of await memberSessions(enrolls, weekStart, end))
+    if (!cancelled.has(`${s.batchId}:${s.date}`)) scheduled++;
   const count = (s: string) => marks.filter((m) => m.status === s).length;
   const summary = {
     scheduled,

@@ -178,3 +178,25 @@ export function onDay(date: IsoDate, today: IsoDate = todayInAppTz()): string {
   const p = dayPhrase(date, today);
   return ['today', 'tomorrow', 'yesterday'].includes(p) ? p : `on ${p}`;
 }
+
+const partsFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: APP_TIMEZONE,
+  hourCycle: 'h23',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+});
+
+/** The instant a wall-clock time (`HH:MM` or `HH:MM:SS`) on a date happens in the academy timezone. */
+export function instantAt(date: IsoDate, time: string): Date {
+  const [h = '00', m = '00', s = '00'] = time.split(':');
+  const guess = new Date(`${date}T${h.padStart(2, '0')}:${m}:${s.slice(0, 2)}Z`);
+  const p = Object.fromEntries(
+    partsFormatter.formatToParts(guess).map((x) => [x.type, Number(x.value)]),
+  ) as Record<string, number>;
+  const shown = Date.UTC(p.year!, p.month! - 1, p.day, p.hour, p.minute, p.second);
+  return new Date(guess.getTime() - (shown - guess.getTime()));
+}

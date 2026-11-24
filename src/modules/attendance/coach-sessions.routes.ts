@@ -1,10 +1,9 @@
-import { timesOn } from '../../lib/batch-times.js';
-import { and, asc, desc, eq, gte, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lte, or, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { batches, coachSessions, locations, users } from '../../db/schema/index.js';
-import { addDays, diffDays, isoWeekday, todayInAppTz } from '../../lib/dates.js';
+import { addDays, diffDays, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok } from '../../lib/http.js';
 import { distanceMeters, isWithinGeofence } from '../../lib/geo.js';
@@ -15,6 +14,7 @@ import { audit, auditCtx } from '../audit/audit.service.js';
 import { coveredBy, substitutesOn } from '../substitutions/coverage.js';
 import { assertNotCancelled, cancellationsIn } from './cancellations.js';
 import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
+import { mayRunOnSql, sessionOn, sessionOrigin, sessionsOnDay } from '../schedule/schedule.js';
 
 export const coachSessionsRouter = Router();
 
@@ -71,9 +71,7 @@ function present(s: typeof coachSessions.$inferSelect) {
 coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
   const user = currentUser(req);
   const today = todayInAppTz();
-  const weekday = isoWeekday(today);
-
-  const [todaysBatches, sessions] = await Promise.all([
+  const [candidates, sessions] = await Promise.all([
     db
       .select({ batch: batches, location: locations })
       .from(batches)
@@ -82,7 +80,7 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
         and(
           or(eq(batches.coachId, user.id), coveredBy(user.id, today)),
           eq(batches.isActive, true),
-          sql`${weekday} = any(${batches.weekdays})`,
+          mayRunOnSql(today),
         ),
       )
       .orderBy(asc(batches.startTime)),
@@ -92,17 +90,25 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
       .where(and(eq(coachSessions.coachId, user.id), eq(coachSessions.date, today))),
   ]);
 
+  const running = await sessionsOnDay(
+    candidates.map((r) => ({ ...r.batch, row: r })),
+    today,
+  );
+  const todaysBatches = running.map(({ batch: { row }, session }) => ({ ...row, session }));
   const ids = todaysBatches.map((b) => b.batch.id);
   const [cancelled, subs] = await Promise.all([
     cancellationsIn(ids, today, today),
     substitutesOn(ids, today),
   ]);
   const list = todaysBatches
-    .map((r) => ({ ...r, time: timesOn(r.batch, today) }))
+    .map((r) => ({
+      ...r,
+      time: { startTime: r.session.startTime, endTime: r.session.endTime },
+    }))
     .sort((a, b) => a.time.startTime.localeCompare(b.time.startTime));
   ok(res, {
     date: today,
-    sessions: list.map(({ batch, location, time }) => {
+    sessions: list.map(({ batch, location, time, session: planned }) => {
       const s = sessions.find((x) => x.batchId === batch.id);
       return {
         // Today's own time (a batch can run at different times on different days).
@@ -117,6 +123,7 @@ coachSessionsRouter.get('/today', requireCoach, async (req, res) => {
         },
         session: s ? present(s) : null,
         cancelled: cancelled.get(`${batch.id}:${today}`) ?? null,
+        origin: sessionOrigin(planned),
         /** You're covering this batch today as a substitute. */
         asSubstitute: batch.coachId !== user.id,
         substitute: subs.get(batch.id) ?? null,
@@ -131,8 +138,8 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
   const { batch, location } = await loadOwnBatchWithLocation(user.id, body.batchId);
   const today = todayInAppTz();
   if (!batch.isActive) throw AppError.unprocessable('This batch is inactive');
-  if (!batch.weekdays.includes(isoWeekday(today)))
-    throw AppError.unprocessable(`${batch.name} is not scheduled today`);
+  const planned = await sessionOn(batch, today);
+  if (!planned) throw AppError.unprocessable(`${batch.name} is not scheduled today`);
   await assertNotCancelled(batch.id, today);
 
   const { distance, within } = evaluate(location, body.latitude, body.longitude, body.accuracy);
@@ -143,9 +150,8 @@ coachSessionsRouter.post('/check-in', requireCoach, async (req, res) => {
       batchId: batch.id,
       locationId: location.id,
       date: today,
-      ...(({ startTime, endTime }) => ({ scheduledStart: startTime, scheduledEnd: endTime }))(
-        timesOn(batch, today),
-      ),
+      scheduledStart: planned.startTime,
+      scheduledEnd: planned.endTime,
       checkInAt: new Date(),
       checkInLat: body.latitude,
       checkInLng: body.longitude,

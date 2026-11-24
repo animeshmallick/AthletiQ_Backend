@@ -5,10 +5,10 @@
 import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { batches, sessionCancellations } from '../db/schema/index.js';
-import { onDay } from '../lib/batch-times.js';
-import { isoWeekday, todayInAppTz } from '../lib/dates.js';
+import { todayInAppTz } from '../lib/dates.js';
 import { logger } from '../lib/logger.js';
 import { notifyUsers, pushEnabled } from '../modules/push/push.service.js';
+import { sessionsOnDay } from '../modules/schedule/schedule.js';
 
 /** "17:00:00" → "5:00 pm" */
 export function clock(time: string): string {
@@ -19,7 +19,6 @@ export function clock(time: string): string {
 
 export async function sendSessionReminders(today = todayInAppTz()) {
   if (!pushEnabled()) return { coaches: 0 };
-  const weekday = isoWeekday(today);
   const [active, cancelled] = await Promise.all([
     db.select().from(batches).where(eq(batches.isActive, true)),
     db
@@ -29,9 +28,10 @@ export async function sendSessionReminders(today = todayInAppTz()) {
   ]);
   const off = new Set(cancelled.map((c) => c.batchId));
   const byCoach = new Map<string, typeof active>();
-  for (const b of active) {
-    if (!b.weekdays.includes(weekday) || off.has(b.id)) continue;
-    byCoach.set(b.coachId, [...(byCoach.get(b.coachId) ?? []), onDay(b, today)]);
+  for (const { batch: b, session } of await sessionsOnDay(active, today)) {
+    if (off.has(b.id)) continue;
+    const at = { ...b, startTime: session.startTime, endTime: session.endTime };
+    byCoach.set(b.coachId, [...(byCoach.get(b.coachId) ?? []), at]);
   }
   for (const [coachId, list] of byCoach) {
     list.sort((a, b) => a.startTime.localeCompare(b.startTime));

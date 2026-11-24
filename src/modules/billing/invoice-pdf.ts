@@ -20,6 +20,8 @@ export interface InvoicePdfData {
   batchName: string | null;
   baseAmount: number;
   discountAmount: number;
+  /** Credit from an earlier month taken off (unused course sessions, shortfalls). */
+  creditAmount?: number;
   totalAmount: number;
   student: {
     fullName: string;
@@ -383,6 +385,8 @@ export function renderInvoicePdf(inv: InvoicePdfData, academy: AcademySettings):
     );
     if (inv.discountAmount > 0)
       line('Discount', 'Applied to this month', '', `- ${money(inv.discountAmount)}`, C.paid);
+    if (inv.creditAmount)
+      line('Credit', 'From an earlier month', '', `- ${money(inv.creditAmount)}`, C.paid);
 
     // Totals
     const tx = right - 250;
@@ -402,6 +406,7 @@ export function renderInvoicePdf(inv: InvoicePdfData, academy: AcademySettings):
     totalRow('Subtotal', money(inv.baseAmount));
     if (inv.discountAmount > 0)
       totalRow('Discount', `- ${money(inv.discountAmount)}`, false, C.paid);
+    if (inv.creditAmount) totalRow('Credit', `- ${money(inv.creditAmount)}`, false, C.paid);
     doc.roundedRect(tx - 10, y - 2, right - tx + 10, 28, 5).fill(C.brandSoft);
     y += 6;
     totalRow(isReceipt ? 'Amount paid' : 'Total due', money(inv.totalAmount), true, C.brand);

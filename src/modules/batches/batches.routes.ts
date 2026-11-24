@@ -23,6 +23,8 @@ import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
 import { coveringNowOrLater, myCoverage } from '../substitutions/coverage.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
+import { LOCK as COURSE_LOCK, evaluateCourses, replayBatch } from '../courses/rounds.js';
+import { seatsHeld } from '../students/students.service.js';
 import { batchInsights } from './insights.js';
 import { currentMembers, expectedRoster } from './roster.js';
 import { noticeBatchAssigned, noticeBatchChanged } from '../push/coach-notices.js';
@@ -51,6 +53,8 @@ function batchSelect(members: ReturnType<typeof memberCounts>) {
     capacity: batches.capacity,
     coachFeedback: batches.coachFeedback,
     isActive: batches.isActive,
+    /** Course length in months (null: not set up yet). Target = days a week × 4 × months. */
+    courseMonths: batches.courseMonths,
     createdAt: batches.createdAt,
     sport: { id: sports.id, name: sports.name },
     feePlan: {
@@ -175,6 +179,11 @@ const BatchBody = z.object({
   /** Coach feedback (weekly reports, assessments, plan reminders). Only free batches can opt out. */
   coachFeedback: z.boolean().default(true),
   isActive: z.boolean().default(true),
+  /**
+   * Course length in whole months (target = days a week × 4 × months). Once set it can be
+   * changed (it applies to everyone at once) but not removed.
+   */
+  courseMonths: z.number().int().min(1).max(60).optional(),
 });
 
 const DAY_NAMES = [
@@ -238,8 +247,13 @@ async function assertLocation(locationId: string) {
   if (!l.isActive) throw AppError.unprocessable('Selected location is inactive');
 }
 
+/** New batches must say how long their course is. */
+const CreateBody = BatchBody.extend({
+  courseMonths: z.number({ error: 'Choose the course length in months' }).int().min(1).max(60),
+});
+
 batchesRouter.post('/', requireAdmin, async (req, res) => {
-  const body = parse(BatchBody, req.body);
+  const body = parse(CreateBody, req.body);
   body.dayTimes = timings(body.weekdays, body.startTime, body.endTime, body.dayTimes);
   const [, , , plan] = await Promise.all([
     assertCoach(body.coachId),
@@ -249,7 +263,10 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
   ]);
   // Paying students always get feedback; only a free batch can be attendance-only.
   if (plan.monthlyFee > 0) body.coachFeedback = true;
-  const [batch] = await db.insert(batches).values(body).returning();
+  const [batch] = await db
+    .insert(batches)
+    .values({ ...body, courseSetOn: body.courseMonths ? todayInAppTz() : null })
+    .returning();
   await audit({
     ...auditCtx(req),
     action: 'batch.created',
@@ -288,26 +305,57 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
   }
 
   const members = await currentMembers(id);
-  if (body.capacity !== undefined && body.capacity < members.length) {
+  // Seats held by students who completed the course and wait for a decision count too.
+  const held = await seatsHeld(db, id);
+  if (body.capacity !== undefined && body.capacity < members.length + held) {
+    const n = members.length + held;
     throw AppError.unprocessable(
-      `This batch has ${members.length} students. Capacity can't be less than that.`,
-      { fields: [{ path: 'capacity', message: `At least ${members.length}` }] },
+      `This batch has ${n} students${held ? ` (${held} waiting for a course decision)` : ''}. Capacity can't be less than that.`,
+      { fields: [{ path: 'capacity', message: `At least ${n}` }] },
     );
   }
+  const courseChanged =
+    body.courseMonths !== undefined && body.courseMonths !== existing.courseMonths;
+  // A shorter course or fewer days lowers the target: nobody completes before today because of it.
+  const targetChanged = courseChanged || (daysChanged && existing.courseMonths !== null);
   if (body.isActive === false && members.length) {
     throw AppError.unprocessable('Move all students out of this batch before deactivating it.');
   }
 
-  const batch = await db.transaction(async (tx) => {
-    const [updated] = await tx.update(batches).set(body).where(eq(batches.id, id)).returning();
+  const today = todayInAppTz();
+  const { batch, replay } = await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${COURSE_LOCK})`);
+    const [updated] = await tx
+      .update(batches)
+      .set({ ...body, ...(targetChanged ? { courseSetOn: today } : {}) })
+      .where(eq(batches.id, id))
+      .returning();
+    // First course set-up: replay each member's attendance into rounds (history only).
+    const replay =
+      courseChanged && existing.courseMonths === null
+        ? await replayBatch(tx, updated!, today)
+        : null;
+    if (courseChanged)
+      await audit(
+        {
+          ...auditCtx(req),
+          action: existing.courseMonths === null ? 'batch.course_set_up' : 'batch.course_changed',
+          entityType: 'batch',
+          entityId: id,
+          metadata: { from: existing.courseMonths, to: body.courseMonths, replay },
+        },
+        tx,
+      );
     // Students train on every day the batch runs.
     if (daysChanged)
       await tx
         .update(enrollments)
         .set({ trainingDays: [...weekdays].sort((a, b) => a - b) })
         .where(and(eq(enrollments.batchId, id), isNull(enrollments.effectiveTo)));
-    return updated!;
+    return { batch: updated!, replay };
   });
+  // The target may have changed: completions happen right away (billing included).
+  if (targetChanged) await evaluateCourses(today, { batchId: id, actorId: currentUser(req).id });
   await audit({
     ...auditCtx(req),
     action:
@@ -317,6 +365,7 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
     entityType: 'batch',
     entityId: id,
     metadata: {
+      replay,
       changes: body,
       previousCoachId: existing.coachId,
       previousFeePlanId: body.feePlanId ? existing.feePlanId : undefined,

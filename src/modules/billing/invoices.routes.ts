@@ -31,6 +31,7 @@ import { activeAdminIds, notifyInBackground, notifyUsers } from '../push/push.se
 import { formatInr } from '../../lib/money.js';
 import { postFeeSplit, reverseFeeSplit } from '../funds/ledger.js';
 import { noticeFeeShares, noticeSharesReversed } from '../funds/notices.js';
+import { releaseApplied } from '../courses/credits.js';
 
 export const invoicesRouter = Router();
 
@@ -334,6 +335,8 @@ for (const action of ['revert', 'refund'] as const) {
         .update(invoices)
         .set(action === 'revert' ? { status: 'due', paidAt: null } : { status: 'refunded' })
         .where(eq(invoices.id, id));
+      // Refunded: the month is undone, so credit used on it goes back to the student.
+      if (action === 'refund') await releaseApplied(tx, id);
       await reverseFeeSplit(
         tx,
         paymentId,
@@ -369,6 +372,8 @@ invoicesRouter.post('/:id/cancel', requireAdmin, async (req, res) => {
       .update(invoices)
       .set({ status: 'cancelled', cancelledReason: reason })
       .where(eq(invoices.id, id));
+    // Credit used on it goes back to the student (next invoice, or owed back).
+    await releaseApplied(tx, id);
     await audit(
       {
         ...auditCtx(req),
@@ -397,12 +402,13 @@ invoicesRouter.post('/:id/adjust', requireAdmin, async (req, res) => {
     const [inv] = await tx.select().from(invoices).where(eq(invoices.id, id)).for('update');
     if (!inv) throw AppError.notFound('Invoice');
     if (inv.status !== 'due') throw AppError.conflict('Only unpaid invoices can be adjusted');
-    if (discountAmount > inv.baseAmount) {
+    // Credit already taken off stays; the discount can cover the rest.
+    if (discountAmount > inv.baseAmount - inv.creditAmount) {
       throw new AppError('VALIDATION_ERROR', 'Discount cannot exceed the invoice amount', {
         fields: [{ path: 'discountAmount', message: 'Cannot exceed the invoice amount' }],
       });
     }
-    const totalAmount = inv.baseAmount - discountAmount;
+    const totalAmount = inv.baseAmount - discountAmount - inv.creditAmount;
     await tx
       .update(invoices)
       .set({

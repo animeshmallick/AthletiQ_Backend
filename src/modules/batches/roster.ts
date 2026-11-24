@@ -1,6 +1,7 @@
 import { and, asc, eq, gte, isNull, lte, or, sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { enrollments, makeupSessions, students } from '../../db/schema/index.js';
+import { batches, enrollments, makeupSessions, students } from '../../db/schema/index.js';
+import { sessionOn } from '../schedule/schedule.js';
 import { isoWeekday, type IsoDate } from '../../lib/dates.js';
 
 export interface RosterEntry {
@@ -24,11 +25,27 @@ function enrolledOn(batchId: string, date: IsoDate) {
 }
 
 /**
- * Students expected at a batch session: home-batch students whose training days include the
- * session's weekday, plus students with a one-off makeup booked into this batch for that date.
+ * Who is expected at the batch's session on `date`, given what kind of session it is:
+ *  - regular: members on that day whose training days include its weekday;
+ *  - moved:   members on the *original* day (the session they were booked into);
+ *  - extra:   every member on that day.
+ */
+async function homeFilter(batchId: string, date: IsoDate) {
+  const batch = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
+  const session = batch ? await sessionOn(batch, date) : null;
+  // No session that day (not a batch day, or moved away): nobody from the batch is expected.
+  if (!session) return sql`false`;
+  if (session.kind === 'extra') return enrolledOn(batchId, date);
+  const day = session.kind === 'moved' ? session.originalDate! : date;
+  return and(enrolledOn(batchId, day), sql`${isoWeekday(day)} = any(${enrollments.trainingDays})`);
+}
+
+/**
+ * Students expected at a batch session: home-batch students (see `homeFilter`), plus students
+ * with a one-off makeup booked into this batch for that date.
  */
 export async function expectedRoster(batchId: string, date: IsoDate): Promise<RosterEntry[]> {
-  const weekday = isoWeekday(date);
+  const home = await homeFilter(batchId, date);
 
   const [regular, makeups] = await Promise.all([
     db
@@ -40,7 +57,7 @@ export async function expectedRoster(batchId: string, date: IsoDate): Promise<Ro
       })
       .from(enrollments)
       .innerJoin(students, eq(students.id, enrollments.studentId))
-      .where(and(enrolledOn(batchId, date), sql`${weekday} = any(${enrollments.trainingDays})`))
+      .where(home)
       .orderBy(asc(students.fullName)),
     db
       .select({

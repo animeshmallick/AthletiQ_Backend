@@ -28,14 +28,7 @@ import {
   type SessionBlock,
 } from '../../db/schema/index.js';
 import { timesOn } from '../../lib/batch-times.js';
-import {
-  addDays,
-  diffDays,
-  eachDay,
-  isoWeekday,
-  todayInAppTz,
-  type IsoDate,
-} from '../../lib/dates.js';
+import { addDays, diffDays, isoWeekday, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { noContent, ok } from '../../lib/http.js';
 import { parse, zId, zIsoDate, zName, zOptionalText } from '../../lib/validation.js';
@@ -44,6 +37,12 @@ import { assertBatchAccess, isAdmin, isSubstituteFor } from '../access/access.js
 import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { cancellationsIn, getCancellation } from '../attendance/cancellations.js';
+import {
+  approvedChanges,
+  scheduleFor,
+  sessionOn,
+  type ScheduledSession,
+} from '../schedule/schedule.js';
 
 export const lessonsRouter = Router();
 
@@ -327,17 +326,23 @@ lessonsRouter.post('/batch-plan/copy', requireCoach, async (req, res) => {
 
 /** Why this day can't have a session plan (not a session day / cancelled), or null. */
 async function sessionBlocked(batch: BatchRow, date: IsoDate): Promise<string | null> {
-  if (!batch.weekdays.includes(isoWeekday(date)))
+  if (!(await sessionOn(batch, date))) {
+    const moved = (await approvedChanges([batch.id], date, date)).find(
+      (c) => c.originalDate === date && c.date !== date,
+    );
+    if (moved) return `This session was moved to ${moved.date}.`;
     return `${batch.name} doesn't run on ${WEEKDAY[isoWeekday(date)]}s.`;
+  }
   const cancelled = await getCancellation(batch.id, date);
   if (cancelled) return `This session was cancelled (${cancelled.reason}).`;
   return null;
 }
 
-const dayMinutes = (batch: Timed, date: IsoDate) => {
-  const t = timesOn(batch, date);
+/** Length of the session on `date` (its moved/extra time when it has one). */
+async function dayMinutes(batch: BatchRow, date: IsoDate) {
+  const t = (await sessionOn(batch, date)) ?? timesOn(batch, date);
   return toMin(t.endTime) - toMin(t.startTime);
-};
+}
 
 lessonsRouter.get('/session', async (req, res) => {
   const q = parse(z.object({ batchId: zId, date: zIsoDate }), req.query);
@@ -374,7 +379,7 @@ lessonsRouter.get('/session', async (req, res) => {
   ok(res, {
     batch: batchInfo(batch),
     date: q.date,
-    minutes: dayMinutes(batch, q.date),
+    minutes: await dayMinutes(batch, q.date),
     lockedReason: await sessionBlocked(batch, q.date),
     /** 'session': filled in for this day; 'batch': not filled yet (batch blocks); 'none': no plan. */
     source: own ? 'session' : plan ? 'batch' : 'none',
@@ -403,7 +408,7 @@ lessonsRouter.put('/session', requireCoach, async (req, res) => {
   const blocked = await sessionBlocked(batch, body.date);
   if (blocked) throw AppError.unprocessable(blocked);
   checkDrillMinutes(body.blocks);
-  const length = dayMinutes(batch, body.date);
+  const length = await dayMinutes(batch, body.date);
   const total = sumMinutes(body.blocks);
   if (total !== length)
     throw AppError.unprocessable(
@@ -593,6 +598,9 @@ lessonsRouter.get('/insights', async (req, res) => {
       id: batches.id,
       name: batches.name,
       weekdays: batches.weekdays,
+      startTime: batches.startTime,
+      endTime: batches.endTime,
+      dayTimes: batches.dayTimes,
       coachFeedback: batches.coachFeedback,
     })
     .from(batches)
@@ -628,7 +636,7 @@ lessonsRouter.get('/insights', async (req, res) => {
         ])
       : [new Map<string, string>(), []];
 
-  const days = to >= q.from ? eachDay(q.from, to) : [];
+  const schedule = to >= q.from ? await scheduleFor(list, q.from, to) : new Map();
   const filledKey = new Set(filled.map((f) => `${f.batchId}:${f.date}`));
   const weekOf = (d: IsoDate) => addDays(d, 1 - isoWeekday(d));
   const weeks = new Map<string, { start: IsoDate; sessions: number; filled: number }>();
@@ -636,8 +644,8 @@ lessonsRouter.get('/insights', async (req, res) => {
   const perBatch = list.map((b) => {
     let sessions = 0;
     let done = 0;
-    for (const d of days) {
-      if (!b.weekdays.includes(isoWeekday(d)) || cancelled.has(`${b.id}:${d}`)) continue;
+    for (const { date: d } of (schedule.get(b.id) ?? []) as ScheduledSession[]) {
+      if (cancelled.has(`${b.id}:${d}`)) continue;
       sessions++;
       const isFilled = filledKey.has(`${b.id}:${d}`);
       if (isFilled) done++;

@@ -19,7 +19,12 @@ const at = (ist: string) => {
   const utc = h! * 60 + m! - 330;
   return `${String(Math.floor(utc / 60)).padStart(2, '0')}:${String(utc % 60).padStart(2, '0')}:00`;
 };
-const kinds = (r: { items: Task[] }) => r.items.map((t) => t.kind).sort();
+// Course set-up is an academy to-do of its own (tested with courses); these tests are about sessions.
+const kinds = (r: { items: Task[] }) =>
+  r.items
+    .map((t) => t.kind)
+    .filter((k) => k !== 'course-setup')
+    .sort();
 const find = (r: { items: Task[] }, kind: string) => r.items.find((t) => t.kind === kind);
 
 async function academyToday() {

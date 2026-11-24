@@ -30,6 +30,12 @@ import { fundsRouter } from './modules/funds/funds.routes.js';
 import { clientEventsRouter } from './modules/activity/client-events.js';
 import { skillsRouter } from './modules/skills/skills.routes.js';
 import { sportsRouter } from './modules/skills/sports.routes.js';
+import { coursesRouter } from './modules/courses/courses.routes.js';
+import { deliveryRouter } from './modules/courses/delivery.js';
+import {
+  batchSessionChangesRouter,
+  sessionChangesRouter,
+} from './modules/schedule/session-changes.js';
 
 /** Versioned API. Mounted at /api/v1. */
 export function apiRouter(): Router {
@@ -47,6 +53,10 @@ export function apiRouter(): Router {
   api.use('/users', usersRouter);
   api.use('/locations', locationsRouter);
   api.use('/batches', cancellationsRouter);
+  api.use('/batches', batchSessionChangesRouter);
+  api.use('/session-changes', sessionChangesRouter);
+  api.use('/courses', coursesRouter);
+  api.use('/delivery', deliveryRouter);
   api.use('/batches', batchesRouter);
   api.use('/fee-plans', feePlansRouter);
   api.use('/students', studentsRouter);

@@ -14,12 +14,15 @@ import {
   sql,
   type SQL,
   gte,
+  lte,
+  ne,
 } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import {
   batches,
+  courseRounds,
   enrollments,
   feePlans,
   invoices,
@@ -30,7 +33,7 @@ import {
   weeklyFeedback,
   skillAssessments,
 } from '../../db/schema/index.js';
-import { isoWeekday, minDate, onDay, todayInAppTz, addDays } from '../../lib/dates.js';
+import { minDate, onDay, todayInAppTz, addDays } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok, pageMeta } from '../../lib/http.js';
 import {
@@ -58,6 +61,9 @@ import {
 } from '../push/coach-notices.js';
 import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
 import { assertNotCancelled } from '../attendance/cancellations.js';
+import { releaseApplied } from '../courses/credits.js';
+import { closeRounds } from '../courses/rounds.js';
+import { requireSession } from '../schedule/schedule.js';
 
 export const studentsRouter = Router();
 
@@ -409,6 +415,29 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
           .update(enrollments)
           .set({ ...billing, effectiveFrom: body.joiningDate })
           .where(eq(enrollments.id, e.id));
+        // The course counts from the corrected day (only while nothing has completed).
+        await tx
+          .update(courseRounds)
+          .set({ startedOn: body.joiningDate })
+          .where(
+            and(
+              eq(courseRounds.enrollmentId, e.id),
+              eq(courseRounds.roundNo, 1),
+              eq(courseRounds.status, 'active'),
+            ),
+          );
+        // Credit used on the cancelled invoices goes back to the membership.
+        for (const inv of await tx
+          .select({ id: invoices.id })
+          .from(invoices)
+          .where(
+            and(
+              eq(invoices.enrollmentId, e.id),
+              eq(invoices.status, 'cancelled'),
+              eq(invoices.cancelledReason, 'Joining date corrected'),
+            ),
+          ))
+          await releaseApplied(tx, inv.id);
       }
     }
 
@@ -588,6 +617,13 @@ studentsRouter.post('/:id/batches/:enrollmentId/leave', requireAdmin, async (req
     if (body.leftOn < e.effectiveFrom)
       throw AppError.badRequest(`The last day cannot be before they joined (${e.effectiveFrom})`);
     await tx.update(enrollments).set({ effectiveTo: body.leftOn }).where(eq(enrollments.id, e.id));
+    await closeRounds(tx, {
+      studentId: id,
+      enrollmentIds: [e.id],
+      leftOn: body.leftOn,
+      actorId: currentUser(req).id,
+      academy: false,
+    });
     await tx
       .delete(makeupSessions)
       .where(
@@ -646,6 +682,15 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
         .update(enrollments)
         .set({ effectiveTo: body.leftOn })
         .where(and(eq(enrollments.studentId, id), isNull(enrollments.effectiveTo)));
+    // Courses end too: in progress → left; a completion waiting for a decision → left, its credit
+    // owed back.
+    await closeRounds(tx, {
+      studentId: id,
+      enrollmentIds: open.map((e) => e.id),
+      leftOn: body.leftOn,
+      actorId: currentUser(req).id,
+      academy: true,
+    });
     await tx
       .delete(makeupSessions)
       .where(and(eq(makeupSessions.studentId, id), gt(makeupSessions.date, body.leftOn)));
@@ -678,7 +723,48 @@ const MakeupBody = z.object({
   date: zIsoDate,
   missedDate: zIsoDate.nullable().optional(),
   reason: zOptionalText(500),
+  /** Which of the student's batches this makeup counts for (needed when they have several). */
+  homeBatchId: zId.nullable().optional(),
 });
+
+/**
+ * The batch a makeup counts for: the one given, or the student's only batch on that day (other
+ * than the one visited). With several, the caller must say when any of them has a course.
+ */
+async function makeupHome(
+  studentId: string,
+  visited: string,
+  day: string,
+  given: string | null | undefined,
+) {
+  const options = await db
+    .select({
+      batchId: enrollments.batchId,
+      courseMonths: batches.courseMonths,
+      name: batches.name,
+    })
+    .from(enrollments)
+    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    .where(
+      and(
+        eq(enrollments.studentId, studentId),
+        ne(enrollments.batchId, visited),
+        lte(enrollments.effectiveFrom, day),
+        or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, day)),
+      ),
+    );
+  if (given) {
+    if (!options.some((o) => o.batchId === given))
+      throw AppError.badRequest('The makeup must count for one of the student’s other batches');
+    return given;
+  }
+  if (options.length === 1) return options[0]!.batchId;
+  if (options.length > 1 && options.some((o) => o.courseMonths))
+    throw new AppError('VALIDATION_ERROR', 'Choose which batch this makeup counts for', {
+      fields: [{ path: 'homeBatchId', message: options.map((o) => o.name).join(' or ') }],
+    });
+  return null;
+}
 
 /**
  * One-off session in another batch/day.
@@ -697,9 +783,7 @@ studentsRouter.post('/:id/makeups', async (req, res) => {
 
   const batch = await db.query.batches.findFirst({ where: eq(batches.id, body.batchId) });
   if (!batch?.isActive) throw AppError.unprocessable('Selected batch is not active');
-  if (!batch.weekdays.includes(isoWeekday(body.date))) {
-    throw AppError.unprocessable(`${batch.name} does not run on that day`);
-  }
+  await requireSession(batch, body.date);
   if (body.date < s.joiningDate)
     throw AppError.unprocessable('Makeup date is before the student joined');
   const admin = user.role === 'admin';
@@ -709,6 +793,12 @@ studentsRouter.post('/:id/makeups', async (req, res) => {
     );
   }
   await assertNotCancelled(batch.id, body.date);
+  const homeBatchId = await makeupHome(
+    id,
+    batch.id,
+    body.missedDate ?? body.date,
+    body.homeBatchId,
+  );
 
   // A previously rejected request for the same session can be asked for again.
   await db
@@ -726,6 +816,7 @@ studentsRouter.post('/:id/makeups', async (req, res) => {
     .values({
       studentId: id,
       ...body,
+      homeBatchId,
       missedDate: body.missedDate ?? null,
       createdById: user.id,
       status: admin ? 'approved' : 'pending',

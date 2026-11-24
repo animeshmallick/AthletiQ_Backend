@@ -226,6 +226,7 @@ describe('batches', () => {
       startTime: '17:00',
       endTime: '18:30',
       capacity: 12,
+      courseMonths: 3,
       sportId: batch.sportId,
       feePlanId: plan.id, // 3 days a week, like the batch
     };
@@ -254,6 +255,7 @@ describe('batches', () => {
       weekdays: [1, 3, 6],
       startTime: '17:00:00',
       capacity: 12,
+      courseMonths: 3,
       feePlanId: plan.id,
     });
 
@@ -262,6 +264,11 @@ describe('batches', () => {
     await api.post('/api/v1/batches', { ...noCapacity, name: 'E0' }).expect(400);
     await api.post('/api/v1/batches', { ...body, name: 'E0', capacity: null }).expect(400);
     await api.post('/api/v1/batches', { ...body, name: 'E0', capacity: 0 }).expect(400);
+    // Every new batch has a course length (target = days a week × 4 × months).
+    const { courseMonths: _m, ...noCourse } = body;
+    const noCourseRes = await api.post('/api/v1/batches', { ...noCourse, name: 'E0' }).expect(400);
+    expect(JSON.stringify(noCourseRes.body)).toContain('course length');
+    await api.post('/api/v1/batches', { ...body, name: 'E0', courseMonths: 0 }).expect(400);
 
     await api.post('/api/v1/batches', { ...body, name: 'E2', endTime: '16:00' }).expect(400);
     await api.post('/api/v1/batches', { ...body, name: 'E3', coachId: admin.id }).expect(422);

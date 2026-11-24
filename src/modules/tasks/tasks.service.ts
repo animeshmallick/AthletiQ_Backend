@@ -2,7 +2,7 @@
  * "What needs my attention right now?" — one answer used by the header bell, the tab badges and
  * the scheduled alerts. Coaches get their own sessions; admins get academy-wide items.
  */
-import { and, count, eq, isNull, lt } from 'drizzle-orm';
+import { and, count, eq, isNull, lt, sql } from 'drizzle-orm';
 import { APP_TIMEZONE } from '../../config/constants.js';
 import { db } from '../../db/client.js';
 import {
@@ -11,7 +11,13 @@ import {
   batchSubstitutions,
   makeupSessions,
   registrationRequests,
+  sessionChanges,
+  batches,
+  courseRounds,
+  studentCredits,
+  sessionShortfalls,
 } from '../../db/schema/index.js';
+import { formatInr } from '../../lib/money.js';
 import { endOfMonth, todayInAppTz } from '../../lib/dates.js';
 
 const endOfMonthDay = (d: string) => Number(endOfMonth(d).slice(8, 10));
@@ -36,6 +42,12 @@ export interface Task {
     | 'overdue-fees'
     | 'makeup-requests'
     | 'substitute-requests'
+    | 'reschedule-requests'
+    | 'course-setup'
+    | 'course-decisions'
+    | 'refunds-due'
+    | 'session-shortfalls'
+    | 'delivery-risk'
     | 'skill-assessments';
   severity: TaskSeverity;
   title: string;
@@ -153,6 +165,23 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
   const today = todayInAppTz(now);
 
   if (user.role === 'coach') {
+    // Students who may get fewer sessions than they pay for this month: add an extra session.
+    const [risk] = await db
+      .select({ n: count() })
+      .from(sessionShortfalls)
+      .innerJoin(batches, eq(batches.id, sessionShortfalls.batchId))
+      .where(and(eq(sessionShortfalls.status, 'at_risk'), eq(batches.coachId, user.id)));
+    if (risk!.n > 0)
+      tasks.push({
+        id: 'delivery-risk',
+        kind: 'delivery-risk',
+        severity: 'warning',
+        title: `${risk!.n} student${risk!.n === 1 ? '' : 's'} may miss sessions this month`,
+        detail: 'Fewer sessions are scheduled than they pay for. Add an extra session.',
+        link: '/delivery',
+        screen: '/delivery',
+        count: risk!.n,
+      });
     const board = await weekBoard(user, lastCompletedWeek());
     const open = board.summary.pending + board.summary.draft;
     if (open > 0) {
@@ -189,7 +218,18 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
       }
     }
   } else {
-    const [[regs], [flags], [overdue], [makeups], [subs]] = await Promise.all([
+    const [
+      [regs],
+      [flags],
+      [overdue],
+      [makeups],
+      [subs],
+      [moves],
+      [setup],
+      [decisions],
+      [shorts],
+      [refunds],
+    ] = await Promise.all([
       db
         .select({ n: count() })
         .from(registrationRequests)
@@ -207,7 +247,81 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
         .select({ n: count() })
         .from(batchSubstitutions)
         .where(eq(batchSubstitutions.status, 'pending')),
+      db.select({ n: count() }).from(sessionChanges).where(eq(sessionChanges.status, 'pending')),
+      db
+        .select({ n: count() })
+        .from(batches)
+        .where(and(eq(batches.isActive, true), isNull(batches.courseMonths))),
+      db.select({ n: count() }).from(courseRounds).where(eq(courseRounds.status, 'awaiting')),
+      db
+        .select({ n: count() })
+        .from(sessionShortfalls)
+        .where(eq(sessionShortfalls.status, 'short')),
+      db
+        .select({ n: count(), total: sql<number>`coalesce(sum(${studentCredits.amount}), 0)::int` })
+        .from(studentCredits)
+        .where(eq(studentCredits.status, 'refund_due')),
     ]);
+    if (shorts!.n > 0) {
+      tasks.push({
+        id: 'session-shortfalls',
+        kind: 'session-shortfalls',
+        severity: 'warning',
+        title: `${shorts!.n} month${shorts!.n === 1 ? '' : 's'} delivered short`,
+        detail: 'Students got fewer sessions than paid for: discount, extra session or dismiss',
+        link: '/delivery',
+        screen: '/delivery',
+        count: shorts!.n,
+      });
+    }
+    if (decisions!.n > 0) {
+      tasks.push({
+        id: 'course-decisions',
+        kind: 'course-decisions',
+        severity: 'warning',
+        title: `${decisions!.n} completed course${decisions!.n === 1 ? '' : 's'} to decide`,
+        detail: 'Re-admit, move to another batch, or leave (paused from the roster meanwhile)',
+        link: '/courses',
+        screen: '/courses',
+        count: decisions!.n,
+      });
+    }
+    if (refunds!.n > 0) {
+      tasks.push({
+        id: 'refunds-due',
+        kind: 'refunds-due',
+        severity: 'warning',
+        title: `${refunds!.n} refund${refunds!.n === 1 ? '' : 's'} owed · ${formatInr(refunds!.total)}`,
+        detail: 'Unused course months owed back to families',
+        link: '/courses?tab=credits',
+        screen: '/courses',
+        count: refunds!.n,
+      });
+    }
+    if (setup!.n > 0) {
+      tasks.push({
+        id: 'course-setup',
+        kind: 'course-setup',
+        severity: 'info',
+        title: `Set up the course for ${setup!.n} batch${setup!.n === 1 ? '' : 'es'}`,
+        detail: 'Choose each batch’s course length in months',
+        link: '/batches',
+        screen: '/batches',
+        count: setup!.n,
+      });
+    }
+    if (moves!.n > 0) {
+      tasks.push({
+        id: 'reschedule-requests',
+        kind: 'reschedule-requests',
+        severity: 'warning',
+        title: `${moves!.n} session change${moves!.n === 1 ? '' : 's'} to review`,
+        detail: 'Coaches asked to move a session or add an extra one at short notice',
+        link: '/session-changes',
+        screen: '/session-changes',
+        count: moves!.n,
+      });
+    }
     if (subs!.n > 0) {
       tasks.push({
         id: 'substitute-requests',

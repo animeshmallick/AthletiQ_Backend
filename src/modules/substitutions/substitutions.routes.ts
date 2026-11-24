@@ -3,7 +3,7 @@
  * batch's sessions for a date range. Substitutes get session access only on those days (see
  * access.ts); fees and income never move.
  */
-import { timesOn, type DayTimes } from '../../lib/batch-times.js';
+import { type DayTimes } from '../../lib/batch-times.js';
 import {
   arrayContains,
   aliasedTable,
@@ -22,13 +22,14 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db, type DbOrTx } from '../../db/client.js';
 import { batchSubstitutions, batches, users } from '../../db/schema/index.js';
-import { diffDays, eachDay, isoWeekday, todayInAppTz, type IsoDate } from '../../lib/dates.js';
+import { diffDays, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate, zOptionalText } from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { getBatchOrThrow, isAdmin } from '../access/access.js';
 import { cancellationsIn } from '../attendance/cancellations.js';
+import { scheduleFor, type BatchTiming, type ScheduledSession } from '../schedule/schedule.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { notifyAdmins, notifyInBackground, notifyUsers } from '../push/push.service.js';
@@ -112,11 +113,14 @@ interface Row {
 }
 
 /** Scheduled (not cancelled) session days of a batch in a range. */
-async function sessionDays(batch: { id: string; weekdays: number[] }, from: IsoDate, to: IsoDate) {
-  const cancelled = await cancellationsIn([batch.id], from, to);
-  return eachDay(from, to).filter(
-    (d) => batch.weekdays.includes(isoWeekday(d)) && !cancelled.has(`${batch.id}:${d}`),
-  );
+async function sessionDays(batch: BatchTiming, from: IsoDate, to: IsoDate) {
+  const [cancelled, sessions] = await Promise.all([
+    cancellationsIn([batch.id], from, to),
+    scheduleFor([batch], from, to),
+  ]);
+  return (sessions.get(batch.id) ?? [])
+    .map((s) => s.date)
+    .filter((d) => !cancelled.has(`${batch.id}:${d}`));
 }
 
 /** Adds the number of sessions covered to each row. */
@@ -184,6 +188,7 @@ async function conflict(
   const [own, covers] = await Promise.all([
     tx
       .select({
+        id: batches.id,
         name: batches.name,
         startTime: batches.startTime,
         endTime: batches.endTime,
@@ -200,6 +205,7 @@ async function conflict(
       ),
     tx
       .select({
+        id: batches.id,
         name: batches.name,
         startTime: batches.startTime,
         endTime: batches.endTime,
@@ -212,20 +218,15 @@ async function conflict(
       .innerJoin(batches, eq(batches.id, batchSubstitutions.batchId))
       .where(and(eq(batchSubstitutions.substituteCoachId, s.substituteCoachId), inRange)),
   ]);
-  for (const d of eachDay(s.fromDate, s.toDate)) {
-    const wd = isoWeekday(d);
-    if (!batch.weekdays.includes(wd)) continue;
-    // Compare each batch's own time on that weekday.
-    const here = timesOn(batch, wd);
+  // Each session as it actually runs (moved / extra sessions at their own day and time).
+  const timetable = await scheduleFor([batch, ...own, ...covers], s.fromDate, s.toDate, tx);
+  const busy = (id: string, here: ScheduledSession) =>
+    (timetable.get(id) ?? []).some((x) => x.date === here.date && overlaps(x, here));
+  for (const here of timetable.get(batch.id) ?? []) {
+    const d = here.date;
     const clash =
-      own.find((o) => o.weekdays.includes(wd) && overlaps(timesOn(o, wd), here)) ??
-      covers.find(
-        (c) =>
-          c.fromDate <= d &&
-          c.toDate >= d &&
-          c.weekdays.includes(wd) &&
-          overlaps(timesOn(c, wd), here),
-      );
+      own.find((o) => busy(o.id, here)) ??
+      covers.find((c) => c.fromDate <= d && c.toDate >= d && busy(c.id, here));
     if (clash) return `The substitute already coaches ${clash.name} at that time on ${d}`;
   }
   return null;

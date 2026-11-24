@@ -11,6 +11,11 @@ import { z } from 'zod';
 import { AppError } from '../../lib/errors.js';
 import { parse, zIdParam } from '../../lib/validation.js';
 import { describeReportLink, openReportLink } from '../reports/reports.routes.js';
+import {
+  buildCertificate,
+  certificateData,
+  verifyCertificateLink,
+} from '../courses/certificate.js';
 import { getAcademySettings } from '../settings/settings.js';
 import { renderInvoicePdf } from './invoice-pdf.js';
 import { getInvoiceForUser, invoicePdfData } from './invoices.service.js';
@@ -80,6 +85,37 @@ publicRouter.post('/invoices/:id/pdf', async (req, res) => {
   await checkRegistrationNo(`invoice:${id}`, inv.student.id, registrationNo);
   const pdf = await renderInvoicePdf(await invoicePdfData(inv), await getAcademySettings());
   sendInline(res, pdf, `${inv.number.replaceAll('/', '-')}.pdf`);
+});
+
+async function signedCertificate(id: string, e: string, s: string) {
+  if (!verifyCertificateLink(id, e, s)) throw new AppError('FORBIDDEN', EXPIRED);
+  return certificateData(id);
+}
+
+publicRouter.get('/certificates/:id', async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const { e, s } = parse(Signed, req.query);
+  const c = await signedCertificate(id, e, s);
+  const academy = await getAcademySettings();
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.json({
+    data: {
+      kind: 'certificate',
+      academy: academy.name,
+      title: 'Course certificate',
+      student: firstName(c.studentName),
+      expiresAt: new Date(Number(e) * 1000).toISOString(),
+    },
+  });
+});
+
+publicRouter.post('/certificates/:id/pdf', async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const { e, s, registrationNo } = parse(Signed.extend(RegNo.shape), req.body);
+  const c = await signedCertificate(id, e, s);
+  await checkRegistrationNo(`certificate:${id}`, c.studentId, registrationNo);
+  const { pdf, filename } = await buildCertificate(id);
+  sendInline(res, pdf, filename);
 });
 
 const TokenParam = z.object({ token: z.string().min(20).max(80) });

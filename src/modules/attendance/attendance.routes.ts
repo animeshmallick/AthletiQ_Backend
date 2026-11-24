@@ -13,14 +13,7 @@ import {
   students,
   users,
 } from '../../db/schema/index.js';
-import {
-  addDays,
-  diffDays,
-  eachDay,
-  isoWeekday,
-  todayInAppTz,
-  type IsoDate,
-} from '../../lib/dates.js';
+import { addDays, diffDays, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate, zOptionalText } from '../../lib/validation.js';
@@ -30,7 +23,17 @@ import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { expectedRoster } from '../batches/roster.js';
 import { coveredBy, substitutesOn } from '../substitutions/coverage.js';
+import {
+  mayRunOnSql,
+  requireSession,
+  scheduleFor,
+  sessionOn,
+  sessionOrigin,
+  sessionsOnDay,
+} from '../schedule/schedule.js';
 import { assertNotCancelled, cancellationsIn, getCancellation } from './cancellations.js';
+import { evaluateCourses } from '../courses/rounds.js';
+import { logger } from '../../lib/logger.js';
 
 export const attendanceRouter = Router();
 
@@ -51,9 +54,7 @@ function summarize(statuses: (Status | null)[]) {
 
 /** Every batch session on one day for this user (all batches for admins, own for coaches). */
 export async function dayOverview(user: AuthUser, day: IsoDate) {
-  const weekday = isoWeekday(day);
-
-  const filters: SQL[] = [eq(batches.isActive, true), sql`${weekday} = any(${batches.weekdays})`];
+  const filters: SQL[] = [eq(batches.isActive, true), mayRunOnSql(day)];
   // Coaches: their own batches, plus batches they cover as a substitute that day.
   if (!isAdmin(user)) filters.push(or(eq(batches.coachId, user.id), coveredBy(user.id, day))!);
 
@@ -61,6 +62,7 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
     .select({
       id: batches.id,
       name: batches.name,
+      weekdays: batches.weekdays,
       startTime: batches.startTime,
       endTime: batches.endTime,
       dayTimes: batches.dayTimes,
@@ -77,9 +79,15 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
     .innerJoin(users, eq(users.id, batches.coachId))
     .innerJoin(locations, eq(locations.id, batches.locationId))
     .where(and(...filters));
-  // Each batch at its time on this day.
-  const sessionBatches = rows
-    .map(({ dayTimes, ...b }) => ({ ...b, ...timesOn({ ...b, dayTimes }, day) }))
+  // Each batch at its time on this day (moved and extra sessions at their own time).
+  const running = await sessionsOnDay(rows, day);
+  const origin = new Map(running.map(({ batch, session }) => [batch.id, sessionOrigin(session)]));
+  const sessionBatches = running
+    .map(({ batch: { dayTimes: _dt, weekdays: _wd, ...b }, session }) => ({
+      ...b,
+      startTime: session.startTime,
+      endTime: session.endTime,
+    }))
     .sort((a, b) => a.startTime.localeCompare(b.startTime));
 
   const ids = sessionBatches.map((b) => b.id);
@@ -123,6 +131,8 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
         /** This session's drills are filled in. */
         lessonPlanFilled: plans.get(b.id)?.filled ?? false,
         cancelled: cancelled.get(`${b.id}:${day}`) ?? null,
+        /** Regular, moved here from another day/time, or an extra session. */
+        origin: origin.get(b.id)!,
         /** Who covers this session as a substitute coach, if anyone. */
         substitute: subs.get(b.id) ?? null,
         coachSession: cs
@@ -167,7 +177,8 @@ attendanceRouter.get('/session', async (req, res) => {
   const user = currentUser(req);
   const batch = await assertBatchAccess(user, batchId, { on: date });
 
-  const [roster, marks, cancellation] = await Promise.all([
+  const [session, roster, marks, cancellation] = await Promise.all([
+    sessionOn(batch, date),
     expectedRoster(batchId, date),
     db
       .select({
@@ -221,9 +232,16 @@ attendanceRouter.get('/session', async (req, res) => {
   const needsCheckIn = !!visit && !visit.checkedIn;
   const edit = canEdit(user.role, date);
   ok(res, {
-    batch: { id: batch.id, name: batch.name, ...timesOn(batch, date) },
+    batch: {
+      id: batch.id,
+      name: batch.name,
+      ...(session
+        ? { startTime: session.startTime, endTime: session.endTime }
+        : timesOn(batch, date)),
+    },
     date,
-    isScheduledDay: batch.weekdays.includes(isoWeekday(date)),
+    isScheduledDay: !!session,
+    origin: session ? sessionOrigin(session) : null,
     cancelled: cancellation,
     editable: !cancellation && edit.allowed && !needsCheckIn,
     /** Coaches mark attendance only for sessions they checked in to. */
@@ -325,9 +343,7 @@ attendanceRouter.put('/session', async (req, res) => {
   await assertNotCancelled(body.batchId, body.date);
   const edit = canEdit(user.role, body.date);
   if (!edit.allowed) throw AppError.unprocessable(edit.reason!);
-  if (!batch.weekdays.includes(isoWeekday(body.date))) {
-    throw AppError.unprocessable(`${batch.name} does not run on this day`);
-  }
+  await requireSession(batch, body.date);
   if (user.role === 'coach') {
     const visit = await coachVisit(user.id, body.batchId, body.date);
     if (!visit.checkedIn) {
@@ -404,6 +420,16 @@ attendanceRouter.put('/session', async (req, res) => {
     }
   });
 
+  // Course progress follows attendance right away (completion, or undoing one after a correction).
+  // Students marked here count for this batch, or (makeups) for their own batch.
+  try {
+    await evaluateCourses(todayInAppTz(), {
+      studentIds: body.records.map((r) => r.studentId),
+      actorId: user.id,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Course evaluation after attendance failed (nightly run will retry)');
+  }
   ok(res, { saved: body.records.length });
 });
 
@@ -464,7 +490,8 @@ attendanceRouter.get('/register', async (req, res) => {
   // The full register is the batch's history: its own coach and admins only.
   const batch = await assertBatchAccess(currentUser(req), q.batchId, { mainOnly: true });
 
-  const sessionDates = eachDay(q.from, q.to).filter((d) => batch.weekdays.includes(isoWeekday(d)));
+  const sessions = (await scheduleFor([batch], q.from, q.to)).get(batch.id) ?? [];
+  const sessionDates = sessions.map((s) => s.date);
   const records = await db
     .select({
       studentId: studentAttendance.studentId,
@@ -503,6 +530,10 @@ attendanceRouter.get('/register', async (req, res) => {
   ok(res, {
     batch: { id: batch.id, name: batch.name },
     dates: sessionDates,
+    /** Moved / extra sessions in the range, by date. */
+    origins: Object.fromEntries(
+      sessions.filter((s) => s.kind !== 'regular').map((s) => [s.date, sessionOrigin(s)]),
+    ),
     cancelled,
     students: [...byStudent.values()].sort((a, b) => a.fullName.localeCompare(b.fullName)),
   });

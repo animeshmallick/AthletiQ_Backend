@@ -8,7 +8,7 @@ import {
   studentAttendance,
   users,
 } from '../../db/schema/index.js';
-import { addDays, diffDays, isoWeekday, todayInAppTz, type IsoDate } from '../../lib/dates.js';
+import { addDays, diffDays, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate } from '../../lib/validation.js';
@@ -17,6 +17,7 @@ import { assertBatchAccess } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { noticeSessionCancelled } from '../push/coach-notices.js';
 import { notifyInBackground } from '../push/push.service.js';
+import { requireSession } from '../schedule/schedule.js';
 
 /** Cancellation for one session, or null. */
 export async function getCancellation(batchId: string, date: IsoDate) {
@@ -102,9 +103,7 @@ cancellationsRouter.post('/:id/cancellations', async (req, res) => {
   const batch = await assertBatchAccess(user, id, { on: body.date });
   const today = todayInAppTz();
 
-  if (!batch.weekdays.includes(isoWeekday(body.date))) {
-    throw AppError.unprocessable(`${batch.name} does not run on that day`);
-  }
+  await requireSession(batch, body.date);
   if (diffDays(today, body.date) > MAX_DAYS_AHEAD) {
     throw AppError.unprocessable(`Sessions can be cancelled up to ${MAX_DAYS_AHEAD} days ahead`);
   }

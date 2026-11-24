@@ -13,6 +13,7 @@ import { addDays, financialYear, todayInAppTz, type IsoDate } from '../../lib/da
 import { logger } from '../../lib/logger.js';
 import { mapPgError } from '../../lib/pg-errors.js';
 import { effectiveMonthlyFee } from '../students/students.service.js';
+import { takeCredits } from '../courses/credits.js';
 import { cyclesDue, type Cycle } from './cycle.js';
 
 /** Allocates the next gap-free number for the financial year of `issueDate` (row-locked). */
@@ -156,25 +157,37 @@ async function createCycleInvoice(
   try {
     return await db.transaction(async (tx) => {
       const number = await nextInvoiceNumber(tx, cycle.issueDate);
-      await tx.insert(invoices).values({
-        number,
-        studentId: e.studentId,
-        enrollmentId: e.id,
-        cycleNumber: cycle.cycleNumber,
-        periodStart: cycle.periodStart,
-        periodEnd: cycle.periodEnd,
-        issueDate: cycle.issueDate,
-        dueDate: addDays(cycle.issueDate, INVOICE_DUE_DAYS),
-        feePlanId: e.plan.id,
-        feePlanName: e.plan.name,
-        batchId: e.batch.id,
-        batchName: e.batch.name,
-        coachId: e.batch.coachId,
-        baseAmount: fee.base,
-        discountAmount: fee.discount,
-        totalAmount: fee.total,
-        status: 'due',
-      });
+      // Credits owed to the student (unused course sessions, shortfalls) come off first.
+      const credit = await takeCredits(tx, e.id, fee.total);
+      const totalAmount = fee.total - credit.amount;
+      const [inv] = await tx
+        .insert(invoices)
+        .values({
+          number,
+          studentId: e.studentId,
+          enrollmentId: e.id,
+          cycleNumber: cycle.cycleNumber,
+          periodStart: cycle.periodStart,
+          periodEnd: cycle.periodEnd,
+          issueDate: cycle.issueDate,
+          dueDate: addDays(cycle.issueDate, INVOICE_DUE_DAYS),
+          feePlanId: e.plan.id,
+          feePlanName: e.plan.name,
+          batchId: e.batch.id,
+          batchName: e.batch.name,
+          coachId: e.batch.coachId,
+          baseAmount: fee.base,
+          discountAmount: fee.discount,
+          creditAmount: credit.amount,
+          totalAmount,
+          // Fully covered by credit: settled, like any fully waived invoice.
+          ...(totalAmount === 0
+            ? { status: 'paid' as const, paidAt: new Date() }
+            : { status: 'due' as const }),
+          notes: credit.amount ? 'Credit from an earlier month applied' : null,
+        })
+        .returning({ id: invoices.id });
+      await credit.apply(inv!.id);
       return 'created' as const;
     });
   } catch (err) {

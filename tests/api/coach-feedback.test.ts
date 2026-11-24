@@ -20,6 +20,7 @@ describe('free batches without coach feedback', () => {
       startTime: '06:00',
       endTime: '07:00',
       capacity: 30,
+      courseMonths: 3,
       sportId: batch.sportId,
       feePlanId: free.id,
     };
