@@ -20,6 +20,7 @@ import {
   zWeekdays,
 } from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
+import { cachedList } from '../../middleware/cache.js';
 import { assertBatchAccess, isAdmin } from '../access/access.js';
 import { coveringNowOrLater, myCoverage } from '../substitutions/coverage.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
@@ -80,7 +81,7 @@ const ListQuery = z.object({
   locationId: zId.optional(),
 });
 
-batchesRouter.get('/', async (req, res) => {
+batchesRouter.get('/', cachedList, async (req, res) => {
   const user = currentUser(req);
   const q = parse(ListQuery, req.query);
   const filters: SQL[] = [];
@@ -152,8 +153,8 @@ batchesRouter.get('/:id/roster', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const { date } = parse(z.object({ date: zIsoDate.optional() }), req.query);
   const day = date ?? todayInAppTz();
-  await assertBatchAccess(currentUser(req), id, { on: day });
-  ok(res, { date: day, students: await expectedRoster(id, day) });
+  const batch = await assertBatchAccess(currentUser(req), id, { on: day });
+  ok(res, { date: day, students: await expectedRoster(batch, day) });
 });
 
 // ─── Admin mutations ─────────────────────────────────────────────────────────

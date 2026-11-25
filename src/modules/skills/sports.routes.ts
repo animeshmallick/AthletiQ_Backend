@@ -22,6 +22,7 @@ import { AppError } from '../../lib/errors.js';
 import { created, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zName, zOptionalText } from '../../lib/validation.js';
 import { requireAdmin } from '../../middleware/auth.js';
+import { cachedList } from '../../middleware/cache.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { loadFramework, loadFrameworks, STANDARD_LEVELS } from './framework.js';
 
@@ -30,7 +31,7 @@ export const sportsRouter = Router();
 /** New sports start on the standard A1–C2 ladder. */
 const DEFAULT_LEVELS = STANDARD_LEVELS;
 
-sportsRouter.get('/', async (_req, res) => {
+sportsRouter.get('/', cachedList, async (_req, res) => {
   const rows = await db.select({ id: sports.id }).from(sports).orderBy(sports.name);
   const [frameworks, usage] = await Promise.all([
     loadFrameworks(rows.map((r) => r.id)),

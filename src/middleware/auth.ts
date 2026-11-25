@@ -2,6 +2,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { users } from '../db/schema/index.js';
+import { cached } from '../lib/memory-cache.js';
 import { AppError } from '../lib/errors.js';
 import type { AuthUser, Role } from '../modules/auth/auth.types.js';
 import { verifyAccessToken } from '../modules/auth/tokens.js';
@@ -12,9 +13,27 @@ function extractBearer(req: Request): string | undefined {
   return header.slice(7).trim() || undefined;
 }
 
+/** The user check is repeated on every call: kept in memory briefly, dropped on any change. */
+const USER_TTL = 30_000;
+async function loadUser(id: string) {
+  const [user] = await db
+    .select({
+      id: users.id,
+      roles: users.roles,
+      name: users.name,
+      email: users.email,
+      status: users.status,
+      tokenVersion: users.tokenVersion,
+    })
+    .from(users)
+    .where(eq(users.id, id))
+    .limit(1);
+  return user;
+}
+
 /**
- * Verifies the access token and re-checks the user in the database so that disabling a user or
- * changing their password takes effect immediately (not only after the token expires).
+ * Verifies the access token and re-checks the user so that disabling a user or changing their
+ * password takes effect immediately (not only after the token expires).
  */
 export const requireAuth: RequestHandler = async (
   req: Request,
@@ -32,18 +51,7 @@ export const requireAuth: RequestHandler = async (
     throw AppError.unauthenticated('Your session has expired');
   }
 
-  const [user] = await db
-    .select({
-      id: users.id,
-      roles: users.roles,
-      name: users.name,
-      email: users.email,
-      status: users.status,
-      tokenVersion: users.tokenVersion,
-    })
-    .from(users)
-    .where(eq(users.id, claims.sub))
-    .limit(1);
+  const user = await cached(`user:${claims.sub}`, USER_TTL, () => loadUser(claims.sub));
 
   // Ended for real: disabled, password changed / signed out everywhere, or the role taken away.
   if (

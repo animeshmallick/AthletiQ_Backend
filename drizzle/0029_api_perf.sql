@@ -1,0 +1,22 @@
+CREATE TABLE "api_perf" (
+	"hour" timestamp with time zone NOT NULL,
+	"method" text NOT NULL,
+	"route" text NOT NULL,
+	"n" integer DEFAULT 0 NOT NULL,
+	"errors" integer DEFAULT 0 NOT NULL,
+	"total_ms" bigint DEFAULT 0 NOT NULL,
+	"max_ms" integer DEFAULT 0 NOT NULL,
+	"queries" integer DEFAULT 0 NOT NULL,
+	"db_ms" bigint DEFAULT 0 NOT NULL,
+	"cacheable" integer DEFAULT 0 NOT NULL,
+	"cache_hits" integer DEFAULT 0 NOT NULL,
+	"b0" integer DEFAULT 0 NOT NULL,
+	"b1" integer DEFAULT 0 NOT NULL,
+	"b2" integer DEFAULT 0 NOT NULL,
+	"b3" integer DEFAULT 0 NOT NULL,
+	"b4" integer DEFAULT 0 NOT NULL,
+	"b5" integer DEFAULT 0 NOT NULL,
+	"b6" integer DEFAULT 0 NOT NULL,
+	"b7" integer DEFAULT 0 NOT NULL,
+	CONSTRAINT "api_perf_hour_method_route_pk" PRIMARY KEY("hour","method","route")
+);

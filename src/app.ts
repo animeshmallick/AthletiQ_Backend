@@ -12,6 +12,8 @@ import { pushStatus } from './modules/push/push.service.js';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { apiLimiter } from './middleware/rate-limit.js';
+import { clearOnWrite } from './middleware/cache.js';
+import { perfLog } from './modules/activity/perf-log.js';
 import { requestLog } from './modules/activity/request-log.js';
 import { apiRouter } from './routes.js';
 
@@ -31,6 +33,7 @@ export function createApp(): Express {
   });
 
   // Track writes and failures (saved in batches, off the request path).
+  app.use('/api', perfLog);
   app.use('/api', requestLog);
 
   app.use(
@@ -93,7 +96,7 @@ export function createApp(): Express {
       });
   });
 
-  app.use('/api/v1', apiLimiter, apiRouter());
+  app.use('/api/v1', apiLimiter, clearOnWrite, apiRouter());
 
   app.use(notFoundHandler);
   app.use(errorHandler);

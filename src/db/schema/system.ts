@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   check,
   date,
@@ -7,6 +8,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   uuid,
 } from 'drizzle-orm/pg-core';
@@ -99,6 +101,36 @@ export const apiRequests = pgTable(
     index('api_requests_status_idx').on(t.status, t.createdAt),
     index('api_requests_user_idx').on(t.userId, t.createdAt),
   ],
+);
+
+/**
+ * App speed, added up per hour and route: calls, time, database trips, answers from memory, and
+ * how many calls fell in each duration bucket (b0 ≤ 50 ms … b6 ≤ 3.2 s, b7 slower).
+ */
+export const apiPerf = pgTable(
+  'api_perf',
+  {
+    hour: tz().notNull(),
+    method: text().notNull(),
+    route: text().notNull(),
+    n: integer().notNull().default(0),
+    errors: integer().notNull().default(0),
+    totalMs: bigint({ mode: 'number' }).notNull().default(0),
+    maxMs: integer().notNull().default(0),
+    queries: integer().notNull().default(0),
+    dbMs: bigint({ mode: 'number' }).notNull().default(0),
+    cacheable: integer().notNull().default(0),
+    cacheHits: integer().notNull().default(0),
+    b0: integer().notNull().default(0),
+    b1: integer().notNull().default(0),
+    b2: integer().notNull().default(0),
+    b3: integer().notNull().default(0),
+    b4: integer().notNull().default(0),
+    b5: integer().notNull().default(0),
+    b6: integer().notNull().default(0),
+    b7: integer().notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.hour, t.method, t.route] })],
 );
 
 /**

@@ -539,40 +539,42 @@ lessonsRouter.get('/overview', async (req, res) => {
 });
 
 /** For the day overview and to-dos: does each session have a plan, and does it fit the day? */
-export async function planStatusFor(
-  list: { id: string; startTime: string; endTime: string }[],
-  day: IsoDate,
-) {
-  const out = new Map<string, { hasPlan: boolean; fits: boolean; filled: boolean }>();
-  const ids = list.map((b) => b.id);
-  if (!ids.length) return out;
-  const [plans, own] = await Promise.all([
-    db
-      .select({
-        batchId: batchPlans.batchId,
-        minutes: sql<number>`coalesce(sum(${batchPlanBlocks.minutes}), 0)::int`,
-      })
-      .from(batchPlans)
-      .leftJoin(batchPlanBlocks, eq(batchPlanBlocks.planId, batchPlans.id))
-      .where(inArray(batchPlans.batchId, ids))
-      .groupBy(batchPlans.batchId),
-    db
-      .select({ batchId: sessionPlans.batchId })
-      .from(sessionPlans)
-      .where(and(inArray(sessionPlans.batchId, ids), eq(sessionPlans.date, day))),
-  ]);
-  for (const b of list) {
-    const length = toMin(b.endTime) - toMin(b.startTime);
-    const adjusted = own.some((o) => o.batchId === b.id);
-    const plan = plans.find((p) => p.batchId === b.id);
-    out.set(b.id, {
-      hasPlan: adjusted || !!plan,
-      fits: adjusted || (!!plan && plan.minutes === length),
+export async function planStatusIn(ids: string[], from: IsoDate, to: IsoDate) {
+  const [plans, own] = ids.length
+    ? await Promise.all([
+        db
+          .select({
+            batchId: batchPlans.batchId,
+            minutes: sql<number>`coalesce(sum(${batchPlanBlocks.minutes}), 0)::int`,
+          })
+          .from(batchPlans)
+          .leftJoin(batchPlanBlocks, eq(batchPlanBlocks.planId, batchPlans.id))
+          .where(inArray(batchPlans.batchId, ids))
+          .groupBy(batchPlans.batchId),
+        db
+          .select({ batchId: sessionPlans.batchId, date: sessionPlans.date })
+          .from(sessionPlans)
+          .where(
+            and(
+              inArray(sessionPlans.batchId, ids),
+              gte(sessionPlans.date, from),
+              lte(sessionPlans.date, to),
+            ),
+          ),
+      ])
+    : [[], []];
+  const minutes = new Map(plans.map((p) => [p.batchId, p.minutes]));
+  const picked = new Set(own.map((o) => `${o.batchId}:${o.date}`));
+  return (batchId: string, s: { date: IsoDate; startTime: string; endTime: string }) => {
+    const length = toMin(s.endTime) - toMin(s.startTime);
+    const adjusted = picked.has(`${batchId}:${s.date}`);
+    return {
+      hasPlan: adjusted || minutes.has(batchId),
+      fits: adjusted || minutes.get(batchId) === length,
       /** The coach picked this day's drills. */
       filled: adjusted,
-    });
-  }
-  return out;
+    };
+  };
 }
 
 // ─── Insights ────────────────────────────────────────────────────────────────

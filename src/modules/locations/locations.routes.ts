@@ -15,6 +15,7 @@ import {
   patchOf,
 } from '../../lib/validation.js';
 import { requireAdmin } from '../../middleware/auth.js';
+import { cachedList } from '../../middleware/cache.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 
 export const locationsRouter = Router();
@@ -30,7 +31,7 @@ const LocationBody = z.object({
 
 const ListQuery = z.object({ active: zBoolQuery });
 
-locationsRouter.get('/', async (req, res) => {
+locationsRouter.get('/', cachedList, async (req, res) => {
   const q = parse(ListQuery, req.query);
   const usage = db
     .select({ locationId: batches.locationId, n: count().as('n') })

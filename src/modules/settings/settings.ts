@@ -6,6 +6,7 @@ import { academySettings } from '../../db/schema/index.js';
 import { ok } from '../../lib/http.js';
 import { parse, zEmail, zName, zOptionalText, zPhone } from '../../lib/validation.js';
 import { requireAdmin } from '../../middleware/auth.js';
+import { cachedList } from '../../middleware/cache.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 
 export type AcademySettings = typeof academySettings.$inferSelect;
@@ -25,7 +26,7 @@ export async function getAcademySettings(): Promise<AcademySettings> {
 
 export const settingsRouter = Router();
 
-settingsRouter.get('/', async (_req, res) => {
+settingsRouter.get('/', cachedList, async (_req, res) => {
   ok(res, await getAcademySettings());
 });
 

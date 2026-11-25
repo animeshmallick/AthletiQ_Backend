@@ -1,12 +1,13 @@
 import { timesOn } from '../../lib/batch-times.js';
-import { planStatusFor } from '../lessons/lessons.routes.js';
-import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql, type SQL, or } from 'drizzle-orm';
+import { planStatusIn } from '../lessons/lessons.routes.js';
+import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql, or } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { COACH_ATTENDANCE_EDIT_WINDOW_DAYS } from '../../config/constants.js';
 import { db } from '../../db/client.js';
 import {
   batches,
+  batchSubstitutions,
   coachSessions,
   locations,
   makeupSessions,
@@ -15,7 +16,7 @@ import {
   students,
   users,
 } from '../../db/schema/index.js';
-import { addDays, diffDays, todayInAppTz, type IsoDate } from '../../lib/dates.js';
+import { addDays, diffDays, eachDay, todayInAppTz, type IsoDate } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate, zOptionalText } from '../../lib/validation.js';
@@ -23,18 +24,15 @@ import { currentUser } from '../../middleware/auth.js';
 import { assertBatchAccess, assertStudentAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import type { AuthUser } from '../auth/auth.types.js';
-import { expectedRoster } from '../batches/roster.js';
-import { coveredBy, substitutesOn } from '../substitutions/coverage.js';
+import { expectedRoster, rostersIn } from '../batches/roster.js';
 import {
-  mayRunOnSql,
   requireSession,
   rosterDay,
   scheduleFor,
   sessionOn,
   sessionOrigin,
-  sessionsOnDay,
 } from '../schedule/schedule.js';
-import { assertNotCancelled, cancellationsIn, getCancellation } from './cancellations.js';
+import { cancellationsIn, getCancellation } from './cancellations.js';
 
 export const attendanceRouter = Router();
 
@@ -53,12 +51,17 @@ function summarize(statuses: (Status | null)[]) {
 
 // ─── Daily overview: every batch session for a date ──────────────────────────
 
-/** Every batch session on one day for this user (all batches for admins, own for coaches). */
-export async function dayOverview(user: AuthUser, day: IsoDate) {
-  const filters: SQL[] = [eq(batches.isActive, true), mayRunOnSql(day)];
-  // Coaches: their own batches, plus batches they cover as a substitute that day.
-  if (!isAdmin(user)) filters.push(or(eq(batches.coachId, user.id), coveredBy(user.id, day))!);
-
+/**
+ * Every batch session on each day for this user (all batches for admins, own for coaches). About a
+ * dozen database trips, however many days and batches.
+ */
+async function overviewRange(user: AuthUser, from: IsoDate, to: IsoDate) {
+  const admin = isAdmin(user);
+  const covers = and(
+    eq(batchSubstitutions.status, 'approved'),
+    lte(batchSubstitutions.fromDate, to),
+    gte(batchSubstitutions.toDate, from),
+  );
   const rows = await db
     .select({
       id: batches.id,
@@ -79,72 +82,111 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
     .from(batches)
     .innerJoin(users, eq(users.id, batches.coachId))
     .innerJoin(locations, eq(locations.id, batches.locationId))
-    .where(and(...filters));
-  // Each batch at its time on this day (moved and extra sessions at their own time).
-  const running = await sessionsOnDay(rows, day);
-  const origin = new Map(running.map(({ batch, session }) => [batch.id, sessionOrigin(session)]));
-  const sessionBatches = running
-    .map(({ batch: { dayTimes: _dt, weekdays: _wd, ...b }, session }) => ({
-      ...b,
-      startTime: session.startTime,
-      endTime: session.endTime,
-    }))
-    .sort((a, b) => a.startTime.localeCompare(b.startTime));
-
-  const ids = sessionBatches.map((b) => b.id);
-  const [cancelled, subs] = await Promise.all([
-    cancellationsIn(ids, day, day),
-    substitutesOn(ids, day),
-  ]);
-  const [marks, checkIns, plans, rosters] = await Promise.all([
+    .where(
+      and(
+        eq(batches.isActive, true),
+        // Coaches: their own batches, plus batches they cover as a substitute.
+        admin
+          ? undefined
+          : or(
+              eq(batches.coachId, user.id),
+              inArray(
+                batches.id,
+                db
+                  .select({ id: batchSubstitutions.batchId })
+                  .from(batchSubstitutions)
+                  .where(and(eq(batchSubstitutions.substituteCoachId, user.id), covers)),
+              ),
+            ),
+      ),
+    );
+  const ids = rows.map((b) => b.id);
+  const within = (col: typeof studentAttendance.date | typeof coachSessions.date) =>
+    and(gte(col, from), lte(col, to));
+  const [schedule, cancelled, subs, marks, checkIns, plans, rosters] = await Promise.all([
+    scheduleFor(rows, from, to),
+    cancellationsIn(ids, from, to),
     ids.length
       ? db
-          .select({ batchId: studentAttendance.batchId, status: studentAttendance.status })
+          .select({
+            batchId: batchSubstitutions.batchId,
+            from: batchSubstitutions.fromDate,
+            to: batchSubstitutions.toDate,
+            id: users.id,
+            name: users.name,
+          })
+          .from(batchSubstitutions)
+          .innerJoin(users, eq(users.id, batchSubstitutions.substituteCoachId))
+          .where(and(inArray(batchSubstitutions.batchId, ids), covers))
+      : [],
+    ids.length
+      ? db
+          .select({
+            batchId: studentAttendance.batchId,
+            date: studentAttendance.date,
+            status: studentAttendance.status,
+          })
           .from(studentAttendance)
-          .where(and(inArray(studentAttendance.batchId, ids), eq(studentAttendance.date, day)))
+          .where(and(inArray(studentAttendance.batchId, ids), within(studentAttendance.date)))
       : [],
     ids.length
       ? db
           .select()
           .from(coachSessions)
-          .where(and(inArray(coachSessions.batchId, ids), eq(coachSessions.date, day)))
+          .where(and(inArray(coachSessions.batchId, ids), within(coachSessions.date)))
       : [],
     // Every session follows its batch's lesson plan (or its own adjusted copy).
-    planStatusFor(sessionBatches, day),
-    Promise.all(ids.map((id) => expectedRoster(id, day))),
+    planStatusIn(ids, from, to),
+    rostersIn(rows, from, to),
   ]);
+  const key = (r: { batchId: string; date: IsoDate }) => `${r.batchId}:${r.date}`;
+  const marksAt = new Map<string, typeof marks>();
+  for (const m of marks) marksAt.set(key(m), [...(marksAt.get(key(m)) ?? []), m]);
+  const checkInAt = new Map(checkIns.map((c) => [key(c), c]));
 
-  return {
-    date: day,
-    sessions: sessionBatches.map((b, i) => {
-      const batchMarks = marks.filter((m) => m.batchId === b.id);
-      const expected = rosters[i]!.length;
-      const cs = checkIns.find((c) => c.batchId === b.id);
-      return {
-        batch: b,
-        expectedStudents: expected,
-        marked: batchMarks.length,
-        present: batchMarks.filter((m) => m.status === 'present' || m.status === 'late').length,
-        attendanceComplete: expected > 0 && batchMarks.length >= expected,
-        hasLessonPlan: plans.get(b.id)?.hasPlan ?? false,
-        /** The plan adds up to this session's length (false after a timing change). */
-        lessonPlanFits: plans.get(b.id)?.fits ?? false,
-        /** This session's drills are filled in. */
-        lessonPlanFilled: plans.get(b.id)?.filled ?? false,
-        cancelled: cancelled.get(`${b.id}:${day}`) ?? null,
-        /** Regular, moved here from another day/time, or an extra session. */
-        origin: origin.get(b.id)!,
-        /** Who covers this session as a substitute coach, if anyone. */
-        substitute: subs.get(b.id) ?? null,
-        coachSession: cs
-          ? {
-              checkInAt: cs.checkInAt,
-              flagged: !cs.checkInWithinFence,
-            }
-          : null,
-      };
-    }),
-  };
+  return eachDay(from, to).map((day) => {
+    const sessions = rows.flatMap((row) => {
+      // Each batch at its time on this day (moved and extra sessions at their own time).
+      const session = schedule.get(row.id)?.find((x) => x.date === day);
+      if (!session) return [];
+      const sub = subs.find((x) => x.batchId === row.id && x.from <= day && x.to >= day);
+      if (!admin && row.coach.id !== user.id && sub?.id !== user.id) return [];
+      const { dayTimes: _dt, weekdays: _wd, ...b } = row;
+      const at = `${row.id}:${day}`;
+      const batchMarks = marksAt.get(at) ?? [];
+      const expected = rosters.get(at)?.length ?? 0;
+      const cs = checkInAt.get(at);
+      const plan = plans(row.id, session);
+      return [
+        {
+          batch: { ...b, startTime: session.startTime, endTime: session.endTime },
+          expectedStudents: expected,
+          marked: batchMarks.length,
+          present: batchMarks.filter((m) => m.status === 'present' || m.status === 'late').length,
+          attendanceComplete: expected > 0 && batchMarks.length >= expected,
+          hasLessonPlan: plan.hasPlan,
+          /** The plan adds up to this session's length (false after a timing change). */
+          lessonPlanFits: plan.fits,
+          /** This session's drills are filled in. */
+          lessonPlanFilled: plan.filled,
+          cancelled: cancelled.get(at) ?? null,
+          /** Regular, moved here from another day/time, or an extra session. */
+          origin: sessionOrigin(session),
+          /** Who covers this session as a substitute coach, if anyone. */
+          substitute: sub ? { id: sub.id, name: sub.name } : null,
+          coachSession: cs ? { checkInAt: cs.checkInAt, flagged: !cs.checkInWithinFence } : null,
+        },
+      ];
+    });
+    return {
+      date: day,
+      sessions: sessions.sort((a, b) => a.batch.startTime.localeCompare(b.batch.startTime)),
+    };
+  });
+}
+
+export async function dayOverview(user: AuthUser, day: IsoDate) {
+  return (await overviewRange(user, day, day))[0]!;
 }
 
 attendanceRouter.get('/overview', async (req, res) => {
@@ -163,9 +205,7 @@ const CalendarQuery = z
 attendanceRouter.get('/calendar', async (req, res) => {
   const q = parse(CalendarQuery, req.query);
   const user = currentUser(req);
-  const dates: IsoDate[] = [];
-  for (let d = q.from; d <= q.to; d = addDays(d, 1)) dates.push(d);
-  const days = await Promise.all(dates.map((d) => dayOverview(user, d)));
+  const days = await overviewRange(user, q.from, q.to);
   ok(res, { from: q.from, to: q.to, today: todayInAppTz(), days });
 });
 
@@ -178,9 +218,9 @@ attendanceRouter.get('/session', async (req, res) => {
   const user = currentUser(req);
   const batch = await assertBatchAccess(user, batchId, { on: date });
 
-  const [session, roster, marks, cancellation] = await Promise.all([
+  const [session, roster, marks, cancellation, visit] = await Promise.all([
     sessionOn(batch, date),
-    expectedRoster(batchId, date),
+    expectedRoster(batch, date),
     db
       .select({
         studentId: studentAttendance.studentId,
@@ -196,6 +236,7 @@ attendanceRouter.get('/session', async (req, res) => {
       .innerJoin(students, eq(students.id, studentAttendance.studentId))
       .where(and(eq(studentAttendance.batchId, batchId), eq(studentAttendance.date, date))),
     getCancellation(batchId, date),
+    user.role === 'coach' ? coachVisit(user.id, batchId, date) : null,
   ]);
 
   const byStudent = new Map(marks.map((m) => [m.studentId, m]));
@@ -229,7 +270,6 @@ attendanceRouter.get('/session', async (req, res) => {
     rows.map((r) => r.studentId),
     date,
   );
-  const visit = user.role === 'coach' ? await coachVisit(user.id, batchId, date) : null;
   const needsCheckIn = !!visit && !visit.checkedIn;
   const edit = canEdit(user.role, date);
   ok(res, {
@@ -353,23 +393,27 @@ attendanceRouter.put('/session', async (req, res) => {
   const user = currentUser(req);
   const batch = await assertBatchAccess(user, body.batchId, { on: body.date });
 
-  await assertNotCancelled(body.batchId, body.date);
+  // Everything to check, in one trip; judged in order below (and again under the lock).
+  const [cancelled, session, visit, roster, existing] = await Promise.all([
+    getCancellation(body.batchId, body.date),
+    sessionOn(batch, body.date),
+    user.role === 'coach' ? coachVisit(user.id, body.batchId, body.date) : null,
+    expectedRoster(batch, body.date),
+    db
+      .select({ studentId: studentAttendance.studentId })
+      .from(studentAttendance)
+      .where(
+        and(eq(studentAttendance.batchId, body.batchId), eq(studentAttendance.date, body.date)),
+      ),
+  ]);
+  if (cancelled) throw AppError.unprocessable(`This session was cancelled (${cancelled.reason})`);
   const edit = canEdit(user.role, body.date);
   if (!edit.allowed) throw AppError.unprocessable(edit.reason!);
-  await requireSession(batch, body.date);
-  if (user.role === 'coach') {
-    const visit = await coachVisit(user.id, body.batchId, body.date);
-    if (!visit.checkedIn) {
-      throw AppError.unprocessable('Check in to this session before marking attendance.');
-    }
-  }
+  if (!session) throw AppError.unprocessable(`${batch.name} does not run on this day`);
+  if (visit && !visit.checkedIn)
+    throw AppError.unprocessable('Check in to this session before marking attendance.');
 
-  const roster = await expectedRoster(body.batchId, body.date);
   const expected = new Map(roster.map((r) => [r.studentId, r]));
-  const existing = await db
-    .select({ studentId: studentAttendance.studentId })
-    .from(studentAttendance)
-    .where(and(eq(studentAttendance.batchId, body.batchId), eq(studentAttendance.date, body.date)));
   const alreadyMarked = new Set(existing.map((e) => e.studentId));
 
   const unknown = body.records.filter(

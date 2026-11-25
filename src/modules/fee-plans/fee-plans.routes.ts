@@ -16,6 +16,7 @@ import {
   patchOf,
 } from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
+import { cachedList } from '../../middleware/cache.js';
 import { saveSplit, splitTrees } from '../funds/split.routes.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { ensureFreePlan } from './free-plan.js';
@@ -44,7 +45,7 @@ async function assertEditable(id: string) {
   return p;
 }
 
-feePlansRouter.get('/', async (req, res) => {
+feePlansRouter.get('/', cachedList, async (req, res) => {
   const q = parse(ListQuery, req.query);
   if (q.forBatch) await ensureFreePlan();
   const usage = db

@@ -155,10 +155,14 @@ async function sessionTasks(user: AuthUser, now: Date): Promise<Task[]> {
 }
 
 export async function tasksFor(user: AuthUser, now: Date = new Date()) {
-  const tasks = await sessionTasks(user, now);
   const today = todayInAppTz(now);
-
-  const missed = await missedSessions(user, now);
+  const coach = user.role === 'coach';
+  const [tasks, missed, board, toAssess] = await Promise.all([
+    sessionTasks(user, now),
+    missedSessions(user, now),
+    coach ? weekBoard(user, lastCompletedWeek()) : null,
+    coach && Number(today.slice(8, 10)) >= 15 ? pendingAssessments(user.id, today) : 0,
+  ]);
   // Ones only waiting for booked makeups need nothing for now.
   const todo = missed.open.filter((m) => m.pending > 0);
   const openMissed = todo.length;
@@ -190,8 +194,7 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
       count: unsure,
     });
 
-  if (user.role === 'coach') {
-    const board = await weekBoard(user, lastCompletedWeek());
+  if (board) {
     const open = board.summary.pending + board.summary.draft;
     if (open > 0) {
       tasks.push({
@@ -208,7 +211,7 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
     // Monthly skill assessments: a reminder from the 15th until they're all done.
     const day = Number(today.slice(8, 10));
     if (day >= 15) {
-      const pending = await pendingAssessments(user.id, today);
+      const pending = toAssess;
       if (pending > 0) {
         const daysLeft = endOfMonthDay(today) - day;
         tasks.push({
