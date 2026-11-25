@@ -55,7 +55,7 @@ describe('missed-session notices', () => {
     expect(all).toHaveLength(new Set(all).size);
     setToday('2026-04-03');
     await sendMissedNotices();
-    expect(await titles()).toContainEqual(expect.stringContaining('not rescheduled in 30 days'));
+    expect(await titles()).toContainEqual(expect.stringContaining('not made up in 30 days'));
   });
 
   it('marks a missed bonus session as optional', async () => {

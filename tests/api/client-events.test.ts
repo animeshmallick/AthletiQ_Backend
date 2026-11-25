@@ -161,5 +161,17 @@ describe('client events', () => {
         .expect(200)
     ).body.data;
     expect(view.byPlatform).toEqual([{ platform: 'android', n: 1 }]);
+    // An hour window starts at that moment, not at midnight.
+    const since = (ms: number) => encodeURIComponent(new Date(Date.now() + ms).toISOString());
+    const at = async (ms: number) =>
+      (
+        await (
+          await as(admin)
+        )
+          .get(`/api/v1/client-events/insights?from=2026-03-01&to=2026-03-31&since=${since(ms)}`)
+          .expect(200)
+      ).body.data.totals.events;
+    expect(await at(-60_000)).toBe(1);
+    expect(await at(60_000)).toBe(0);
   });
 });

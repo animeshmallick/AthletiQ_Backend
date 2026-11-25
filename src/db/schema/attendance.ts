@@ -56,6 +56,8 @@ export const studentAttendance = pgTable(
     date: date({ mode: 'string' }).notNull(),
     status: attendanceStatus().notNull(),
     isMakeup: boolean().notNull().default(false),
+    /** A makeup for a missed session: the student's own batch, where it counts. */
+    homeBatchId: uuid().references(() => batches.id, { onDelete: 'set null' }),
     note: text(),
     markedById: uuid()
       .notNull()

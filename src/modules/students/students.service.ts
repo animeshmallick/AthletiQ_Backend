@@ -17,6 +17,7 @@ import { cycleFor, nextUpcomingCycle } from '../billing/cycle.js';
 import { openFirstCycle, syncCycles } from '../cycles/cycles.js';
 import { sessionOn } from '../schedule/schedule.js';
 import { AppError } from '../../lib/errors.js';
+import { dropMakeups } from '../schedule/makeups.js';
 import type { Paise } from '../../lib/money.js';
 
 /** Monthly amount a student is billed: custom fee (or plan fee) minus discount, never negative. */
@@ -194,6 +195,7 @@ export async function moveEnrollment(
     .update(enrollments)
     .set({ effectiveTo: addDays(input.effectiveFrom, -1), ...NO_PLAN })
     .where(eq(enrollments.id, current.id));
+  await dropMakeups(tx, input.studentId, current.batchId, addDays(input.effectiveFrom, -1));
   const anchor = current.billingAnchorDate ?? current.effectiveFrom;
   const [next] = await tx
     .insert(enrollments)

@@ -148,6 +148,8 @@ export const makeupSessions = pgTable(
     date: date({ mode: 'string' }).notNull(),
     /** Optional: the regular session being made up for. */
     missedDate: date({ mode: 'string' }),
+    /** The batch whose session on `missedDate` (its original day) this makes up. */
+    missedBatchId: uuid().references(() => batches.id, { onDelete: 'cascade' }),
     reason: text(),
     createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
     /** Coach requests wait for an admin; admin bookings are approved immediately. */
@@ -161,7 +163,30 @@ export const makeupSessions = pgTable(
     index('makeup_status_idx').on(t.status),
     uniqueIndex('makeup_student_batch_date_uq').on(t.studentId, t.batchId, t.date),
     index('makeup_batch_date_idx').on(t.batchId, t.date),
+    // One makeup at a time for a student's missed session.
+    uniqueIndex('makeup_missed_student_uq')
+      .on(t.missedBatchId, t.missedDate, t.studentId)
+      .where(sql`${t.missedBatchId} is not null and ${t.status} = 'approved'`),
   ],
+);
+
+/** A student doesn't need to make up a missed session (its original day), and why. */
+export const makeupExcusals = pgTable(
+  'makeup_excusals',
+  {
+    id: id(),
+    batchId: uuid()
+      .notNull()
+      .references(() => batches.id, { onDelete: 'cascade' }),
+    date: date({ mode: 'string' }).notNull(),
+    studentId: uuid()
+      .notNull()
+      .references(() => students.id, { onDelete: 'cascade' }),
+    reason: text().notNull(),
+    createdById: uuid().references(() => users.id, { onDelete: 'set null' }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('makeup_excusals_uq').on(t.batchId, t.date, t.studentId)],
 );
 
 /** Monotonic counter for student codes. */

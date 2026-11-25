@@ -33,6 +33,8 @@ import { lastCompletedWeek, weekBoard } from '../feedback/feedback.routes.js';
 
 export const dashboardRouter = Router();
 
+const CREDITED = sql<string>`coalesce(${studentAttendance.homeBatchId}, ${studentAttendance.batchId})`;
+
 const pct = (num: number, den: number) => (den > 0 ? Math.round((num / den) * 100) : null);
 
 /** Next birthday from `today`: days away (0 = today) and the age they turn. */
@@ -102,7 +104,8 @@ export async function dashboardFor(user: AuthUser, today: IsoDate = todayInAppTz
       db
         .select({
           date: studentAttendance.date,
-          batchId: studentAttendance.batchId,
+          // Makeups of a missed session count in the student's own batch.
+          batchId: CREDITED,
           attended: sql<number>`count(*) filter (where ${studentAttendance.status} in ('present','late'))::int`,
           absent: sql<number>`count(*) filter (where ${studentAttendance.status} = 'absent')::int`,
         })
@@ -114,7 +117,7 @@ export async function dashboardFor(user: AuthUser, today: IsoDate = todayInAppTz
             lte(studentAttendance.date, today),
           ),
         )
-        .groupBy(studentAttendance.date, studentAttendance.batchId),
+        .groupBy(studentAttendance.date, CREDITED),
       // Attendance per student (last 30 days) — for students who need attention.
       db
         .select({

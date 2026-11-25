@@ -154,6 +154,8 @@ const Range = z
   .object({
     from: zIsoDate,
     to: zIsoDate,
+    /** Exact start, for windows shorter than whole days (e.g. the last hour). */
+    since: z.iso.datetime({ offset: true }).optional(),
     kind: z.enum(CLIENT_EVENT_KINDS).optional(),
     platform: z.enum(['web', 'pwa', 'android', 'ios']).optional(),
   })
@@ -170,7 +172,7 @@ clientEventsRouter.get('/insights', requireAuth, async (req, res) => {
   const user = currentUser(req);
   const c = clientEvents;
   const where = and(
-    gte(c.occurredAt, startOf(r.from)),
+    gte(c.occurredAt, r.since ? new Date(r.since) : startOf(r.from)),
     lt(c.occurredAt, startOf(addDays(r.to, 1))),
     // Coaches see what happened on their own devices.
     user.role === 'admin' ? undefined : eq(c.userId, user.id),

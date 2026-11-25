@@ -159,15 +159,19 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
   const today = todayInAppTz(now);
 
   const missed = await missedSessions(user, now);
-  const openMissed = missed.open.length;
+  // Ones only waiting for booked makeups need nothing for now.
+  const todo = missed.open.filter((m) => m.pending > 0);
+  const openMissed = todo.length;
   if (openMissed > 0) {
-    const late = missed.open.filter((m) => m.overdue).length;
+    const late = todo.filter((m) => m.overdue).length;
     tasks.push({
       id: 'missed-sessions',
       kind: 'missed-sessions',
       severity: late ? 'critical' : 'warning',
-      title: `${openMissed} missed session${openMissed === 1 ? '' : 's'} to reschedule`,
-      detail: late ? `${late} past 30 days: an admin has to decide` : 'Students attend it free',
+      title: `${openMissed} missed session${openMissed === 1 ? '' : 's'} to make up`,
+      detail: late
+        ? `${late} past 30 days: an admin has to decide`
+        : 'Reschedule it, or book each student into another batch',
       link: '/missed-sessions',
       screen: '/missed-sessions',
       count: openMissed,

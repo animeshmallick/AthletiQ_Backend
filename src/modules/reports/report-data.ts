@@ -2,7 +2,7 @@
  * Everything a student report needs, loaded in bulk (one query per kind of data, for any number
  * of students) and turned into insights: attendance, streaks, fees, feedback trends, history.
  */
-import { and, asc, eq, inArray, type SQL } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import {
   auditLogs,
@@ -237,7 +237,11 @@ export async function loadStudentReports(
       })
       .from(studentAttendance)
       .where(
-        and(inArray(studentAttendance.studentId, studentIds), inBatches(studentAttendance.batchId)),
+        and(
+          inArray(studentAttendance.studentId, studentIds),
+          // Makeups of a missed session count in the student's own batch.
+          inBatches(sql`coalesce(${studentAttendance.homeBatchId}, ${studentAttendance.batchId})`),
+        ),
       ),
     db
       .select({
@@ -273,7 +277,7 @@ export async function loadStudentReports(
         and(
           inArray(makeupSessions.studentId, studentIds),
           eq(makeupSessions.status, 'approved'),
-          inBatches(makeupSessions.batchId),
+          inBatches(sql`coalesce(${makeupSessions.missedBatchId}, ${makeupSessions.batchId})`),
         ),
       )
       .orderBy(asc(makeupSessions.date)),

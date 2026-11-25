@@ -41,6 +41,10 @@ export interface BatchForInsights {
 }
 
 const pct = (n: number, d: number) => (d ? Math.round((n * 100) / d) : null);
+/** Where a mark counts: the student's own batch, for makeups of a missed session. */
+const CREDITED = sql`coalesce(${studentAttendance.homeBatchId}, ${studentAttendance.batchId})`;
+const OWN = sql`${studentAttendance.homeBatchId} is null`;
+const COUNTED = sql`${studentAttendance.status} <> 'excused'`;
 const PRESENT = sql`${studentAttendance.status} in ('present', 'late')`;
 
 export async function batchInsights(
@@ -80,13 +84,14 @@ export async function batchInsights(
       db
         .select({
           studentId: studentAttendance.studentId,
-          marked: sql<number>`count(*)::int`,
+          // Excused sessions don't count for or against, as everywhere else.
+          marked: sql<number>`count(*) filter (where ${COUNTED})::int`,
           present: sql<number>`count(*) filter (where ${PRESENT})::int`,
         })
         .from(studentAttendance)
         .where(
           and(
-            eq(studentAttendance.batchId, b.id),
+            sql`${CREDITED} = ${b.id}`,
             gte(studentAttendance.date, from30),
             lte(studentAttendance.date, today),
           ),
@@ -99,7 +104,7 @@ export async function batchInsights(
           last: sql<IsoDate>`max(${studentAttendance.date})`,
         })
         .from(studentAttendance)
-        .where(and(eq(studentAttendance.batchId, b.id), PRESENT))
+        .where(and(sql`${CREDITED} = ${b.id}`, PRESENT))
         .groupBy(studentAttendance.studentId),
       // Unpaid fees per student for this batch.
       db
@@ -144,6 +149,8 @@ export async function batchInsights(
         .select({
           date: studentAttendance.date,
           marked: sql<number>`count(*)::int`,
+          counted: sql<number>`count(*) filter (where ${COUNTED} and ${OWN})::int`,
+          came: sql<number>`count(*) filter (where ${PRESENT} and ${OWN})::int`,
           present: sql<number>`count(*) filter (where ${PRESENT})::int`,
         })
         .from(studentAttendance)
@@ -276,14 +283,14 @@ export async function batchInsights(
     const w = startOfIsoWeek(s.date);
     const row = weeks.get(w) ?? { week: w, sessions: 0, marked: 0, present: 0 };
     if (held(s)) row.sessions++;
-    row.marked += s.marked;
-    row.present += s.present;
+    row.marked += marksOn.get(s.date)?.counted ?? 0;
+    row.present += marksOn.get(s.date)?.came ?? 0;
     weeks.set(w, row);
   }
 
   const checked30 = last30.filter((s) => s.checkedIn);
-  const marked30 = last30.reduce((n, s) => n + s.marked, 0);
-  const present30 = last30.reduce((n, s) => n + s.present, 0);
+  const marked30 = last30.reduce((n, s) => n + (marksOn.get(s.date)?.counted ?? 0), 0);
+  const present30 = last30.reduce((n, s) => n + (marksOn.get(s.date)?.came ?? 0), 0);
   const levelMix = new Map<
     string,
     { code: string | null; name: string | null; students: number }

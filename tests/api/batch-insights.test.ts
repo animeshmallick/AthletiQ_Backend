@@ -38,7 +38,11 @@ async function setup() {
     a.admin.id,
   );
   await generateDueInvoices(TODAY);
-  const mark = (studentId: string, date: string, status: 'present' | 'absent' | 'late') =>
+  const mark = (
+    studentId: string,
+    date: string,
+    status: 'present' | 'absent' | 'late' | 'excused',
+  ) =>
     db
       .insert(studentAttendance)
       .values({ batchId: a.batch.id, studentId, date, status, markedById: a.coach.id });
@@ -47,6 +51,7 @@ async function setup() {
   await mark(bilal.id, '2026-03-16', 'present');
   await mark(asha.id, '2026-03-17', 'late');
   await mark(bilal.id, '2026-03-17', 'absent');
+  await mark(bilal.id, '2026-03-14', 'excused'); // counts neither for nor against
   await db
     .insert(sessionCancellations)
     .values({ batchId: a.batch.id, date: '2026-03-18', reason: 'Rain' });
@@ -80,7 +85,7 @@ describe('batch insights', () => {
     expect(d.summary).toMatchObject({
       students: 2,
       attendanceRate: 75, // 3 of 4 marked were present or late
-      sessions30: { cancelled: 1, held: 2, withPlan: 1 },
+      sessions30: { cancelled: 1, held: 3, withPlan: 1 },
       checkIns30: { total: 2 },
       skills: { assessedThisMonth: 1, levels: [{ code: 'B1', students: 1 }] },
       movement90: { joined: 2, left: 0 },

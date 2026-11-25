@@ -30,11 +30,12 @@ export async function sendMissedNotices(today: IsoDate = todayInAppTz(), now: Da
   for (const s of open.filter((m) => m.overdue))
     await send(
       `missed-30:${s.batch.id}:${s.date}`,
-      `${s.batch.name}: missed session not rescheduled in 30 days`,
-      `${formatDisplayDate(s.originalDate)} · ${s.batch.coach.name}. Reschedule or close it.`,
+      `${s.batch.name}: missed session not made up in 30 days`,
+      `${formatDisplayDate(s.originalDate)} · ${s.batch.coach.name}. Reschedule it, book makeups, or close it.`,
       '/missed-sessions',
     );
-  if (!open.length) return { sent };
+  const owing = open.filter((m) => m.pending > 0);
+  if (!owing.length) return { sent };
   const ended = await db
     .select()
     .from(batchCycles)
@@ -47,7 +48,7 @@ export async function sendMissedNotices(today: IsoDate = todayInAppTz(), now: Da
       ),
     );
   for (const c of ended) {
-    const owed = open.filter(
+    const owed = owing.filter(
       (m) => m.batch.id === c.batchId && m.originalDate >= c.startsOn && m.originalDate <= c.endsOn,
     );
     if (owed.length)

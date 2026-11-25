@@ -1,7 +1,8 @@
-import { and, asc, eq, gte, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { batches, enrollments, makeupSessions, students } from '../../db/schema/index.js';
-import { sessionOn } from '../schedule/schedule.js';
+import { settledStudents } from '../schedule/makeups.js';
+import { rosterDay, sessionOn } from '../schedule/schedule.js';
 import { isoWeekday, type IsoDate } from '../../lib/dates.js';
 
 export interface RosterEntry {
@@ -11,6 +12,8 @@ export interface RosterEntry {
   phone: string;
   isMakeup: boolean;
   makeupReason: string | null;
+  /** Making up a missed session of this batch. */
+  homeBatchId?: string | null;
 }
 
 /** Predicate: student was enrolled (and not yet left) in the batch on `date`. */
@@ -36,9 +39,16 @@ async function homeFilter(batchId: string, date: IsoDate) {
   const session = batch ? await sessionOn(batch, date) : null;
   // No session that day (not a batch day, or moved away): nobody from the batch is expected.
   if (!session) return sql`false`;
-  if (session.kind === 'extra') return enrolledOn(batchId, date);
+  // Made up elsewhere (or not needed): not expected here.
+  const settled = [...(await settledStudents(batchId, rosterDay(session)))];
+  const others = settled.length ? notInArray(students.id, settled) : undefined;
+  if (session.kind === 'extra') return and(enrolledOn(batchId, date), others);
   const day = session.kind === 'moved' ? session.originalDate! : date;
-  return and(enrolledOn(batchId, day), sql`${isoWeekday(day)} = any(${enrollments.trainingDays})`);
+  return and(
+    enrolledOn(batchId, day),
+    sql`${isoWeekday(day)} = any(${enrollments.trainingDays})`,
+    others,
+  );
 }
 
 /**
@@ -67,6 +77,7 @@ export async function expectedRoster(batchId: string, date: IsoDate): Promise<Ro
         fullName: students.fullName,
         phone: students.phone,
         reason: makeupSessions.reason,
+        homeBatchId: makeupSessions.missedBatchId,
       })
       .from(makeupSessions)
       .innerJoin(students, eq(students.id, makeupSessions.studentId))

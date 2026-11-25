@@ -32,6 +32,7 @@ import {
 } from '../../db/schema/index.js';
 import { minDate, todayInAppTz, addDays } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
+import { dropMakeups } from '../schedule/makeups.js';
 import { created, noContent, ok, pageMeta } from '../../lib/http.js';
 import {
   parse,
@@ -266,7 +267,8 @@ async function withCardStats<T extends { id: string }>(user: AuthUser, rows: T[]
     db
       .select({
         studentId: studentAttendance.studentId,
-        marked: sql<number>`count(*)::int`,
+        // Excused sessions don't count for or against, as everywhere else.
+        marked: sql<number>`count(*) filter (where ${studentAttendance.status} <> 'excused')::int`,
         present: sql<number>`count(*) filter (where ${studentAttendance.status} in ('present', 'late'))::int`,
       })
       .from(studentAttendance)
@@ -612,6 +614,7 @@ studentsRouter.post('/:id/batches/:enrollmentId/leave', requireAdmin, async (req
     if (body.leftOn > today)
       await planEnd(tx, e, { on: body.leftOn, reason: body.reason, actorId: actor });
     else await endMembership(tx, e, body.leftOn, body.reason, today);
+    await dropMakeups(tx, id, e.batchId, body.leftOn);
     await tx
       .delete(makeupSessions)
       .where(
@@ -704,6 +707,14 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
 studentsRouter.delete('/:id/makeups/:makeupId', async (req, res) => {
   const { id, makeupId } = parse(z.object({ id: zId, makeupId: zId }), req.params);
   await assertStudentAccess(currentUser(req), id);
+  const held = await db.query.studentAttendance.findFirst({
+    columns: { id: true },
+    where: and(
+      eq(studentAttendance.studentId, id),
+      sql`(${studentAttendance.batchId}, ${studentAttendance.date}) in (select batch_id, date from ${makeupSessions} where id = ${makeupId})`,
+    ),
+  });
+  if (held) throw AppError.conflict('Attendance is already marked for this makeup.');
   const [deleted] = await db
     .delete(makeupSessions)
     .where(and(eq(makeupSessions.id, makeupId), eq(makeupSessions.studentId, id)))

@@ -12,6 +12,7 @@ import {
   studentAttendance,
 } from '../../db/schema/index.js';
 import { addDays, instantAt, minDate, type IsoDate } from '../../lib/dates.js';
+import { isLive, resolutionKey, resolutionsFor } from '../schedule/makeups.js';
 import { belongsTo, rosterDay, scheduleFor } from '../schedule/schedule.js';
 import type { Cycle } from './cycles.js';
 
@@ -28,6 +29,8 @@ export interface CycleSession {
   state: SessionState;
   reason: string | null;
   mark: Mark | null;
+  /** Made up (or to be made up) in another batch. */
+  makeup: { batchName: string; date: IsoDate } | null;
 }
 
 export interface CycleProgress {
@@ -104,7 +107,10 @@ export async function cycleProgress(
       .from(studentAttendance)
       .where(and(inArray(studentAttendance.batchId, batchIds), inRange(studentAttendance.date))),
   ]);
-  const schedule = await scheduleFor(list, from, to);
+  const [schedule, settled] = await Promise.all([
+    scheduleFor(list, from, to),
+    resolutionsFor(batchIds, { now }),
+  ]);
   const off = new Map(cancels.map((c) => [`${c.batchId}:${c.date}`, c]));
   const held = new Set([...checkIns, ...marks].map((r) => `${r.batchId}:${r.date}`));
   const wanted = new Set(studentIds);
@@ -120,20 +126,30 @@ export async function cycleProgress(
     const sessions: CycleSession[] = [];
     for (const s of schedule.get(c.batchId) ?? []) {
       const day = rosterDay(s);
-      const mark = markOf.get(`${c.batchId}:${s.date}:${c.studentId}`) ?? null;
+      const own = markOf.get(`${c.batchId}:${s.date}:${c.studentId}`) ?? null;
+      const found = settled.get(resolutionKey(c.batchId, day, c.studentId));
+      // Made up elsewhere: what counts is that session (unless they came to this one after all).
+      const r = isLive(found) && !own ? found : undefined;
+      const mark = r?.makeup ? r.makeup.mark : own;
       if (day < c.startsOn || day > last) continue;
-      if (!e || (!belongsTo(e, s) && !mark)) continue;
+      if (!e || (!belongsTo(e, s) && !own)) continue;
       const key = `${c.batchId}:${s.date}`;
       const x = off.get(key);
-      const state: SessionState = x
-        ? x.closedAt
-          ? 'closed'
-          : 'missed'
-        : held.has(key)
+      const state: SessionState = r
+        ? r.state === 'made-up'
           ? 'held'
-          : instantAt(s.date, s.endTime) > now
+          : r.state === 'booked'
             ? 'upcoming'
-            : 'unconfirmed';
+            : 'closed'
+        : x
+          ? x.closedAt
+            ? 'closed'
+            : 'missed'
+          : held.has(key)
+            ? 'held'
+            : instantAt(s.date, s.endTime) > now
+              ? 'upcoming'
+              : 'unconfirmed';
       sessions.push({
         date: s.date,
         originalDate: s.kind === 'moved' ? s.originalDate : null,
@@ -141,8 +157,14 @@ export async function cycleProgress(
         startTime: s.startTime,
         endTime: s.endTime,
         state,
-        reason: x ? (x.closedReason ?? x.reason) : null,
+        reason:
+          r?.state === 'excused'
+            ? `Not needed: ${r.reason}`
+            : x
+              ? (x.closedReason ?? x.reason)
+              : null,
         mark,
+        makeup: r?.makeup ? { batchName: r.makeup.batchName, date: r.makeup.date } : null,
       });
     }
     const n = (f: (s: CycleSession) => boolean) => sessions.filter(f).length;

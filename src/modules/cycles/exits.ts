@@ -29,6 +29,7 @@ import { formatInr } from '../../lib/money.js';
 import { audit } from '../audit/audit.service.js';
 import { noticeStudentJoined, noticeStudentLeft } from '../push/coach-notices.js';
 import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
+import { dropMakeups } from '../schedule/makeups.js';
 import { assertJoinable, moveEnrollment, NO_PLAN } from '../students/students.service.js';
 import { syncCycles } from './cycles.js';
 
@@ -90,6 +91,7 @@ export async function endMembership(
     .update(enrollments)
     .set({ effectiveTo: lastDay, ...NO_PLAN })
     .where(eq(enrollments.id, e.id));
+  await dropMakeups(tx, e.studentId, e.batchId, lastDay);
   const cancelled = await cancelLaterInvoices(tx, [e.id], lastDay);
   await syncCycles(tx, e.id, today);
   const leftAcademy = await leaveIfLast(tx, e.studentId, lastDay, reason);
@@ -164,6 +166,7 @@ async function applyPlannedEnd(tx: DbOrTx, id: string, today: IsoDate) {
       .update(enrollments)
       .set({ effectiveTo: e.plannedEndOn, ...NO_PLAN })
       .where(eq(enrollments.id, e.id));
+    await dropMakeups(tx, e.studentId, e.batchId, e.plannedEndOn);
     await cancelLaterInvoices(tx, [e.id], e.plannedEndOn);
     await syncCycles(tx, e.id, today);
     return { ...base, movedTo: null, leftAcademy: false, problem };

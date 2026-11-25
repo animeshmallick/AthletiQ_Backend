@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAdmin, requireAuth } from './middleware/auth.js';
 import { adminRouter } from './modules/admin/admin.routes.js';
+import { registersRouter } from './modules/attendance/register.routes.js';
 import { attendanceRouter } from './modules/attendance/attendance.routes.js';
 import { cancellationsRouter } from './modules/attendance/cancellations.js';
 import { coachSessionsRouter } from './modules/attendance/coach-sessions.routes.js';
@@ -34,6 +35,7 @@ import {
   batchSessionChangesRouter,
   sessionChangesRouter,
 } from './modules/schedule/session-changes.js';
+import { missedMakeupsRouter } from './modules/schedule/missed-makeups.routes.js';
 
 /** Versioned API. Mounted at /api/v1. */
 export function apiRouter(): Router {
@@ -52,6 +54,7 @@ export function apiRouter(): Router {
   api.use('/locations', locationsRouter);
   api.use('/batches', cancellationsRouter);
   api.use('/batches', batchSessionChangesRouter);
+  api.use('/session-changes/missed', missedMakeupsRouter);
   api.use('/session-changes', sessionChangesRouter);
   api.use('/cycles', cyclesRouter);
   api.use('/renewals', renewalsRouter);
@@ -60,6 +63,7 @@ export function apiRouter(): Router {
   api.use('/students', studentsRouter);
   api.use('/sports', sportsRouter);
   api.use('/skills', skillsRouter);
+  api.use('/attendance/registers', registersRouter);
   api.use('/attendance', attendanceRouter);
   api.use('/coach-sessions', coachSessionsRouter);
   api.use('/lessons', lessonsRouter);

@@ -1,6 +1,6 @@
 import { timesOn } from '../../lib/batch-times.js';
 import { planStatusFor } from '../lessons/lessons.routes.js';
-import { and, asc, desc, eq, gte, inArray, lt, lte, sql, type SQL, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql, type SQL, or } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { COACH_ATTENDANCE_EDIT_WINDOW_DAYS } from '../../config/constants.js';
@@ -9,6 +9,7 @@ import {
   batches,
   coachSessions,
   locations,
+  makeupSessions,
   sessionCancellations,
   studentAttendance,
   students,
@@ -27,6 +28,7 @@ import { coveredBy, substitutesOn } from '../substitutions/coverage.js';
 import {
   mayRunOnSql,
   requireSession,
+  rosterDay,
   scheduleFor,
   sessionOn,
   sessionOrigin,
@@ -254,17 +256,28 @@ attendanceRouter.get('/session', async (req, res) => {
           : null,
     students: rows.map((r) => ({
       ...r,
-      ...(history.get(r.studentId) ?? { recent: [], rate30: null }),
+      ...(history.get(r.studentId) ?? {
+        recent: [],
+        rate30: null,
+        before30: { marked: 0, present: 0 },
+      }),
     })),
     summary: summarize(rows.map((r) => r.status)),
   });
 });
 
-/** Last 5 marks before `date` in this batch (newest first) and the 30-day attendance rate. */
+/**
+ * Last 5 marks before `date` in this batch (newest first) and the attendance of the 29 days before
+ * it, as counts too: with the mark for `date` added, that is the last 30 days.
+ */
 async function recentAttendance(batchId: string, studentIds: string[], date: IsoDate) {
   const out = new Map<
     string,
-    { recent: { date: IsoDate; status: AttendanceStatus }[]; rate30: number | null }
+    {
+      recent: { date: IsoDate; status: AttendanceStatus }[];
+      rate30: number | null;
+      before30: { marked: number; present: number };
+    }
   >();
   if (!studentIds.length) return out;
   const from = addDays(date, -60);
@@ -277,21 +290,22 @@ async function recentAttendance(batchId: string, studentIds: string[], date: Iso
     .from(studentAttendance)
     .where(
       and(
-        eq(studentAttendance.batchId, batchId),
+        sql`coalesce(${studentAttendance.homeBatchId}, ${studentAttendance.batchId}) = ${batchId}`,
         inArray(studentAttendance.studentId, studentIds),
         gte(studentAttendance.date, from),
         lt(studentAttendance.date, date),
       ),
     )
     .orderBy(desc(studentAttendance.date));
-  const from30 = addDays(date, -30);
+  const from30 = addDays(date, -29);
   for (const id of studentIds) {
     const mine = rows.filter((r) => r.studentId === id);
-    const last30 = mine.filter((r) => r.date >= from30);
+    const last30 = mine.filter((r) => r.date >= from30 && r.status !== 'excused');
     const present = last30.filter((r) => r.status === 'present' || r.status === 'late').length;
     out.set(id, {
       recent: mine.slice(0, 5).map((r) => ({ date: r.date, status: r.status })),
       rate30: last30.length ? Math.round((present * 100) / last30.length) : null,
+      before30: { marked: last30.length, present },
     });
   }
   return out;
@@ -381,6 +395,31 @@ attendanceRouter.put('/session', async (req, res) => {
       and(eq(sessionCancellations.batchId, batch.id), eq(sessionCancellations.date, body.date)),
     );
     if (off) throw AppError.unprocessable('This session was cancelled');
+    // Guests as booked now (a booking may have been cancelled meanwhile).
+    const guests = new Map(
+      (
+        await tx
+          .select({ id: makeupSessions.studentId, homeBatchId: makeupSessions.missedBatchId })
+          .from(makeupSessions)
+          .where(
+            and(
+              eq(makeupSessions.batchId, batch.id),
+              eq(makeupSessions.date, body.date),
+              eq(makeupSessions.status, 'approved'),
+            ),
+          )
+      ).map((g) => [g.id, g.homeBatchId]),
+    );
+    const gone = marks.filter(
+      (m) =>
+        expected.get(m.studentId)?.isMakeup &&
+        !guests.has(m.studentId) &&
+        !alreadyMarked.has(m.studentId),
+    );
+    if (gone.length)
+      throw AppError.unprocessable('Some students are not part of this session', {
+        studentIds: gone.map((m) => m.studentId),
+      });
     if (clears.length)
       await tx
         .delete(studentAttendance)
@@ -402,6 +441,9 @@ attendanceRouter.put('/session', async (req, res) => {
             status: r.status,
             note: r.note,
             isMakeup: expected.get(r.studentId)?.isMakeup ?? false,
+            homeBatchId: expected.get(r.studentId)?.isMakeup
+              ? (guests.get(r.studentId) ?? null)
+              : null,
             markedById: user.id,
           })),
         )
@@ -490,23 +532,49 @@ attendanceRouter.get('/register', async (req, res) => {
 
   const sessions = (await scheduleFor([batch], q.from, q.to)).get(batch.id) ?? [];
   const sessionDates = sessions.map((s) => s.date);
-  const records = await db
-    .select({
-      studentId: studentAttendance.studentId,
-      date: studentAttendance.date,
-      status: studentAttendance.status,
-      fullName: students.fullName,
-      code: students.code,
-    })
-    .from(studentAttendance)
-    .innerJoin(students, eq(students.id, studentAttendance.studentId))
-    .where(
-      and(
-        eq(studentAttendance.batchId, q.batchId),
-        gte(studentAttendance.date, q.from),
-        lte(studentAttendance.date, q.to),
+  const shown = {
+    studentId: studentAttendance.studentId,
+    status: studentAttendance.status,
+    fullName: students.fullName,
+    code: students.code,
+  };
+  const [own, madeUp] = await Promise.all([
+    // Guests making up another batch's session count there.
+    db
+      .select({ ...shown, date: studentAttendance.date })
+      .from(studentAttendance)
+      .innerJoin(students, eq(students.id, studentAttendance.studentId))
+      .where(
+        and(
+          eq(studentAttendance.batchId, q.batchId),
+          isNull(studentAttendance.homeBatchId),
+          gte(studentAttendance.date, q.from),
+          lte(studentAttendance.date, q.to),
+        ),
       ),
-    );
+    // Made up elsewhere: shown on the missed session.
+    db
+      .select({ ...shown, date: makeupSessions.missedDate })
+      .from(makeupSessions)
+      .innerJoin(
+        studentAttendance,
+        and(
+          eq(studentAttendance.studentId, makeupSessions.studentId),
+          eq(studentAttendance.batchId, makeupSessions.batchId),
+          eq(studentAttendance.date, makeupSessions.date),
+        ),
+      )
+      .innerJoin(students, eq(students.id, makeupSessions.studentId))
+      .where(
+        and(
+          eq(makeupSessions.missedBatchId, q.batchId),
+          gte(makeupSessions.missedDate, q.from),
+          lte(makeupSessions.missedDate, q.to),
+        ),
+      ),
+  ]);
+  const dayOf = (day: IsoDate) => sessions.find((s) => rosterDay(s) === day)?.date ?? day;
+  const records = [...own, ...madeUp.map((m) => ({ ...m, date: dayOf(m.date!) }))];
 
   const byStudent = new Map<
     string,

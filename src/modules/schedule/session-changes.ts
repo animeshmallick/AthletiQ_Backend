@@ -68,6 +68,13 @@ import { cycleProgress } from '../cycles/progress.js';
 import { anchorOf } from '../cycles/cycles.js';
 import { notifyAdmins, notifyInBackground, notifyUsers } from '../push/push.service.js';
 import {
+  isLive,
+  releaseBookings,
+  resolutionKey,
+  resolutionsFor,
+  settledStudents,
+} from './makeups.js';
+import {
   belongsTo,
   isRegularDay,
   memberSessions,
@@ -92,6 +99,8 @@ export interface ChangeRequest {
   date: IsoDate;
   startTime: string;
   endTime: string;
+  /** Students booked to make it up elsewhere come to the rescheduled session instead. */
+  releaseMakeups?: boolean;
 }
 
 export interface Warning {
@@ -209,6 +218,9 @@ async function hasRecords(batchId: string, date: IsoDate, tx: DbOrTx) {
   return marks > 0 || checkIns > 0;
 }
 
+/** One schedule change at a time, so two can't claim a day or a student. */
+export const lockSchedule = (tx: DbOrTx) => tx.execute(sql`select pg_advisory_xact_lock(${LOCK})`);
+
 /**
  * Students of a session (by its roster day) who are still in the batch, with the billing month
  * the session belongs to.
@@ -258,8 +270,19 @@ function affectedOf(
 }
 type Affected = Awaited<ReturnType<typeof affectedStudents>>;
 
-async function busyStudents(list: Affected, batchId: string, at: Slot, tx: DbOrTx) {
+async function busyStudents(
+  list: Pick<Affected[number], 'id' | 'fullName'>[],
+  batchId: string,
+  at: Slot,
+  tx: DbOrTx,
+) {
   if (!list.length) return [];
+  const booked = await bookedThen(
+    list.map((s) => s.id),
+    batchId,
+    at,
+    tx,
+  );
   const others = await tx
     .select({ e: enrollments, name: batches.name })
     .from(enrollments)
@@ -276,7 +299,6 @@ async function busyStudents(list: Affected, batchId: string, at: Slot, tx: DbOrT
         or(isNull(enrollments.effectiveTo), gte(enrollments.effectiveTo, at.date)),
       ),
     );
-  if (!others.length) return [];
   const sessions = await memberSessions(
     others.map((o) => o.e),
     at.date,
@@ -286,8 +308,43 @@ async function busyStudents(list: Affected, batchId: string, at: Slot, tx: DbOrT
   const hits = sessions.filter((s) => overlaps(s, at));
   return list.flatMap((s) => {
     const o = others.find((x) => x.e.studentId === s.id && hits.some((h) => belongsTo(x.e, h)));
-    return o ? [{ id: s.id, fullName: s.fullName, detail: o.name }] : [];
+    const detail = o?.name ?? booked.get(s.id);
+    return detail ? [{ id: s.id, fullName: s.fullName, detail }] : [];
   });
+}
+
+/** Makeups these students have in other batches at that time. */
+async function bookedThen(ids: string[], batchId: string, at: Slot, tx: DbOrTx) {
+  const rows = await tx
+    .select({ studentId: makeupSessions.studentId, batch: timing })
+    .from(makeupSessions)
+    .innerJoin(batches, eq(batches.id, makeupSessions.batchId))
+    .where(
+      and(
+        inArray(makeupSessions.studentId, ids),
+        ne(makeupSessions.batchId, batchId),
+        eq(makeupSessions.date, at.date),
+        eq(makeupSessions.status, 'approved'),
+      ),
+    );
+  const out = new Map<string, string>();
+  if (!rows.length) return out;
+  const batchIds = [...new Set(rows.map((r) => r.batch.id))];
+  const [schedule, off] = await Promise.all([
+    scheduleFor(
+      rows.map((r) => r.batch),
+      at.date,
+      at.date,
+      tx,
+    ),
+    cancelledOn(batchIds, at.date, tx),
+  ]);
+  for (const r of rows) {
+    const s = schedule.get(r.batch.id)?.[0];
+    if (s && !off.has(r.batch.id) && overlaps(s, at))
+      out.set(r.studentId, `makeup in ${r.batch.name}`);
+  }
+  return out;
 }
 
 /** Why the batch can't have this session on that day and time, or null. */
@@ -408,17 +465,29 @@ export async function evaluate(
   const blocked = await slotBlocker(batch, at, current, !missed && !extra, now, tx);
   if (blocked) errors.push(blocked);
 
-  const affected = await affectedStudents(
-    tx,
-    batch.id,
-    current ?? {
-      batchId: batch.id,
-      ...at,
-      kind: 'extra',
-      originalDate: null,
-      changeId: null,
-    },
+  // A missed session: only students who haven't made it up (or aren't about to) elsewhere.
+  const settled = original
+    ? [...(await resolutionsFor([batch.id], { day: original, now, tx })).values()].filter(isLive)
+    : [];
+  const booked = settled.filter((r) => r.state === 'booked').length;
+  const done = new Set(
+    settled.filter((r) => !(req.releaseMakeups && r.state === 'booked')).map((r) => r.studentId),
   );
+  const affected = (
+    await affectedStudents(
+      tx,
+      batch.id,
+      current ?? {
+        batchId: batch.id,
+        ...at,
+        kind: 'extra',
+        originalDate: null,
+        changeId: null,
+      },
+    )
+  ).filter((s) => !done.has(s.id));
+  if (missed && done.size && !affected.length)
+    errors.push('Every student has already made it up or is booked to.');
   const outside = current ? affected.filter((s) => at.date > s.until) : [];
   if (outside.length)
     warnings.push({
@@ -440,7 +509,21 @@ export async function evaluate(
       code: 'location-overlap',
       message: `${sharing.map((s) => s.batch.name).join(', ')} also run${sharing.length === 1 ? 's' : ''} at this location then.`,
     });
-  const clashing = await busyStudents(affected, batch.id, at, tx);
+  // Guests making up another batch's session here move with it.
+  const guests = current
+    ? await tx
+        .select({ id: students.id, fullName: students.fullName })
+        .from(makeupSessions)
+        .innerJoin(students, eq(students.id, makeupSessions.studentId))
+        .where(
+          and(
+            eq(makeupSessions.batchId, batch.id),
+            eq(makeupSessions.date, current.date),
+            eq(makeupSessions.status, 'approved'),
+          ),
+        )
+    : [];
+  const clashing = await busyStudents([...affected, ...guests], batch.id, at, tx);
   if (clashing.length)
     warnings.push({
       code: 'students-busy',
@@ -457,6 +540,8 @@ export async function evaluate(
     replaces: current?.changeId ?? null,
     missed,
     affected: affected.length,
+    /** Students booked to make it up elsewhere. */
+    booked,
   };
 }
 
@@ -475,7 +560,10 @@ export async function smartDates(
   if (!current)
     throw AppError.unprocessable(`${batch.name} has no session on ${nice(sessionDate)}`);
   const original = rosterDay(current);
-  const affected = await affectedStudents(db, batch.id, current);
+  const settled = await settledStudents(batch.id, original);
+  const affected = (await affectedStudents(db, batch.id, current)).filter(
+    (s) => !settled.has(s.id),
+  );
   const from = maxDate(todayInAppTz(now), addDays(original, 1));
   const to = addDays(original, RESCHEDULE_DAYS);
   const slot = {
@@ -659,6 +747,7 @@ const ChangeBody = z.object({
   startTime: zTime,
   endTime: zTime,
   reason: zOptionalText(300),
+  releaseMakeups: z.boolean().optional(),
   /** The caller saw the warnings and goes ahead. */
   confirm: z.boolean().optional(),
 });
@@ -746,6 +835,14 @@ batchSessionChangesRouter.post('/:id/session-changes', async (req, res) => {
       })
       .returning({ id: sessionChanges.id });
     if (e.fromDate) await carryOver(id, e.fromDate, body.date, tx);
+    // Bookings that fell through (and, if asked, the others): those students come to this one.
+    if (e.originalDate)
+      await releaseBookings(
+        tx,
+        id,
+        e.originalDate,
+        body.releaseMakeups ? ['lapsed', 'booked'] : ['lapsed'],
+      );
     await audit(
       {
         ...auditCtx(req),
@@ -859,8 +956,9 @@ export async function missedSessions(user: MissedScope, now: Date = new Date()) 
   const from = addDays(today, -ADMIN_DAYS);
   const inRange = <T extends { batchId: string; date: IsoDate }>(rows: T[]) =>
     new Map(rows.map((r) => [`${r.batchId}:${r.date}`, r]));
-  const [members, schedule, cancels, checkIns, marks] = await Promise.all([
+  const [members, settled, schedule, cancels, checkIns, marks] = await Promise.all([
     currentMembers(db, ids),
+    resolutionsFor(ids, { now }),
     scheduleFor(list, from, addDays(today, ADMIN_DAYS)),
     db
       .select()
@@ -871,12 +969,17 @@ export async function missedSessions(user: MissedScope, now: Date = new Date()) 
       .from(coachSessions)
       .where(and(inArray(coachSessions.batchId, ids), gte(coachSessions.date, from))),
     db
-      .selectDistinct({ batchId: studentAttendance.batchId, date: studentAttendance.date })
+      .select({
+        batchId: studentAttendance.batchId,
+        date: studentAttendance.date,
+        studentId: studentAttendance.studentId,
+      })
       .from(studentAttendance)
       .where(and(inArray(studentAttendance.batchId, ids), gte(studentAttendance.date, from))),
   ]);
   const off = inRange(cancels);
-  const held = inRange([...checkIns, ...marks]);
+  const held = inRange<{ batchId: string; date: IsoDate }>([...checkIns, ...marks]);
+  const came = new Set(marks.map((m) => resolutionKey(m.batchId, m.date, m.studentId)));
   const open = [];
   const unconfirmed = [];
   for (const b of list) {
@@ -884,24 +987,46 @@ export async function missedSessions(user: MissedScope, now: Date = new Date()) 
       if (b.courseSetOn && rosterDay(s) < b.courseSetOn) continue;
       const key = `${b.id}:${s.date}`;
       const c = off.get(key);
-      if (c ? c.closedAt : held.has(key) || instantAt(s.date, s.endTime) > now) continue;
-      const people = affectedOf(members, b.id, s);
-      if (!people.length) continue;
+      if (c?.closedAt) continue;
       const original = rosterDay(s);
+      const stands = (id: string) => settled.get(resolutionKey(b.id, original, id));
+      const over = instantAt(s.date, s.endTime) <= now;
+      if (!c && !over) continue;
+      const everyone = affectedOf(members, b.id, s);
+      // Rescheduled and held without them, then their makeup elsewhere fell through.
+      const stranded = everyone.filter(
+        (p) =>
+          !c && stands(p.id)?.state === 'lapsed' && !came.has(resolutionKey(b.id, s.date, p.id)),
+      );
+      const isHeld = !c && held.has(key);
+      if (isHeld && !stranded.length) continue;
+      const people = isHeld ? stranded : everyone;
+      const count = (f: (state: string | undefined) => boolean) =>
+        people.filter((p) => f(stands(p.id)?.state)).length;
+      const pending = count((x) => !x || x === 'lapsed');
+      const booked = count((x) => x === 'booked');
+      // Everyone has made it up (or doesn't need to): nothing left to do.
+      if (!pending && !booked) continue;
       const row = {
         batch: { id: b.id, name: b.name, coach: b.coach },
         date: s.date,
         originalDate: original,
         startTime: s.startTime,
         endTime: s.endTime,
-        students: people.length,
+        students: pending + booked,
+        pending,
+        booked,
+        madeUp: count((x) => x === 'made-up'),
+        excused: count((x) => x === 'excused'),
+        /** It was rescheduled and held; only these students still need a makeup. */
+        makeupOnly: isHeld,
         reason: c?.reason ?? null,
         missed: c?.missed ?? false,
         /** Coaches can reschedule until here; then only admins. */
         coachUntil: addDays(original, RESCHEDULE_DAYS),
-        overdue: addDays(original, RESCHEDULE_DAYS) < today,
+        overdue: pending > 0 && addDays(original, RESCHEDULE_DAYS) < today,
       };
-      if (c) open.push(row);
+      if (c || isHeld) open.push(row);
       else unconfirmed.push(row);
     }
   }

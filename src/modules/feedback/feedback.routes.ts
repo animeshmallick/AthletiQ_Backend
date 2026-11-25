@@ -26,7 +26,8 @@ import { currentUser, requireCoach } from '../../middleware/auth.js';
 import { assertStudentAccess, isAdmin } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { cancellationsIn } from '../attendance/cancellations.js';
-import { memberSessions } from '../schedule/schedule.js';
+import { isLive, resolutionKey, resolutionsFor } from '../schedule/makeups.js';
+import { memberSessions, rosterDay } from '../schedule/schedule.js';
 import { answersSchema, CURRENT_WEEKLY_TEMPLATE, getTemplate } from './templates/index.js';
 import type { AuthUser } from '../auth/auth.types.js';
 
@@ -98,8 +99,14 @@ async function attendanceForWeek(
   );
   let scheduled = makeups.filter((m) => !cancelled.has(`${m.batchId}:${m.date}`)).length;
   // Home sessions as they actually ran (moved and extra sessions on their own day).
+  const settled = await resolutionsFor([...new Set(enrolls.map((e) => e.batchId))]);
   for (const s of await memberSessions(enrolls, weekStart, end))
-    if (!cancelled.has(`${s.batchId}:${s.date}`)) scheduled++;
+    if (
+      !cancelled.has(`${s.batchId}:${s.date}`) &&
+      // Made up elsewhere: that session counts instead.
+      !isLive(settled.get(resolutionKey(s.batchId, rosterDay(s), studentId)))
+    )
+      scheduled++;
   const count = (s: string) => marks.filter((m) => m.status === s).length;
   const summary = {
     scheduled,

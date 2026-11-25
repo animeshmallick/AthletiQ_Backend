@@ -5,6 +5,7 @@ import { db } from '../../db/client.js';
 import {
   batches,
   coachSessions,
+  makeupExcusals,
   sessionCancellations,
   studentAttendance,
   users,
@@ -18,7 +19,10 @@ import { assertBatchAccess } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { noticeSessionCancelled } from '../push/coach-notices.js';
 import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
-import { requireSession, sessionOn } from '../schedule/schedule.js';
+import { releaseBookings, resolutionsFor } from '../schedule/makeups.js';
+import { noticeMakeupsLost } from '../schedule/missed-makeups.routes.js';
+import { lockSchedule } from '../schedule/session-changes.js';
+import { requireSession, rosterDay, sessionOn } from '../schedule/schedule.js';
 
 /** Cancellation for one session, or null. */
 export async function getCancellation(batchId: string, date: IsoDate) {
@@ -153,6 +157,7 @@ cancellationsRouter.post('/:id/cancellations', async (req, res) => {
     return added;
   });
   notifyInBackground(() => noticeSessionCancelled(id, body.date, user.id, body.reason));
+  notifyInBackground(() => noticeMakeupsLost(id, body.date, user.id));
   if (user.role === 'coach')
     notifyInBackground(() =>
       notifyAdmins({
@@ -172,10 +177,23 @@ cancellationsRouter.delete('/:id/cancellations/:date', async (req, res) => {
   const user = currentUser(req);
   await assertBatchAccess(user, id, { on: date });
   const row = await db.transaction(async (tx) => {
+    await lockSchedule(tx);
     const [batch] = await tx.select().from(batches).where(eq(batches.id, id)).for('update');
     // Rescheduled: undo that first, or the batch would run twice for one session.
     if (!(await sessionOn(batch!, date, tx)))
       throw AppError.conflict('This session was rescheduled. Undo the reschedule first.');
+    // Students who already made it up elsewhere can't have it twice; bookings to come are dropped.
+    const day = rosterDay((await sessionOn(batch!, date, tx))!);
+    const stands = [...(await resolutionsFor([id], { day, tx })).values()];
+    const done = stands.filter((r) => r.state === 'made-up').length;
+    if (done)
+      throw AppError.conflict(
+        `${done} student${done === 1 ? ' has' : 's have'} already made this session up in another batch. Reschedule it for the rest instead.`,
+      );
+    await releaseBookings(tx, id, day, ['booked', 'lapsed']);
+    await tx
+      .delete(makeupExcusals)
+      .where(and(eq(makeupExcusals.batchId, id), eq(makeupExcusals.date, day)));
     const [gone] = await tx
       .delete(sessionCancellations)
       .where(and(eq(sessionCancellations.batchId, id), eq(sessionCancellations.date, date)))
