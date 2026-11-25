@@ -151,7 +151,24 @@ feePlansRouter.patch('/:id', requireAdmin, async (req, res) => {
     }
   }
 
-  const [plan] = await db.update(feePlans).set(body).where(eq(feePlans.id, id)).returning();
+  if (body.daysPerWeek !== undefined && body.daysPerWeek !== before.daysPerWeek) {
+    const inUse = await db.$count(
+      batches,
+      and(eq(batches.feePlanId, id), eq(batches.isActive, true)),
+    );
+    if (inUse)
+      throw AppError.unprocessable(
+        `Active batches use this plan for ${before.daysPerWeek} days a week. Add a new plan instead.`,
+      );
+  }
+
+  const plan = await db.transaction(async (tx) => {
+    const [updated] = await tx.update(feePlans).set(body).where(eq(feePlans.id, id)).returning();
+    // Paying students always get feedback (a free batch may have opted out).
+    if (updated!.monthlyFee > 0 && before.monthlyFee === 0)
+      await tx.update(batches).set({ coachFeedback: true }).where(eq(batches.feePlanId, id));
+    return updated;
+  });
   await audit({
     ...auditCtx(req),
     action: 'fee_plan.updated',

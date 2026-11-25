@@ -109,7 +109,7 @@ describe('student registration (admin)', () => {
     const tiny = await makeBatch(coach.id, location.id, { capacity: 1 });
     await api.post('/api/v1/students', { ...base, batches: [{ batchId: tiny.id }] }).expect(201);
     const full = await api
-      .post('/api/v1/students', { ...base, batches: [{ batchId: tiny.id }] })
+      .post('/api/v1/students', { ...base, fullName: 'Y', batches: [{ batchId: tiny.id }] })
       .expect(422);
     expect(full.body.error.message).toMatch(/is full \(capacity 1\)/);
   });
@@ -260,7 +260,7 @@ describe('updating students', () => {
     const blocked = await paidApi
       .patch(`/api/v1/students/${s.id}`, { joiningDate: '2026-01-16' })
       .expect(422);
-    expect(blocked.body.error.message).toMatch(/after a payment has been recorded/);
+    expect(blocked.body.error.message).toMatch(/after a payment or write-off has been recorded/);
   });
 
   it('rejects joining-date changes that conflict with batch history', async () => {

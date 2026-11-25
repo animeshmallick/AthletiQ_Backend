@@ -127,16 +127,20 @@ export async function login(
 
   const valid = await verifyPassword(user.passwordHash, password);
   if (!valid) {
-    const failed = user.failedLoginCount + 1;
-    const lock = failed >= MAX_FAILED_LOGINS;
-    await db
+    // Counted in the database, so attempts made together all count.
+    const [counted] = await db
       .update(users)
-      .set({
-        failedLoginCount: lock ? 0 : failed,
-        lockedUntil: lock ? new Date(Date.now() + LOGIN_LOCKOUT_MINUTES * 60_000) : null,
-      })
-      .where(eq(users.id, user.id));
-    if (lock) {
+      .set({ failedLoginCount: sql`${users.failedLoginCount} + 1` })
+      .where(eq(users.id, user.id))
+      .returning({ n: users.failedLoginCount });
+    if ((counted?.n ?? 0) >= MAX_FAILED_LOGINS) {
+      await db
+        .update(users)
+        .set({
+          failedLoginCount: 0,
+          lockedUntil: new Date(Date.now() + LOGIN_LOCKOUT_MINUTES * 60_000),
+        })
+        .where(eq(users.id, user.id));
       await audit({
         actorId: user.id,
         action: 'auth.locked',

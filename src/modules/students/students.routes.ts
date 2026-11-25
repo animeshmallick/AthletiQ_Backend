@@ -47,9 +47,16 @@ import {
 } from '../../lib/validation.js';
 import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { assertStudentAccess, isAdmin, studentScope } from '../access/access.js';
+import { invoiceScope } from '../billing/invoices.service.js';
 import { billOnAcceptance } from '../billing/invoice-generator.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
-import { createStudent, getStudentDetail, joinBatch, moveEnrollment } from './students.service.js';
+import {
+  assertNotDuplicate,
+  createStudent,
+  getStudentDetail,
+  joinBatch,
+  moveEnrollment,
+} from './students.service.js';
 import {
   noticeStudentJoined,
   noticeStudentLeft,
@@ -135,6 +142,7 @@ studentsRouter.get('/', async (req, res) => {
           .where(
             and(
               eq(invoices.status, 'due'),
+              invoiceScope(user),
               q.dues === 'overdue' ? lt(invoices.dueDate, today) : undefined,
             ),
           ),
@@ -153,7 +161,7 @@ studentsRouter.get('/', async (req, res) => {
         ),
     })
     .from(invoices)
-    .where(eq(invoices.status, 'due'))
+    .where(and(eq(invoices.status, 'due'), invoiceScope(user)))
     .groupBy(invoices.studentId)
     .as('outstanding');
 
@@ -287,8 +295,9 @@ async function withCardStats<T extends { id: string }>(user: AuthUser, rows: T[]
 
 studentsRouter.get('/:id', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  await assertStudentAccess(currentUser(req), id);
-  ok(res, await getStudentDetail(id));
+  const user = currentUser(req);
+  await assertStudentAccess(user, id);
+  ok(res, await getStudentDetail(id, isAdmin(user) ? undefined : user.id));
 });
 
 // ─── Admin: register / update ────────────────────────────────────────────────
@@ -369,6 +378,13 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
     const existing = await tx.query.students.findFirst({ where: eq(students.id, id) });
     if (!existing) throw AppError.notFound('Student');
 
+    const person = {
+      fullName: body.fullName ?? existing.fullName,
+      phone: body.phone ?? existing.phone,
+    };
+    if (person.fullName !== existing.fullName || person.phone !== existing.phone)
+      await assertNotDuplicate(tx, person, id);
+
     if (body.joiningDate && body.joiningDate !== existing.joiningDate) {
       // The joining date anchors the billing of the batches joined that day. It can be corrected
       // until money has changed hands: their unpaid invoices are cancelled and billing restarts.
@@ -378,16 +394,17 @@ studentsRouter.patch('/:id', requireAdmin, async (req, res) => {
         .where(
           and(eq(enrollments.studentId, id), eq(enrollments.effectiveFrom, existing.joiningDate)),
         );
-      if (firsts.some((e) => e.effectiveTo !== null && e.effectiveTo < body.joiningDate!))
+      const ends = firsts.map((e) => e.effectiveTo ?? e.plannedEndOn);
+      if (ends.some((end) => end !== null && end < body.joiningDate!))
         throw AppError.unprocessable('Joining date conflicts with the batch history.');
       for (const e of firsts) {
         const rows = await tx
           .select({ status: invoices.status, cycle: invoices.cycleNumber })
           .from(invoices)
           .where(eq(invoices.enrollmentId, e.id));
-        if (rows.some((r) => r.status === 'paid' || r.status === 'refunded')) {
+        if (rows.some((r) => ['paid', 'refunded', 'lost'].includes(r.status))) {
           throw AppError.unprocessable(
-            'Joining date cannot change after a payment has been recorded (it anchors the billing cycle).',
+            'Joining date cannot change after a payment or write-off has been recorded (it anchors the billing cycle).',
           );
         }
         let billing: Partial<typeof enrollments.$inferInsert> = {
@@ -632,7 +649,7 @@ studentsRouter.post('/:id/leave', requireAdmin, async (req, res) => {
   const body = parse(LeaveBody, req.body);
 
   const leftBatchIds = await db.transaction(async (tx) => {
-    const s = await tx.query.students.findFirst({ where: eq(students.id, id) });
+    const [s] = await tx.select().from(students).where(eq(students.id, id)).for('update');
     if (!s) throw AppError.notFound('Student');
     if (s.status === 'left') throw AppError.unprocessable('Student has already left');
     if (body.leftOn < s.joiningDate)

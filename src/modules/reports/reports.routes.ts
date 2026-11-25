@@ -8,7 +8,7 @@
  *    private links that open the student's latest report without signing in (for parents);
  *    they expire after SHARE_LINK_TTL_DAYS and can be revoked.
  */
-import { and, asc, desc, eq, gt, inArray, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { Router, type Response } from 'express';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
@@ -73,7 +73,18 @@ export async function buildStudentPdf(
     }
     scope = `${first.name}, since ${formatDisplayDate(first.from)}`;
   }
-  const [report] = await loadStudentReports([id], batchId === 'all' ? null : [batchId], today);
+  // A coach's copy covers their own batches; the family's link covers everything.
+  let only = batchId === 'all' ? null : [batchId];
+  if (!only && user?.role === 'coach') {
+    const own = await db
+      .selectDistinct({ id: batches.id })
+      .from(batches)
+      .innerJoin(enrollments, eq(enrollments.batchId, batches.id))
+      .where(and(eq(enrollments.studentId, id), eq(batches.coachId, user.id)));
+    only = own.map((b) => b.id);
+    scope = 'Your batches, since joining';
+  }
+  const [report] = await loadStudentReports([id], only, today);
   if (!report) throw AppError.notFound('Student');
   const pdf = await renderParentReportPdf(report, await getAcademySettings(), {
     scope,
@@ -198,7 +209,7 @@ export async function openReportLink(token: string, registrationNo: string) {
   const built = await buildStudentPdf(link.studentId, 'all', null);
   await db
     .update(reportLinks)
-    .set({ views: link.views + 1, lastViewedAt: new Date() })
+    .set({ views: sql`${reportLinks.views} + 1`, lastViewedAt: new Date() })
     .where(eq(reportLinks.id, link.id));
   return built;
 }

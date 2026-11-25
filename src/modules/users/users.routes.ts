@@ -1,4 +1,5 @@
-import { balanceOf } from '../funds/ledger.js';
+import { balanceOf, lockFunds } from '../funds/ledger.js';
+import { formatInr } from '../../lib/money.js';
 import {
   and,
   arrayContains,
@@ -16,7 +17,15 @@ import {
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { batches, coachSessions, enrollments, users } from '../../db/schema/index.js';
+import type { DbOrTx } from '../../db/client.js';
+import {
+  batches,
+  batchSubstitutions,
+  coachSessions,
+  deviceTokens,
+  enrollments,
+  users,
+} from '../../db/schema/index.js';
 import { addDays, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { created, ok, pageMeta } from '../../lib/http.js';
@@ -190,6 +199,27 @@ usersRouter.get('/:id', requireAdmin, async (req, res) => {
   ok(res, toPublicUser(u));
 });
 
+/** Someone running batches, or due to cover one, can't stop being a coach. */
+async function assertNotCoaching(tx: DbOrTx, id: string, what: string) {
+  const active = await tx.$count(batches, and(eq(batches.coachId, id), eq(batches.isActive, true)));
+  if (active)
+    throw AppError.unprocessable(
+      `This coach still has active batches. Reassign or deactivate them before ${what}.`,
+    );
+  const covers = await tx.$count(
+    batchSubstitutions,
+    and(
+      eq(batchSubstitutions.substituteCoachId, id),
+      inArray(batchSubstitutions.status, ['pending', 'approved']),
+      gte(batchSubstitutions.toDate, todayInAppTz()),
+    ),
+  );
+  if (covers)
+    throw AppError.unprocessable(
+      `This coach is due to cover as a substitute. Cancel that before ${what}.`,
+    );
+}
+
 const UpdateBody = z.object({
   name: zName.optional(),
   email: zEmail.optional(),
@@ -204,6 +234,8 @@ usersRouter.patch('/:id', requireAdmin, async (req, res) => {
   if (!current) throw AppError.notFound('User');
   if (body.roles && !body.roles.includes('admin') && id === currentUser(req).id)
     throw AppError.unprocessable('You can’t remove your own admin role');
+  if (body.roles && current.roles.includes('coach') && !body.roles.includes('coach'))
+    await assertNotCoaching(db, id, 'removing the coach role');
   const changes = body.roles
     ? {
         ...body,
@@ -262,16 +294,16 @@ usersRouter.post('/:id/status', requireAdmin, async (req, res) => {
     if (!u) throw AppError.notFound('User');
 
     if (status === 'disabled') {
-      const [active] = await tx
-        .select({ n: count() })
-        .from(batches)
-        .where(and(eq(batches.coachId, id), eq(batches.isActive, true)));
-      if ((active?.n ?? 0) > 0) {
+      await assertNotCoaching(tx, id, 'disabling the account');
+      await lockFunds(tx);
+      const cash = await balanceOf(tx, 'cash', { userId: id });
+      if (cash > 0)
         throw AppError.unprocessable(
-          'This coach still has active batches. Reassign or deactivate them before disabling the account.',
+          `${u.name} still holds ${formatInr(cash)} of the academy’s cash. Record the handover before disabling the account.`,
         );
-      }
       await revokeAllSessions(id, tx);
+      // Their phones stop getting notifications too.
+      await tx.delete(deviceTokens).where(eq(deviceTokens.userId, id));
     }
     // Re-enabling an account that never set a password returns it to "invited".
     const nextStatus = status === 'active' && !u.passwordHash ? 'invited' : status;

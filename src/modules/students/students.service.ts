@@ -1,5 +1,5 @@
 import { timesOn } from '../../lib/batch-times.js';
-import { and, asc, desc, eq, gt, isNull, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from '../../db/client.js';
 import {
   batches,
@@ -218,6 +218,37 @@ export async function moveEnrollment(
   return { previous: current, current: next!, batch };
 }
 
+const STUDENTS_LOCK = 0x53545544; // "STUD": one name/phone check at a time.
+
+/**
+ * A student is unique by name and phone together (siblings share a phone). Includes students who
+ * left: they rejoin instead of being added again.
+ */
+export async function assertNotDuplicate(
+  tx: DbOrTx,
+  who: { fullName: string; phone: string },
+  exceptId?: string,
+) {
+  await tx.execute(sql`select pg_advisory_xact_lock(${STUDENTS_LOCK})`);
+  const name = who.fullName.trim().replace(/\s+/g, ' ').toLowerCase();
+  const [same] = await tx
+    .select({ code: students.code, fullName: students.fullName, status: students.status })
+    .from(students)
+    .where(
+      and(
+        eq(students.phone, who.phone),
+        sql`lower(regexp_replace(trim(${students.fullName}), '[[:space:]]+', ' ', 'g')) = ${name}`,
+        exceptId ? ne(students.id, exceptId) : undefined,
+      ),
+    )
+    .limit(1);
+  if (!same) return;
+  const message = `${same.fullName} (${same.code}) already has this name and phone number.${
+    same.status === 'left' ? ' They left: rejoin them instead.' : ''
+  }`;
+  throw new AppError('CONFLICT', message, { fields: [{ path: 'phone', message }] });
+}
+
 export interface CreateStudentInput {
   fullName: string;
   dateOfBirth?: string | null;
@@ -241,6 +272,7 @@ export async function createStudent(tx: DbOrTx, input: CreateStudentInput, actor
   if (!input.batches.length) throw AppError.badRequest('Pick at least one batch');
   if (new Set(input.batches.map((b) => b.batchId)).size !== input.batches.length)
     throw AppError.badRequest('Each batch can be picked once');
+  await assertNotDuplicate(tx, input);
   const code = await nextStudentCode(tx);
 
   const [s] = await tx
@@ -275,7 +307,8 @@ export async function createStudent(tx: DbOrTx, input: CreateStudentInput, actor
   return s!;
 }
 
-export async function getStudentDetail(studentId: string) {
+/** `coachId` limits batches, fees and invoices to that coach's own batches. */
+export async function getStudentDetail(studentId: string, coachId?: string) {
   const [student] = await db.select().from(students).where(eq(students.id, studentId));
   if (!student) throw AppError.notFound('Student');
 
@@ -326,7 +359,12 @@ export async function getStudentDetail(studentId: string) {
       .innerJoin(locations, eq(locations.id, batches.locationId))
       .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
       .leftJoin(lastCycle, eq(lastCycle.enrollmentId, enrollments.id))
-      .where(eq(enrollments.studentId, studentId))
+      .where(
+        and(
+          eq(enrollments.studentId, studentId),
+          coachId ? eq(batches.coachId, coachId) : undefined,
+        ),
+      )
       .orderBy(desc(enrollments.effectiveFrom), asc(batches.name)),
     db
       .select({
@@ -360,7 +398,20 @@ export async function getStudentDetail(studentId: string) {
         invoiceCount: sql<number>`count(*)::int`,
       })
       .from(invoices)
-      .where(eq(invoices.studentId, studentId)),
+      .where(
+        and(
+          eq(invoices.studentId, studentId),
+          coachId
+            ? or(
+                eq(invoices.coachId, coachId),
+                inArray(
+                  invoices.batchId,
+                  db.select({ id: batches.id }).from(batches).where(eq(batches.coachId, coachId)),
+                ),
+              )
+            : undefined,
+        ),
+      ),
   ]);
 
   // Current batch memberships, each with its own price and next invoice.

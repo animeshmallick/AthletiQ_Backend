@@ -83,11 +83,14 @@ async function sessionTasks(user: AuthUser, now: Date): Promise<Task[]> {
   const tasks: Task[] = [];
   for (const s of sessions) {
     if (s.cancelled) continue;
+    // Someone else covers it today: nothing for the batch's own coach to do.
+    if (!admin && s.substitute && s.substitute.id !== user.id) continue;
     const b = s.batch;
+    const runner = s.substitute ?? b.coach;
     const start = toMinutes(b.startTime);
     const end = toMinutes(b.endTime);
     const at = clockLabel(b.startTime);
-    const who = admin ? `${b.coach.name} · ` : '';
+    const who = admin ? `${runner.name} · ` : '';
     const attendanceLink = `/attendance?batch=${b.id}&date=${today}`;
 
     if (!s.coachSession) {
@@ -96,7 +99,7 @@ async function sessionTasks(user: AuthUser, now: Date): Promise<Task[]> {
           id: `missed-check-in:${b.id}:${today}`,
           kind: 'missed-check-in',
           severity: 'critical',
-          title: admin ? `${b.coach.name} hasn't checked in` : `You haven't checked in`,
+          title: admin ? `${runner.name} hasn't checked in` : `You haven't checked in`,
           detail: `${b.name} started at ${at} · ${b.location.name}`,
           link: admin ? `/calendar?date=${today}&view=day` : '/',
           screen: admin ? '/calendar' : '/',

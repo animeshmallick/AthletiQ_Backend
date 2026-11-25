@@ -226,7 +226,7 @@ export async function loadStudentReports(
       .innerJoin(batches, eq(batches.id, enrollments.batchId))
       .innerJoin(users, eq(users.id, batches.coachId))
       .innerJoin(feePlans, eq(feePlans.id, batches.feePlanId))
-      .where(inArray(enrollments.studentId, studentIds))
+      .where(and(inArray(enrollments.studentId, studentIds), inBatches(enrollments.batchId)))
       .orderBy(asc(enrollments.effectiveFrom)),
     db
       .select({

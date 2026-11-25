@@ -113,6 +113,39 @@ async function attendanceForWeek(
   return summary;
 }
 
+/**
+ * The batches a student was in that week, that this user writes about (coaches: their own), the
+ * one to report on first. Also after the student left: the week's report is still to be written.
+ */
+async function weekBatches(user: AuthUser, studentId: string, weekStart: IsoDate) {
+  const rows = await db
+    .select({ batchId: enrollments.batchId })
+    .from(enrollments)
+    .innerJoin(batches, eq(batches.id, enrollments.batchId))
+    .where(
+      and(
+        eq(enrollments.studentId, studentId),
+        overlapsWeek(weekStart),
+        isAdmin(user) ? undefined : eq(batches.coachId, user.id),
+      ),
+    )
+    .orderBy(desc(batches.coachFeedback), desc(enrollments.effectiveFrom));
+  return rows.map((r) => r.batchId);
+}
+
+/** The week's report for these batches: each coach writes one per student. */
+async function weekReport(studentId: string, weekStart: IsoDate, batchIds: string[]) {
+  if (!batchIds.length) return undefined;
+  return db.query.weeklyFeedback.findFirst({
+    where: and(
+      eq(weeklyFeedback.studentId, studentId),
+      eq(weeklyFeedback.weekStart, weekStart),
+      inArray(weeklyFeedback.batchId, batchIds),
+    ),
+    orderBy: [desc(weeklyFeedback.updatedAt)],
+  });
+}
+
 // ─── Template ────────────────────────────────────────────────────────────────
 
 feedbackRouter.get('/template', (_req, res) => {
@@ -146,7 +179,8 @@ export async function weekBoard(
   if (q.batchId) filters.push(eq(batches.id, q.batchId));
 
   const rows = await db
-    .selectDistinctOn([students.id], {
+    // Each coach reports on the student once a week, whatever batches they share.
+    .selectDistinctOn([students.id, batches.coachId], {
       studentId: students.id,
       code: students.code,
       fullName: students.fullName,
@@ -158,7 +192,7 @@ export async function weekBoard(
     .innerJoin(students, eq(students.id, enrollments.studentId))
     .innerJoin(batches, eq(batches.id, enrollments.batchId))
     .where(and(...filters))
-    .orderBy(students.id, desc(enrollments.effectiveFrom));
+    .orderBy(students.id, batches.coachId, desc(enrollments.effectiveFrom));
 
   const existing = rows.length
     ? await db
@@ -168,9 +202,11 @@ export async function weekBoard(
           status: weeklyFeedback.status,
           submittedAt: weeklyFeedback.submittedAt,
           coachName: users.name,
+          batchCoachId: batches.coachId,
         })
         .from(weeklyFeedback)
         .innerJoin(users, eq(users.id, weeklyFeedback.coachId))
+        .innerJoin(batches, eq(batches.id, weeklyFeedback.batchId))
         .where(
           and(
             eq(weeklyFeedback.weekStart, weekStart),
@@ -181,11 +217,11 @@ export async function weekBoard(
           ),
         )
     : [];
-  const byStudent = new Map(existing.map((e) => [e.studentId, e]));
+  const byStudent = new Map(existing.map((e) => [`${e.studentId}:${e.batchCoachId}`, e]));
 
   const items = rows
     .map((r) => {
-      const fb = byStudent.get(r.studentId);
+      const fb = byStudent.get(`${r.studentId}:${r.coachId}`);
       return {
         ...r,
         feedbackId: fb?.id ?? null,
@@ -224,14 +260,25 @@ const ReportParams = z.object({ studentId: zId, weekStart: zWeekStart });
 
 feedbackRouter.get('/students/:studentId/weeks/:weekStart', async (req, res) => {
   const { studentId, weekStart } = parse(ReportParams, req.params);
-  await assertStudentAccess(currentUser(req), studentId);
+  const { batchId } = parse(z.object({ batchId: zId.optional() }), req.query);
+  const user = currentUser(req);
+  const mine = await weekBatches(user, studentId, weekStart);
+  if (!mine.length) await assertStudentAccess(user, studentId);
 
   const student = await db.query.students.findFirst({ where: eq(students.id, studentId) });
   if (!student) throw AppError.notFound('Student');
 
-  const fb = await db.query.weeklyFeedback.findFirst({
-    where: and(eq(weeklyFeedback.studentId, studentId), eq(weeklyFeedback.weekStart, weekStart)),
-  });
+  // An admin opens the report of one of the batches; a coach, their own.
+  let batchIds = mine;
+  if (isAdmin(user) && batchId) {
+    const b = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
+    const theirs = await db
+      .select({ id: batches.id })
+      .from(batches)
+      .where(eq(batches.coachId, b?.coachId ?? user.id));
+    batchIds = theirs.map((x) => x.id);
+  }
+  const fb = await weekReport(studentId, weekStart, batchIds);
   const template = fb ? getTemplate(fb.templateKey, fb.templateVersion) : CURRENT_WEEKLY_TEMPLATE;
   const attendance =
     fb?.status === 'submitted' && fb.attendanceSummary
@@ -258,21 +305,20 @@ const SaveBody = z.object({
   submit: z.boolean().default(false),
 });
 
-/** Saves a draft or submits. Only the student's current coach writes feedback. */
+/** Saves a draft or submits. Written by a coach the student trained with that week. */
 feedbackRouter.put('/students/:studentId/weeks/:weekStart', requireCoach, async (req, res) => {
   const { studentId, weekStart } = parse(ReportParams, req.params);
   const body = parse(SaveBody, req.body);
   const user = currentUser(req);
-  await assertStudentAccess(user, studentId);
+  const mine = await weekBatches(user, studentId, weekStart);
+  if (!mine.length) await assertStudentAccess(user, studentId);
   if (!weekCompleted(weekStart)) {
     throw AppError.unprocessable(
       `Feedback for this week opens on ${opensOn(weekStart)}, once the week is over.`,
     );
   }
 
-  const existing = await db.query.weeklyFeedback.findFirst({
-    where: and(eq(weeklyFeedback.studentId, studentId), eq(weeklyFeedback.weekStart, weekStart)),
-  });
+  const existing = await weekReport(studentId, weekStart, mine);
   if (existing?.status === 'submitted' && todayInAppTz() > addDays(weekStart, EDIT_GRACE_DAYS)) {
     throw AppError.unprocessable(
       'This report is locked. Feedback can be edited until the end of the following week.',
@@ -288,14 +334,9 @@ feedbackRouter.put('/students/:studentId/weeks/:weekStart', requireCoach, async 
   const submitting = body.submit || existing?.status === 'submitted';
   const answers = parse(answersSchema(template, submitting), body.answers);
 
-  // Batch the student was in during that week (latest overlapping enrollment).
-  const [enrollment] = await db
-    .select({ batchId: enrollments.batchId })
-    .from(enrollments)
-    .where(and(eq(enrollments.studentId, studentId), overlapsWeek(weekStart)))
-    .orderBy(desc(enrollments.effectiveFrom))
-    .limit(1);
-  if (!enrollment) throw AppError.unprocessable('Student was not enrolled during this week');
+  // The report already started, else the coach's batch the student was in that week.
+  const batchId = existing?.batchId ?? mine[0];
+  if (!batchId) throw AppError.unprocessable('Student was not enrolled during this week');
 
   const attendance = await attendanceForWeek(studentId, weekStart);
   const now = new Date();
@@ -304,7 +345,7 @@ feedbackRouter.put('/students/:studentId/weeks/:weekStart', requireCoach, async 
     .values({
       studentId,
       weekStart,
-      batchId: enrollment.batchId,
+      batchId,
       coachId: user.id,
       templateKey: template.key,
       templateVersion: template.version,

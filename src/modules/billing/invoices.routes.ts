@@ -1,4 +1,4 @@
-import { and, count, eq, gte, ilike, inArray, lt, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, count, eq, gte, ilike, inArray, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -443,6 +443,24 @@ invoicesRouter.post('/:id/restore-cancelled', requireAdmin, async (req, res) => 
       throw AppError.unprocessable(
         'The student leaves this batch before that month starts, so it can’t be billed.',
       );
+    // Cancelled because it was billed again (e.g. a corrected joining date): never twice.
+    const [other] = await tx
+      .select({ number: invoices.number })
+      .from(invoices)
+      .where(
+        and(
+          eq(invoices.studentId, inv.studentId),
+          inv.batchId
+            ? eq(invoices.batchId, inv.batchId)
+            : eq(invoices.enrollmentId, inv.enrollmentId),
+          ne(invoices.id, id),
+          ne(invoices.status, 'cancelled'),
+          lte(invoices.periodStart, inv.periodEnd),
+          gte(invoices.periodEnd, inv.periodStart),
+        ),
+      )
+      .limit(1);
+    if (other) throw AppError.unprocessable(`Those days are already billed on ${other.number}.`);
     await tx
       .update(invoices)
       .set({ status: 'due', cancelledReason: null })

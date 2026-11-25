@@ -20,6 +20,9 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     appError = err;
   } else if (err instanceof ZodError) {
     appError = validationError(err);
+  } else if (err instanceof Error && err.message === 'No values to set') {
+    // An edit that changes nothing (drizzle refuses an empty update).
+    appError = AppError.badRequest('Nothing to change');
   } else if (isBodyParserError(err)) {
     appError =
       err.type === 'entity.too.large'
