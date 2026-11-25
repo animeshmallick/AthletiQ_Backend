@@ -142,7 +142,7 @@ batchesRouter.get('/:id/insights', async (req, res) => {
     res,
     await batchInsights(
       { ...b, feePlanMonthlyFee: plan?.monthlyFee ?? 0 },
-      { includeMoney: isAdmin(user) },
+      { includeMoney: isAdmin(user), hideFees: !isAdmin(user) && b.coachId !== user.id },
     ),
   );
 });

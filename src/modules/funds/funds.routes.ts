@@ -51,7 +51,15 @@ import { currentUser, requireAdmin } from '../../middleware/auth.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { noticeAdmins, noticeStaff } from './notices.js';
 import type { AuthUser } from '../auth/auth.types.js';
-import { balanceOf, lockFunds, postFeeSplit, postTxn, requireCash, type Entry } from './ledger.js';
+import {
+  assertNotRepeated,
+  balanceOf,
+  lockFunds,
+  postFeeSplit,
+  postTxn,
+  requireCash,
+  type Entry,
+} from './ledger.js';
 
 export const fundsRouter = Router();
 
@@ -67,6 +75,9 @@ export const EXPENSE_CATEGORIES = [
 
 const zAmount = z.number().int().min(1, 'Enter an amount').max(100_000_000);
 const zPastDate = zIsoDate.refine((d) => d <= todayInAppTz(), 'Date cannot be in the future');
+
+/** The same entry was just recorded, and this is another one. */
+const Confirm = { confirm: z.boolean().optional() };
 
 const isAdminUser = (u: AuthUser) => u.role === 'admin';
 
@@ -582,6 +593,7 @@ fundsRouter.get('/txns', async (req, res) => {
 // ─── Money movements ─────────────────────────────────────────────────────────
 
 const HandoverBody = z.object({
+  ...Confirm,
   amount: zAmount,
   occurredOn: zPastDate,
   note: zOptionalText(500),
@@ -598,6 +610,18 @@ fundsRouter.post('/handovers', async (req, res) => {
   const from = await staffMember(fromId);
   const txn = await db.transaction(async (tx) => {
     await lockFunds(tx);
+    await assertNotRepeated(
+      tx,
+      {
+        type: 'handover',
+        occurredOn: body.occurredOn,
+        amount: body.amount,
+        title: `Cash handed over by ${from.name}`,
+        userId: from.id,
+        createdById: user.id,
+      },
+      body.confirm,
+    );
     await requireCash(tx, from.id, body.amount);
     const t = await postTxn(
       tx,
@@ -643,6 +667,7 @@ fundsRouter.post('/handovers', async (req, res) => {
 });
 
 const ExpenseBody = z.object({
+  ...Confirm,
   amount: zAmount,
   occurredOn: zPastDate,
   title: z.string().trim().min(2, 'What was bought?').max(120),
@@ -671,6 +696,18 @@ fundsRouter.post('/expenses', async (req, res) => {
 
   const txn = await db.transaction(async (tx) => {
     await lockFunds(tx);
+    await assertNotRepeated(
+      tx,
+      {
+        type: 'expense',
+        occurredOn: body.occurredOn,
+        amount: body.amount,
+        title: body.title,
+        userId: spender?.id ?? null,
+        createdById: user.id,
+      },
+      body.confirm,
+    );
     let source: Entry;
     if (body.paidFrom === 'own') {
       source = {
@@ -729,6 +766,7 @@ fundsRouter.post('/expenses', async (req, res) => {
 
 const PayoutBody = z
   .object({
+    ...Confirm,
     amount: zAmount,
     occurredOn: zPastDate,
     note: zOptionalText(500),
@@ -770,6 +808,19 @@ fundsRouter.post('/payouts', async (req, res) => {
 
   const txn = await db.transaction(async (tx) => {
     await lockFunds(tx);
+    await assertNotRepeated(
+      tx,
+      {
+        type: 'payout',
+        occurredOn: body.occurredOn,
+        amount: body.amount,
+        title: `Paid to ${to.name}${from ? ` from ${from.name}’s cash` : ''}`,
+        userId: to.kind === 'staff' ? to.id : null,
+        payeeId: to.kind === 'payee' ? to.id : null,
+        createdById: user.id,
+      },
+      body.confirm,
+    );
     const account = to.kind === 'staff' ? 'staff_due' : 'payee_due';
     const who = to.kind === 'staff' ? { userId: to.id } : { payeeId: to.id };
     const owed = await balanceOf(tx, account, who);
@@ -830,6 +881,7 @@ fundsRouter.post('/payouts', async (req, res) => {
 });
 
 const IncomeBody = z.object({
+  ...Confirm,
   amount: zAmount,
   occurredOn: zPastDate,
   title: z.string().trim().min(2, 'Describe the income').max(120),
@@ -842,6 +894,18 @@ fundsRouter.post('/income', requireAdmin, async (req, res) => {
   const user = currentUser(req);
   const body = parse(IncomeBody, req.body);
   const txn = await db.transaction(async (tx) => {
+    await lockFunds(tx);
+    await assertNotRepeated(
+      tx,
+      {
+        type: 'income',
+        occurredOn: body.occurredOn,
+        amount: body.amount,
+        title: body.title,
+        createdById: user.id,
+      },
+      body.confirm,
+    );
     const t = await postTxn(
       tx,
       {

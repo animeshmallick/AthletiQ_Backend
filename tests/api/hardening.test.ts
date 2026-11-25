@@ -103,6 +103,30 @@ describe('a student shared by two coaches', () => {
   });
 });
 
+describe('a substitute', () => {
+  it('sees the batch’s sessions but not its students’ fees', async () => {
+    const s = await shared();
+    const sub = await makeUser('coach');
+    await s.api
+      .post('/api/v1/substitutions', {
+        batchId: s.batch.id,
+        substituteCoachId: sub.id,
+        fromDate: '2026-03-16',
+        toDate: '2026-03-18',
+      })
+      .expect(201);
+    const url = `/api/v1/batches/${s.batch.id}/insights`;
+    const d = (await (await as(sub)).get(url).expect(200)).body.data;
+    expect(d.roster[0].fees).toMatchObject({ status: 'hidden', unpaidInvoiceId: null });
+    expect(d.summary.fees).toMatchObject({ hidden: true, studentsOverdue: 0, studentsDue: 0 });
+    expect(d.upcoming.length).toBeGreaterThan(0);
+    const own = (await (await as(s.coach)).get(url).expect(200)).body.data;
+    expect(own.roster[0].fees.status).not.toBe('hidden');
+    await s.api.get('/api/v1/invoices?pageSize=500').expect(200);
+    await s.api.get('/api/v1/invoices?pageSize=501').expect(400);
+  });
+});
+
 describe('people', () => {
   it('a coach with batches or cover due can’t lose the role or be disabled', async () => {
     setToday('2026-03-16');
@@ -232,6 +256,38 @@ describe('people', () => {
 });
 
 describe('money and plans', () => {
+  it('asks before recording the same money twice in a row', async () => {
+    setToday('2026-03-16');
+    const a = await makeAcademy();
+    const api = await as(a.admin);
+    const when = { occurredOn: '2026-03-16', amount: 50_000 };
+    const post = (path: string, body: object, who = api) =>
+      who.post(`/api/v1/funds/${path}`, { ...when, ...body });
+    await post('income', { title: 'Opening balance' }).expect(201);
+    const again = await post('income', { title: ' opening BALANCE ' }).expect(409);
+    expect(again.body.error.details.warnings).toEqual([{ code: 'repeated' }]);
+    await post('income', { title: 'Opening balance', confirm: true }).expect(201);
+    await post('income', { title: 'Opening balance', amount: 50_001 }).expect(201);
+    const bought = { title: 'Balls', paidFrom: 'own' };
+    const coach = await as(a.coach);
+    await post('expenses', bought, coach).expect(201);
+    await post('expenses', bought, coach).expect(409);
+    await post('expenses', bought, await as(a.otherCoach)).expect(201); // someone else
+    await post('payouts', { userId: a.coach.id, amount: 20_000 }).expect(201);
+    await post('payouts', { userId: a.coach.id, amount: 20_000 }).expect(409);
+    await post('payouts', { userId: a.coach.id, amount: 20_000, confirm: true }).expect(201);
+    // Two at the same moment: only one goes in.
+    const both = await Promise.all([
+      post('income', { title: 'Gala' }),
+      post('income', { title: 'Gala' }),
+    ]);
+    expect(both.map((r) => r.status).sort()).toEqual([201, 409]);
+    // A reversed one doesn't count.
+    const gala = both.find((r) => r.status === 201)!.body.data.id as string;
+    await api.post(`/api/v1/funds/txns/${gala}/reverse`, { reason: 'Wrong' }).expect(200);
+    await post('income', { title: 'Gala' }).expect(201);
+  });
+
   it('a cancelled invoice isn’t restored over days billed again', async () => {
     setToday('2026-03-16');
     const a = await makeAcademy();

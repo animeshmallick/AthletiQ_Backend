@@ -22,6 +22,39 @@ export async function lockFunds(tx: DbOrTx) {
   await tx.execute(sql`select pg_advisory_xact_lock(${FUNDS_LOCK})`);
 }
 
+/**
+ * 409 when the same person recorded the same movement minutes ago (e.g. the signal dropped and
+ * they tried again), unless they confirm it is another one. Call with the funds lock held.
+ */
+export async function assertNotRepeated(
+  tx: DbOrTx,
+  txn: Pick<
+    typeof fundTxns.$inferInsert,
+    'type' | 'occurredOn' | 'amount' | 'title' | 'createdById' | 'userId' | 'payeeId'
+  >,
+  confirm: boolean | undefined,
+) {
+  if (confirm) return;
+  const same = await tx.$count(
+    fundTxns,
+    and(
+      isNull(fundTxns.reversedAt),
+      eq(fundTxns.type, txn.type),
+      eq(fundTxns.occurredOn, txn.occurredOn),
+      eq(fundTxns.amount, txn.amount),
+      eq(fundTxns.createdById, txn.createdById),
+      sql`lower(trim(${fundTxns.title})) = ${txn.title.trim().toLowerCase()}`,
+      txn.userId ? eq(fundTxns.userId, txn.userId) : isNull(fundTxns.userId),
+      txn.payeeId ? eq(fundTxns.payeeId, txn.payeeId) : isNull(fundTxns.payeeId),
+      sql`${fundTxns.createdAt} > now() - interval '10 minutes'`,
+    ),
+  );
+  if (same)
+    throw AppError.conflict('You just recorded the same entry. Add it again?', {
+      warnings: [{ code: 'repeated' }],
+    });
+}
+
 /** Inserts a txn and its entries. Cash moved must equal the claims moved. */
 export async function postTxn(
   tx: DbOrTx,

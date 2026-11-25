@@ -45,7 +45,7 @@ const PRESENT = sql`${studentAttendance.status} in ('present', 'late')`;
 
 export async function batchInsights(
   b: BatchForInsights,
-  opts: { includeMoney: boolean; today?: IsoDate },
+  opts: { includeMoney: boolean; hideFees?: boolean; today?: IsoDate },
 ) {
   const today = opts.today ?? todayInAppTz();
   const from30 = addDays(today, -29);
@@ -334,8 +334,12 @@ export async function batchInsights(
       },
       fees: {
         // Counts are fine for coaches (who follows up), amounts only for admins.
-        studentsOverdue: roster.filter((r) => r.fees.status === 'overdue').length,
-        studentsDue: roster.filter((r) => r.fees.status === 'due').length,
+        /** A substitute runs sessions; fees stay with the batch's coach and admins. */
+        hidden: !!opts.hideFees,
+        studentsOverdue: opts.hideFees
+          ? 0
+          : roster.filter((r) => r.fees.status === 'overdue').length,
+        studentsDue: opts.hideFees ? 0 : roster.filter((r) => r.fees.status === 'due').length,
         money,
       },
     },
@@ -349,7 +353,19 @@ export async function batchInsights(
       // Coaches see each student's fee status but not amounts.
       opts.includeMoney
         ? r
-        : { ...r, fees: { ...r.fees, monthly: null, due: null, overdue: null } },
+        : {
+            ...r,
+            fees: opts.hideFees
+              ? {
+                  monthly: null,
+                  due: null,
+                  overdue: null,
+                  status: 'hidden' as const,
+                  unpaidInvoiceId: null,
+                  lastPaidAt: null,
+                }
+              : { ...r.fees, monthly: null, due: null, overdue: null },
+          },
     ),
   };
 }

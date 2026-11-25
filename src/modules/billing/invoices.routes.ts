@@ -43,6 +43,8 @@ import { noticeFeeShares, noticeSharesReversed } from '../funds/notices.js';
 export const invoicesRouter = Router();
 
 const ListQuery = zPagination.extend({
+  /** Up to 500 at once, so the grouped view's totals are complete. */
+  pageSize: z.coerce.number().int().min(1).max(500).default(20),
   status: z.enum(['due', 'overdue', 'paid', 'refunded', 'cancelled', 'lost', 'open']).optional(),
   studentId: zId.optional(),
   batchId: zId.optional(),
