@@ -26,6 +26,7 @@ describe('the built-in free plan', () => {
     // Fits a batch on any number of days.
     const created = await api
       .post('/api/v1/batches', {
+        confirm: true,
         name: 'Free Saturdays',
         coachId: coach.id,
         locationId: location.id,
@@ -73,6 +74,7 @@ describe('excluding free students from the students list', () => {
     const freeBatch = (
       await api
         .post('/api/v1/batches', {
+          confirm: true,
           name: 'Free Morning',
           coachId: coach.id,
           locationId: location.id,

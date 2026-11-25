@@ -2,7 +2,14 @@ import { and, count, eq, gte, ilike, inArray, lt, lte, or, sql, type SQL } from 
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { batches, invoices, locations, payments, students } from '../../db/schema/index.js';
+import {
+  batches,
+  enrollments,
+  invoices,
+  locations,
+  payments,
+  students,
+} from '../../db/schema/index.js';
 import { addDays, addMonthsClamped, minDate, todayInAppTz } from '../../lib/dates.js';
 import { AppError } from '../../lib/errors.js';
 import { ok, pageMeta } from '../../lib/http.js';
@@ -154,7 +161,7 @@ invoicesRouter.get('/', async (req, res) => {
     db
       .select({
         total: count(),
-        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::float8`,
       })
       .from(invoices)
       .innerJoin(students, eq(students.id, invoices.studentId))
@@ -187,8 +194,9 @@ invoicesRouter.get('/:id/pdf', async (req, res) => {
 invoicesRouter.post('/:id/share', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
   const inv = await getInvoiceForUser(currentUser(req), id);
-  if (inv.status === 'cancelled' || inv.status === 'lost')
-    throw AppError.unprocessable('Cancelled or lost invoices cannot be shared');
+  // Closed ones would ask the family for a fee they don't owe.
+  if (inv.status !== 'due' && inv.status !== 'paid')
+    throw AppError.unprocessable('Cancelled, lost or refunded invoices cannot be shared');
   await audit({ ...auditCtx(req), action: 'invoice.shared', entityType: 'invoice', entityId: id });
   ok(res, await buildShare(inv));
 });
@@ -410,6 +418,42 @@ invoicesRouter.post('/:id/restore-lost', requireAdmin, async (req, res) => {
         entityType: 'invoice',
         entityId: id,
         metadata: { reason, lostReason: inv.lostReason },
+      },
+      tx,
+    );
+  });
+  ok(res, await getInvoiceForUser(currentUser(req), id));
+});
+
+/** Admin only: an invoice cancelled by mistake → due again (same number, amount and due date). */
+invoicesRouter.post('/:id/restore-cancelled', requireAdmin, async (req, res) => {
+  const { id } = parse(zIdParam, req.params);
+  const { reason } = parse(ReversalBody, req.body);
+  await db.transaction(async (tx) => {
+    const [inv] = await tx.select().from(invoices).where(eq(invoices.id, id)).for('update');
+    if (!inv) throw AppError.notFound('Invoice');
+    if (inv.status !== 'cancelled')
+      throw AppError.conflict('Only cancelled invoices can be restored');
+    const [e] = await tx
+      .select({ to: enrollments.effectiveTo, planned: enrollments.plannedEndOn })
+      .from(enrollments)
+      .where(eq(enrollments.id, inv.enrollmentId));
+    const last = e?.to ?? e?.planned;
+    if (last && inv.periodStart > last)
+      throw AppError.unprocessable(
+        'The student leaves this batch before that month starts, so it can’t be billed.',
+      );
+    await tx
+      .update(invoices)
+      .set({ status: 'due', cancelledReason: null })
+      .where(eq(invoices.id, id));
+    await audit(
+      {
+        ...auditCtx(req),
+        action: 'invoice.cancel_restored',
+        entityType: 'invoice',
+        entityId: id,
+        metadata: { reason, cancelledReason: inv.cancelledReason },
       },
       tx,
     );

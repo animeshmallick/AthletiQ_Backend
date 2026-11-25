@@ -183,7 +183,7 @@ async function noticeRenewedWithDues(studentIds: string[], today: IsoDate) {
   const rows = await db
     .select({
       name: students.fullName,
-      amount: sql<number>`sum(${invoices.totalAmount})::int`,
+      amount: sql<number>`sum(${invoices.totalAmount})::float8`,
     })
     .from(invoices)
     .innerJoin(students, eq(students.id, invoices.studentId))

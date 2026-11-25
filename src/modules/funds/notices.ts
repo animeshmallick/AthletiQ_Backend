@@ -21,7 +21,7 @@ const LINK = '/finance?tab=money';
 /** Staff shares of one fee split, by person. */
 async function staffShares(paymentId: string, live: boolean) {
   return db
-    .select({ userId: fundEntries.userId, amount: sql<number>`sum(${fundEntries.amount})::int` })
+    .select({ userId: fundEntries.userId, amount: sql<number>`sum(${fundEntries.amount})::float8` })
     .from(fundEntries)
     .innerJoin(fundTxns, eq(fundTxns.id, fundEntries.txnId))
     .where(
@@ -129,7 +129,7 @@ export async function sendMoneyReminders(now: Date = new Date()) {
     .select({
       account: fundEntries.account,
       userId: fundEntries.userId,
-      amount: sql<number>`sum(${fundEntries.amount})::int`,
+      amount: sql<number>`sum(${fundEntries.amount})::float8`,
     })
     .from(fundEntries)
     .innerJoin(fundTxns, eq(fundTxns.id, fundEntries.txnId))

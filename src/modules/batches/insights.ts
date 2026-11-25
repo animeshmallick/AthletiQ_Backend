@@ -105,14 +105,14 @@ export async function batchInsights(
       db
         .select({
           studentId: invoices.studentId,
-          due: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due'), 0)::int`,
-          overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due' and ${invoices.dueDate} < ${today}), 0)::int`,
+          due: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due'), 0)::float8`,
+          overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due' and ${invoices.dueDate} < ${today}), 0)::float8`,
           oldestDueId: sql<
             string | null
           >`(array_agg(${invoices.id} order by ${invoices.dueDate}) filter (where ${invoices.status} = 'due'))[1]`,
           lastPaidAt: sql<string | null>`max(${invoices.paidAt})`,
-          monthIssued: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} >= ${month} and ${invoices.status} not in ('cancelled', 'lost')), 0)::int`,
-          monthCollected: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} >= ${month} and ${invoices.status} = 'paid'), 0)::int`,
+          monthIssued: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} >= ${month} and ${invoices.status} not in ('cancelled', 'lost')), 0)::float8`,
+          monthCollected: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} >= ${month} and ${invoices.status} = 'paid'), 0)::float8`,
         })
         .from(invoices)
         .where(eq(invoices.batchId, b.id))

@@ -137,7 +137,7 @@ export async function dayOverview(user: AuthUser, day: IsoDate) {
         coachSession: cs
           ? {
               checkInAt: cs.checkInAt,
-              flagged: !cs.checkInWithinFence || cs.outsideTime,
+              flagged: !cs.checkInWithinFence,
             }
           : null,
       };
@@ -372,8 +372,10 @@ attendanceRouter.put('/session', async (req, res) => {
   );
   const clears = body.records.filter((r) => r.status === null).map((r) => r.studentId);
   await db.transaction(async (tx) => {
-    // Serialised with cancelling this session.
-    await tx.select({ id: batches.id }).from(batches).where(eq(batches.id, batch.id)).for('update');
+    // Serialised with cancelling or moving this session.
+    const [locked] = await tx.select().from(batches).where(eq(batches.id, batch.id)).for('update');
+    // It may have been moved away meanwhile.
+    await requireSession(locked!, body.date, tx);
     const off = await tx.$count(
       sessionCancellations,
       and(eq(sessionCancellations.batchId, batch.id), eq(sessionCancellations.date, body.date)),

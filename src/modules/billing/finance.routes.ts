@@ -76,9 +76,9 @@ financeRouter.get('/summary', async (req, res) => {
   ] = await Promise.all([
     db
       .select({
-        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::float8`,
         count: sql<number>`count(*)::int`,
-        discounts: sql<number>`coalesce(sum(${invoices.discountAmount}), 0)::int`,
+        discounts: sql<number>`coalesce(sum(${invoices.discountAmount}), 0)::float8`,
       })
       .from(invoices)
       .where(
@@ -91,18 +91,18 @@ financeRouter.get('/summary', async (req, res) => {
       ),
     db
       .select({
-        amount: sql<number>`coalesce(sum(${payments.amount}) filter (where ${payments.status} = 'completed'), 0)::int`,
+        amount: sql<number>`coalesce(sum(${payments.amount}) filter (where ${payments.status} = 'completed'), 0)::float8`,
         count: sql<number>`(count(*) filter (where ${payments.status} = 'completed'))::int`,
-        refunded: sql<number>`coalesce(sum(${payments.amount}) filter (where ${payments.status} = 'refunded'), 0)::int`,
+        refunded: sql<number>`coalesce(sum(${payments.amount}) filter (where ${payments.status} = 'refunded'), 0)::float8`,
       })
       .from(payments)
       .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
       .where(and(...scope, gte(payments.paidOn, from), lte(payments.paidOn, to))),
     db
       .select({
-        due: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.dueDate} >= ${today}), 0)::int`,
+        due: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.dueDate} >= ${today}), 0)::float8`,
         dueCount: sql<number>`(count(*) filter (where ${invoices.dueDate} >= ${today}))::int`,
-        overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.dueDate} < ${today}), 0)::int`,
+        overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.dueDate} < ${today}), 0)::float8`,
         overdueCount: sql<number>`(count(*) filter (where ${invoices.dueDate} < ${today}))::int`,
       })
       .from(invoices)
@@ -110,7 +110,7 @@ financeRouter.get('/summary', async (req, res) => {
     db
       .select({
         mode: payments.mode,
-        amount: sql<number>`sum(${payments.amount})::int`,
+        amount: sql<number>`sum(${payments.amount})::float8`,
         count: sql<number>`count(*)::int`,
       })
       .from(payments)
@@ -127,7 +127,7 @@ financeRouter.get('/summary', async (req, res) => {
     db
       .select({
         month: sql<string>`to_char(${invoices.issueDate}, 'YYYY-MM')`,
-        amount: sql<number>`sum(${invoices.totalAmount})::int`,
+        amount: sql<number>`sum(${invoices.totalAmount})::float8`,
       })
       .from(invoices)
       .where(
@@ -141,7 +141,7 @@ financeRouter.get('/summary', async (req, res) => {
     db
       .select({
         month: sql<string>`to_char(${payments.paidOn}, 'YYYY-MM')`,
-        amount: sql<number>`sum(${payments.amount})::int`,
+        amount: sql<number>`sum(${payments.amount})::float8`,
       })
       .from(payments)
       .innerJoin(invoices, eq(invoices.id, payments.invoiceId))
@@ -153,9 +153,9 @@ financeRouter.get('/summary', async (req, res) => {
         batchName: invoices.batchName,
         coachId: invoices.coachId,
         coachName: users.name,
-        billed: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} between ${from} and ${to} and ${invoices.status} not in ('cancelled', 'lost')), 0)::int`,
-        outstanding: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due'), 0)::int`,
-        overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due' and ${invoices.dueDate} < ${today}), 0)::int`,
+        billed: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.issueDate} between ${from} and ${to} and ${invoices.status} not in ('cancelled', 'lost')), 0)::float8`,
+        outstanding: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due'), 0)::float8`,
+        overdue: sql<number>`coalesce(sum(${invoices.totalAmount}) filter (where ${invoices.status} = 'due' and ${invoices.dueDate} < ${today}), 0)::float8`,
       })
       .from(invoices)
       .leftJoin(users, eq(users.id, invoices.coachId))
@@ -167,7 +167,7 @@ financeRouter.get('/summary', async (req, res) => {
         code: students.code,
         fullName: students.fullName,
         phone: students.phone,
-        overdue: sql<number>`sum(${invoices.totalAmount})::int`,
+        overdue: sql<number>`sum(${invoices.totalAmount})::float8`,
         invoices: sql<number>`count(*)::int`,
         oldestDueDate: sql<string>`min(${invoices.dueDate})`,
       })
@@ -184,7 +184,7 @@ financeRouter.get('/summary', async (req, res) => {
         userId: payments.recordedById,
         name: users.name,
         role: users.lastRole,
-        amount: sql<number>`sum(${payments.amount})::int`,
+        amount: sql<number>`sum(${payments.amount})::float8`,
         count: sql<number>`count(*)::int`,
       })
       .from(payments)
@@ -204,7 +204,7 @@ financeRouter.get('/summary', async (req, res) => {
     // Written off in the period (students who exited).
     db
       .select({
-        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::float8`,
         count: sql<number>`count(*)::int`,
       })
       .from(invoices)

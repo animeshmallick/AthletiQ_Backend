@@ -205,8 +205,8 @@ function range(q: z.output<typeof RangeQuery>) {
 }
 
 const live = isNull(fundTxns.reversedAt);
-const sumEntries = sql<number>`coalesce(sum(${fundEntries.amount}), 0)::int`;
-const sumTxns = sql<number>`coalesce(sum(${fundTxns.amount}), 0)::int`;
+const sumEntries = sql<number>`coalesce(sum(${fundEntries.amount}), 0)::float8`;
+const sumTxns = sql<number>`coalesce(sum(${fundTxns.amount}), 0)::float8`;
 
 /**
  * GET /funds/overview?from&to

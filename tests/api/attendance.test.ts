@@ -261,8 +261,8 @@ describe('student attendance', () => {
         present: 1,
         attendanceComplete: true,
         hasLessonPlan: false,
-        // Checked in at noon for a 6–8 am session.
-        coachSession: expect.objectContaining({ flagged: true }),
+        // At the venue, though at noon for a 6–8 am session: no review needed.
+        coachSession: expect.objectContaining({ flagged: false }),
       }),
     ]);
     const all = await (

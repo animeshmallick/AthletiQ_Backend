@@ -25,11 +25,15 @@ describe('free batches without coach feedback', () => {
       feePlanId: free.id,
     };
     // Feedback is on unless turned off.
-    const on = (await api.post('/api/v1/batches', { ...body, name: 'Free A' }).expect(201)).body
-      .data;
+    const on = (
+      await api.post('/api/v1/batches', { ...body, confirm: true, name: 'Free A' }).expect(201)
+    ).body.data;
     expect(on.coachFeedback).toBe(true);
-    const off = (await api.post('/api/v1/batches', { ...body, coachFeedback: false }).expect(201))
-      .body.data;
+    const off = (
+      await api
+        .post('/api/v1/batches', { ...body, confirm: true, coachFeedback: false })
+        .expect(201)
+    ).body.data;
     expect(off.coachFeedback).toBe(false);
     // The batch list says so too (for the form and the Attendance only tag).
     const listed = (await api.get(`/api/v1/batches/${off.id}`).expect(200)).body.data;
@@ -38,6 +42,7 @@ describe('free batches without coach feedback', () => {
     const paid = (
       await api
         .post('/api/v1/batches', {
+          confirm: true,
           ...body,
           name: 'Paid',
           weekdays: [1, 3, 5],
@@ -55,7 +60,11 @@ describe('free batches without coach feedback', () => {
     // …and moving it onto a paid plan turns feedback back on.
     const repriced = (
       await api
-        .patch(`/api/v1/batches/${on.id}`, { feePlanId: plan.id, weekdays: [1, 3, 5] })
+        .patch(`/api/v1/batches/${on.id}`, {
+          confirm: true,
+          feePlanId: plan.id,
+          weekdays: [1, 3, 5],
+        })
         .expect(200)
     ).body.data;
     expect(repriced.coachFeedback).toBe(true);

@@ -54,7 +54,7 @@ export async function balanceOf(
   who: { userId?: string | null; payeeId?: string | null } = {},
 ): Promise<number> {
   const [row] = await tx
-    .select({ total: sql<number>`coalesce(sum(${fundEntries.amount}), 0)::int` })
+    .select({ total: sql<number>`coalesce(sum(${fundEntries.amount}), 0)::float8` })
     .from(fundEntries)
     .innerJoin(fundTxns, eq(fundTxns.id, fundEntries.txnId))
     .where(

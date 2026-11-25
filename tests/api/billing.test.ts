@@ -2,12 +2,13 @@ import { describe, expect, it, jest } from '@jest/globals';
 import { asc, eq } from 'drizzle-orm';
 import request from 'supertest';
 import { db } from '../../src/db/client';
-import { invoices, jobRuns, students } from '../../src/db/schema';
+import { enrollments, invoices, jobRuns, students } from '../../src/db/schema';
 import * as lock from '../../src/jobs/advisory-lock';
 import { runExclusive } from '../../src/jobs/job-runner';
 import { generateDueInvoices } from '../../src/modules/billing/invoice-generator';
 import { as, getApp, makeAcademy, makeStudent, setToday } from '../helpers/factories';
 
+import { addDays } from '../../src/lib/dates';
 async function academyWithStudent(
   overrides: Parameters<typeof makeStudent>[0] extends infer T ? Partial<T> : never = {},
 ) {
@@ -341,6 +342,7 @@ describe('invoices API', () => {
       .post(`${url}/payments/${second}/refund`, { reason: 'Left academy' })
       .expect(200);
     expect(refunded.body.data.status).toBe('refunded');
+    await adminApi.post(`${url}/share`).expect(422); // nothing to ask the family for
     expect(refunded.body.data.payments).toHaveLength(2);
     await adminApi
       .post(`${url}/payments/6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c/refund`, { reason: 'nope' })
@@ -349,6 +351,31 @@ describe('invoices API', () => {
       .post(`${url}/payments`, { mode: 'cash', paidOn: '2026-02-15' })
       .expect(409);
     expect(cannotPay.body.error.message).toBe('This invoice is refunded');
+  });
+
+  it('restores an invoice cancelled by mistake, unless the student left before its month', async () => {
+    setToday('2026-02-15');
+    const { admin, coach, inv1, inv2 } = await billed();
+    const api = await as(admin);
+    const restore = (id: string, who = api) =>
+      who.post(`/api/v1/invoices/${id}/restore-cancelled`, { reason: 'Cancelled by mistake' });
+    await restore(inv1.id).expect(409); // not cancelled
+    await api.post(`/api/v1/invoices/${inv1.id}/cancel`, { reason: 'Oops' }).expect(200);
+    await restore(inv1.id, await as(coach)).expect(403);
+    const res = await restore(inv1.id).expect(200);
+    expect(res.body.data).toMatchObject({
+      status: 'due',
+      cancelledReason: null,
+      number: inv1.number,
+      totalAmount: inv1.totalAmount,
+    });
+    await api.post(`/api/v1/invoices/${inv2.id}/cancel`, { reason: 'Left' }).expect(200);
+    await db
+      .update(enrollments)
+      .set({ effectiveTo: addDays(inv2.periodStart, -1) })
+      .where(eq(enrollments.id, inv2.enrollmentId));
+    await restore(inv2.id).expect(422);
+    await restore('6f1c2f7a-9b9e-4d0c-9a58-1d2f3e4a5b6c').expect(404);
   });
 
   it('cancels unpaid invoices (admin only)', async () => {

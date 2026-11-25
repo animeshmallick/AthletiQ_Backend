@@ -73,9 +73,8 @@ const overview = async (s: Ctx, date: string) =>
   (await s.admin$.get(`/api/v1/attendance/overview?date=${date}`).expect(200)).body.data.sessions;
 
 describe('rescheduling', () => {
-  it('coach: only missed sessions, at once, with admins told; the roster and cycle stay the original’s', async () => {
+  it('coach: a missed session, at once, with admins told; the roster and cycle stay the original’s', async () => {
     const s = await setup();
-    await change(s, { sessionDate: '2026-03-11', date: '2026-03-12' }).expect(422);
     await change(s, { date: '2026-03-15' }).expect(422); // extras are for admins
     await db.insert(sessionPlans).values({ batchId: s.main.id, date: '2026-03-11', blocks: [] });
     await cancel(s, '2026-03-11');
@@ -191,6 +190,73 @@ describe('rescheduling', () => {
     expect((await overview(s, '2026-03-12'))[0]).toMatchObject({ cancelled: null });
   });
 
+  it('coach: moves an upcoming session in advance, again, and back; admins are told', async () => {
+    const s = await setup();
+    const m = (await change(s, { sessionDate: '2026-03-11', date: '2026-03-12' }).expect(201)).body
+      .data;
+    expect(await overview(s, '2026-03-11')).toEqual([]);
+    expect((await overview(s, '2026-03-12'))[0]).toMatchObject({
+      cancelled: null,
+      expectedStudents: 2,
+      origin: { kind: 'moved', originalDate: '2026-03-11' },
+    });
+    const notes = (await s.admin$.get('/api/v1/me/notifications')).body.data.items;
+    expect(notes[0]).toMatchObject({
+      title: expect.stringContaining('Session rescheduled'),
+      body: expect.stringContaining(s.coach.name),
+    });
+    // Nothing is missed, and it can move again within 30 days of its own date.
+    const open = (await s.coach$.get('/api/v1/session-changes/missed').expect(200)).body.data.open;
+    expect(open).toEqual([]);
+    const far = await change(s, { sessionDate: '2026-03-12', date: '2026-04-11', confirm: true });
+    expect(far.body.error.message).toContain('Ask an admin for a later day');
+    const again = (await change(s, { sessionDate: '2026-03-12', date: '2026-03-14' }).expect(201))
+      .body.data;
+    await s.coach$.post(`/api/v1/session-changes/${m.id}/cancel`).expect(409);
+    await s.coach$.post(`/api/v1/session-changes/${again.id}/cancel`).expect(200);
+    expect((await overview(s, '2026-03-11'))[0]).toMatchObject({ origin: { kind: 'regular' } });
+    expect(
+      (await change(s, { sessionDate: '2026-03-11', date: '2026-03-13' })).body.error.message,
+    ).toContain('already runs');
+    await change(s, { sessionDate: '2026-03-11', date: '2026-03-12' }, s.sub$).expect(404);
+    // Recorded or started: it stays put.
+    await checkIn(s.coach.id, s.main.id, '2026-03-11');
+    await change(s, { sessionDate: '2026-03-11', date: '2026-03-12' }).expect(422);
+    setToday('2026-03-13', '06:30:00');
+    const late = await (
+      await as(s.coach)
+    ).post(`/api/v1/batches/${s.main.id}/session-changes`, {
+      sessionDate: '2026-03-13',
+      date: '2026-03-14',
+      startTime: '06:00',
+      endTime: '08:00',
+    });
+    expect(late.body.error.message).toContain('already started');
+  });
+
+  it('a move and a check-in at the same moment: only one wins', async () => {
+    const s = await setup('2026-03-11');
+    setToday('2026-03-11', '00:20:00'); // 05:50 IST
+    const c = await as(s.coach);
+    const [move, visit] = await Promise.all([
+      change(s, { sessionDate: '2026-03-11', date: '2026-03-12' }, c),
+      c.post('/api/v1/coach-sessions/check-in', {
+        batchId: s.main.id,
+        latitude: 12.9716,
+        longitude: 77.5946,
+      }),
+    ]);
+    expect([move.status === 201, visit.status === 200].filter(Boolean)).toHaveLength(1);
+  });
+
+  it('a rescheduled missed session can’t be moved back onto its cancelled day', async () => {
+    const s = await setup();
+    await cancel(s, '2026-03-13');
+    await change(s, { sessionDate: '2026-03-13', date: '2026-03-14' }).expect(201);
+    const r = await change(s, { sessionDate: '2026-03-14', date: '2026-03-13' });
+    expect(r.body.error.message).toContain('Undo the reschedule');
+  });
+
   it('admins can move a session in advance and add extras; coaches can’t undo those', async () => {
     const s = await setup();
     const m = (
@@ -199,6 +265,10 @@ describe('rescheduling', () => {
     const x = (await change(s, { date: '2026-03-15' }, s.admin$).expect(201)).body.data;
     expect((await overview(s, '2026-03-15'))[0]).toMatchObject({ expectedStudents: 2 });
     await s.coach$.post(`/api/v1/session-changes/${m.id}/cancel`).expect(403);
+    expect(
+      (await change(s, { sessionDate: '2026-03-14', date: '2026-03-21', confirm: true })).body.error
+        .message,
+    ).toContain('Someone else moved');
     await s.coach$.post(`/api/v1/session-changes/${x.id}/cancel`).expect(404);
     expect(
       (await s.coach$.get(`/api/v1/batches/${s.main.id}/session-changes`).expect(200)).body.data,
@@ -244,6 +314,9 @@ describe('rescheduling', () => {
         effectiveFrom: '2026-03-10',
       })
       .expect(201);
+    // In advance: the batch's own coach or an admin only.
+    const early = await change(s, { sessionDate: '2026-03-11', date: '2026-03-12' }, s.sub$);
+    expect(early.body.error.message).toContain('only reschedule missed');
     await cancel(s, '2026-03-11', s.sub$);
     const p = (
       await s.sub$
@@ -379,7 +452,7 @@ describe('missed sessions', () => {
 });
 
 describe('who is alerted', () => {
-  it('the substitute, not the regular coach; off-time check-ins are flagged once', async () => {
+  it('the substitute, not the regular coach; checks in', async () => {
     const s = await setup();
     await s.admin$
       .post('/api/v1/substitutions', {

@@ -4,7 +4,14 @@ import { db } from '../../src/db/client';
 import { batches, coachSessions } from '../../src/db/schema';
 import { normalizeDayTimes, scheduleLabel, timesOn } from '../../src/lib/batch-times';
 import { tasksFor } from '../../src/modules/tasks/tasks.service';
-import { as, makeAcademy, makeBatch, makeStudent, setToday } from '../helpers/factories';
+import {
+  as,
+  makeAcademy,
+  makeBatch,
+  makeLocation,
+  makeStudent,
+  setToday,
+} from '../helpers/factories';
 
 const MON = '2026-03-09';
 const WED = '2026-03-11';
@@ -77,6 +84,7 @@ describe('batch times (API)', () => {
     const res = await api
       .post('/api/v1/batches', {
         ...body,
+        confirm: true, // Saturday overlaps the morning batch, at the same place
         dayTimes: {
           '1': { start: '17:00', end: '18:30' }, // same as the default: dropped
           '6': { start: '07:00', end: '09:00' },
@@ -85,6 +93,31 @@ describe('batch times (API)', () => {
       .expect(201);
     const id = res.body.data.id as string;
     expect(res.body.data.dayTimes).toEqual({ '6': { start: '07:00:00', end: '09:00:00' } });
+
+    // The same coach again at that time: warned at the same place, refused elsewhere.
+    const again = {
+      ...body,
+      name: 'Second',
+      weekdays: [3, 4, 5],
+      startTime: '18:00',
+      endTime: '19:00',
+    };
+    const warned = await api.post('/api/v1/batches', again).expect(409);
+    expect(warned.body.error.message).toContain('Split (Wednesday)');
+    expect(warned.body.error.details.warnings).toHaveLength(1);
+    const elsewhere = await makeLocation();
+    await api
+      .post('/api/v1/batches', { ...again, locationId: elsewhere.id, confirm: true })
+      .expect(422);
+    const second = (await api.post('/api/v1/batches', { ...again, confirm: true }).expect(201)).body
+      .data;
+    // Other edits aren't held up by it; moving it away is.
+    await api.patch(`/api/v1/batches/${second.id}`, { ...again, capacity: 12 }).expect(200);
+    await api.patch(`/api/v1/batches/${second.id}`, { locationId: elsewhere.id }).expect(422);
+    await api
+      .patch(`/api/v1/batches/${second.id}`, { startTime: '19:00', endTime: '20:00' })
+      .expect(200);
+    await api.patch(`/api/v1/batches/${second.id}`, { isActive: false }).expect(200);
 
     // A rename keeps the day times (and doesn't touch other fields).
     await api.patch(`/api/v1/batches/${id}`, { isActive: false }).expect(200);

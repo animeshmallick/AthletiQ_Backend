@@ -1,11 +1,11 @@
-import { and, asc, count, eq, isNull, sql, type SQL, or } from 'drizzle-orm';
+import { and, asc, count, eq, isNull, ne, sql, type SQL, or } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { batches, enrollments, feePlans, locations, sports, users } from '../../db/schema/index.js';
 import { AppError } from '../../lib/errors.js';
-import { normalizeDayTimes, type DayTimes } from '../../lib/batch-times.js';
+import { normalizeDayTimes, timesOn, type DayTimes, type Timed } from '../../lib/batch-times.js';
 import { todayInAppTz } from '../../lib/dates.js';
 import { created, ok } from '../../lib/http.js';
 import {
@@ -246,13 +246,58 @@ async function assertLocation(locationId: string) {
   if (!l.isActive) throw AppError.unprocessable('Selected location is inactive');
 }
 
+/**
+ * A coach with two batches at the same time: refused at different places, and at the same place
+ * only after the admin confirms (they can run both together there).
+ */
+async function assertCoachFree(
+  b: Timed & { coachId: string; locationId: string; weekdays: number[] },
+  confirm: boolean,
+  exceptId?: string,
+) {
+  const others = await db
+    .select()
+    .from(batches)
+    .where(
+      and(
+        eq(batches.coachId, b.coachId),
+        eq(batches.isActive, true),
+        exceptId ? ne(batches.id, exceptId) : undefined,
+      ),
+    );
+  const hm = (t: string) => t.slice(0, 5);
+  const clashing = others.flatMap((o) => {
+    const day = b.weekdays.find((d) => {
+      if (!o.weekdays.includes(d)) return false;
+      const [x, y] = [timesOn(b, d), timesOn(o, d)];
+      return hm(x.startTime) < hm(y.endTime) && hm(y.startTime) < hm(x.endTime);
+    });
+    return day ? [{ name: o.name, day: DAY_NAMES[day]!, here: o.locationId === b.locationId }] : [];
+  });
+  const list = (l: typeof clashing) => l.map((c) => `${c.name} (${c.day})`).join(', ');
+  const away = clashing.filter((c) => !c.here);
+  if (away.length)
+    throw AppError.unprocessable(
+      `The coach already has ${list(away)} at that time at another location.`,
+    );
+  if (clashing.length && !confirm)
+    throw AppError.conflict(
+      `The coach already has ${list(clashing)} at that time at this location.`,
+      { warnings: [{ code: 'coach-busy' }] },
+    );
+}
+
+/** The admin saw the warning and goes ahead. */
+const Confirm = { confirm: z.boolean().optional() };
+
 /** New batches must say how long their course is. */
 const CreateBody = BatchBody.extend({
+  ...Confirm,
   courseMonths: z.number({ error: 'Choose the course length in months' }).int().min(1).max(60),
 });
 
 batchesRouter.post('/', requireAdmin, async (req, res) => {
-  const body = parse(CreateBody, req.body);
+  const { confirm, ...body } = parse(CreateBody, req.body);
   body.dayTimes = timings(body.weekdays, body.startTime, body.endTime, body.dayTimes);
   const [, , , plan] = await Promise.all([
     assertCoach(body.coachId),
@@ -260,6 +305,7 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
     assertSport(body.sportId),
     assertPlanFits(body.feePlanId, body.weekdays),
   ]);
+  if (body.isActive) await assertCoachFree(body, !!confirm);
   // Paying students always get feedback; only a free batch can be attendance-only.
   if (plan.monthlyFee > 0) body.coachFeedback = true;
   const [batch] = await db
@@ -279,7 +325,7 @@ batchesRouter.post('/', requireAdmin, async (req, res) => {
 
 batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
   const { id } = parse(zIdParam, req.params);
-  const body = parse(patchOf(BatchBody), req.body);
+  const { confirm, ...body } = parse(patchOf(BatchBody).extend(Confirm), req.body);
   const existing = await assertBatchAccess(currentUser(req), id);
 
   // Timing changes apply from today on: past check-ins keep the time they were scheduled for.
@@ -302,6 +348,20 @@ batchesRouter.patch('/:id', requireAdmin, async (req, res) => {
     // Paying students always get feedback; only a free batch can be attendance-only.
     if (plan.monthlyFee > 0) body.coachFeedback = true;
   }
+
+  // Only when this edit changes who, where or when: an old overlap doesn't block other edits.
+  const next = { ...existing, ...body };
+  const slot = (b: typeof existing) =>
+    JSON.stringify([
+      b.isActive,
+      b.coachId,
+      b.locationId,
+      [...b.weekdays].sort().map((d) => {
+        const t = timesOn(b, d);
+        return [d, t.startTime.slice(0, 5), t.endTime.slice(0, 5)];
+      }),
+    ]);
+  if (next.isActive && slot(next) !== slot(existing)) await assertCoachFree(next, !!confirm, id);
 
   const members = await currentMembers(id);
   const [heldRow] = await db

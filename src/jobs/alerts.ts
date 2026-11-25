@@ -141,7 +141,7 @@ export async function sendAdminDigest(now: Date = new Date()) {
   ).length;
   const [[collected], [overdue]] = await Promise.all([
     db
-      .select({ total: sql<number>`coalesce(sum(${payments.amount}), 0)::int` })
+      .select({ total: sql<number>`coalesce(sum(${payments.amount}), 0)::float8` })
       .from(payments)
       .where(and(eq(payments.paidOn, today), eq(payments.status, 'completed'))),
     db
@@ -264,7 +264,7 @@ export async function sendWeeklyFeesSummary(now: Date = new Date()) {
   const [[paid], [billed], [overdue]] = await Promise.all([
     db
       .select({
-        total: sql<number>`coalesce(sum(${payments.amount}), 0)::int`,
+        total: sql<number>`coalesce(sum(${payments.amount}), 0)::float8`,
         n: count(),
       })
       .from(payments)
@@ -273,7 +273,7 @@ export async function sendWeeklyFeesSummary(now: Date = new Date()) {
       ),
     db
       .select({
-        total: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        total: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::float8`,
         n: count(),
       })
       .from(invoices)
@@ -286,7 +286,7 @@ export async function sendWeeklyFeesSummary(now: Date = new Date()) {
       ),
     db
       .select({
-        total: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        total: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::float8`,
         n: count(),
       })
       .from(invoices)

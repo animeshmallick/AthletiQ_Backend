@@ -83,7 +83,7 @@ export async function getInvoiceForUser(user: AuthUser, invoiceId: string) {
     db
       .select({
         count: count(),
-        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::int`,
+        amount: sql<number>`coalesce(sum(${invoices.totalAmount}), 0)::float8`,
       })
       .from(invoices)
       .where(

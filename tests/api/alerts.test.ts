@@ -254,12 +254,15 @@ describe('coach notices', () => {
 
     // One day at its own time.
     await api
-      .patch(`/api/v1/batches/${id}`, { dayTimes: { '5': { start: '07:00', end: '08:00' } } })
+      .patch(`/api/v1/batches/${id}`, {
+        confirm: true,
+        dayTimes: { '5': { start: '07:00', end: '08:00' } },
+      })
       .expect(200);
     await settle(sent, 3);
     expect(sent[2]!.message.body).toBe('now Mon · Wed 5:30 pm–7:00 pm, Fri 7:00 am–8:00 am');
 
-    await api.patch(`/api/v1/batches/${id}`, { coachId: otherCoach.id }).expect(200);
+    await api.patch(`/api/v1/batches/${id}`, { coachId: otherCoach.id, confirm: true }).expect(200);
     await settle(sent, 5);
     const byToken = Object.fromEntries(sent.slice(3).map((s) => [s.userToken, s.message.title]));
     expect(byToken).toEqual({

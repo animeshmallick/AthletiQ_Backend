@@ -220,7 +220,7 @@ renewalsRouter.get('/', async (req, res) => {
       ? db
           .select({
             enrollmentId: invoices.enrollmentId,
-            amount: sql<number>`sum(${invoices.totalAmount})::int`,
+            amount: sql<number>`sum(${invoices.totalAmount})::float8`,
             count: sql<number>`count(*)::int`,
           })
           .from(invoices)

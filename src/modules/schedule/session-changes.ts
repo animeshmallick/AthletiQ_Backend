@@ -1,9 +1,10 @@
 /**
  * Rescheduling missed sessions, and (admins) moving or adding sessions.
  *
- *  - Coach, or the substitute covering that day: only a missed (cancelled / not held) session, to
- *    any future day within 30 days of its original date. In effect at once; admins are told.
- *  - Admin: also after the 30 days, moving a session in advance, and extra sessions.
+ *  - Coach, or the substitute covering that day: a missed (cancelled / not held) session, to any
+ *    future day within 30 days of its original date. The batch's own coach also moves one that
+ *    hasn't started (unless someone else moved it there). In effect at once; admins are told.
+ *  - Admin: also further than 30 days, sessions moved by others, and extra sessions.
  *
  * Always at the same location, on a day the batch has no session, with the coach free then.
  * Warned (and confirmable): students outside their billing month, a shared ground, students with
@@ -109,8 +110,9 @@ const overlaps = (a: Omit<Slot, 'date'>, b: Omit<Slot, 'date'>) =>
 const nice = formatDisplayDate;
 const span = (t: Omit<Slot, 'date'>) => `${clockLabel(t.startTime)}–${clockLabel(t.endTime)}`;
 
+/** The batch, locked: check-ins, attendance and cancellations of it wait for this change. */
 async function batchIn(tx: DbOrTx, id: string): Promise<Batch> {
-  const b = await tx.query.batches.findFirst({ where: eq(batches.id, id) });
+  const [b] = await tx.select().from(batches).where(eq(batches.id, id)).for('update');
   if (!b) throw AppError.notFound('Batch');
   return b;
 }
@@ -320,6 +322,13 @@ async function slotBlocker(
   return null;
 }
 
+/** Whether this user made the change. */
+const requestedBy = async (changeId: string, userId: string, tx: DbOrTx) =>
+  (await tx.$count(
+    sessionChanges,
+    and(eq(sessionChanges.id, changeId), eq(sessionChanges.requestedById, userId)),
+  )) > 0;
+
 /** Checks a change without making it. */
 export async function evaluate(
   user: AuthUser,
@@ -351,8 +360,15 @@ export async function evaluate(
   const missed = !!cancellation;
 
   if (!admin && extra) errors.push('Only an admin can add or move extra sessions.');
-  else if (!admin && !missed)
-    errors.push('Only a missed session can be rescheduled. Cancel it first, or ask an admin.');
+  else if (!admin && !missed && batch.coachId !== user.id)
+    errors.push('Substitutes can only reschedule missed sessions. Ask the coach or an admin.');
+  else if (
+    !admin &&
+    !missed &&
+    current?.changeId &&
+    !(await requestedBy(current.changeId, user.id, tx))
+  )
+    errors.push('Someone else moved this session. Ask an admin to move it again.');
   if (toMin(at.endTime) <= toMin(at.startTime))
     errors.push('The session must end after it starts.');
   if (!batch.isActive) errors.push(`${batch.name} is inactive.`);
@@ -371,6 +387,14 @@ export async function evaluate(
     )
       errors.push('That is when the session already runs.');
     if (missed && at.date <= original!) errors.push('Choose a day after the missed session.');
+    // A missed session goes back to its own day only by undoing, or it would be cancelled there.
+    if (
+      !missed &&
+      current.date !== original &&
+      at.date === original &&
+      (await cancelledOn([batch.id], at.date, tx)).size
+    )
+      errors.push('It was cancelled that day. Undo the reschedule instead.');
     const limit = admin ? ADMIN_DAYS : RESCHEDULE_DAYS;
     if (Math.abs(diffDays(original!, at.date)) > limit)
       errors.push(
@@ -745,7 +769,8 @@ export const sessionChangesRouter = Router();
 
 /**
  * Undoes a change before its session starts: a rescheduled session goes back to its original day
- * (missed again, if it was missed); an extra session is dropped. Coaches: only their reschedules.
+ * (missed again, if it was missed); an extra session is dropped. Coaches: reschedules
+ * of missed sessions, and their own moves in advance.
  */
 sessionChangesRouter.post('/:id/cancel', async (req, res) => {
   const { id } = parse(zIdParam, req.params);
@@ -779,8 +804,9 @@ sessionChangesRouter.post('/:id/cancel', async (req, res) => {
       const back = timesOn(batch, c.originalDate!).startTime;
       if (!missed && instantAt(c.originalDate!, back) <= now)
         throw AppError.conflict('The regular time has passed, so the session can’t go back.');
-      // A coach can't turn an admin's advance move back into a session.
-      if (!missed && !isAdmin(user)) throw AppError.forbidden('Ask an admin to undo this move.');
+      // A coach can't undo someone else's move in advance.
+      if (!missed && !isAdmin(user) && c.requestedById !== user.id)
+        throw AppError.forbidden('Ask an admin to undo this move.');
       await carryOver(c.batchId, c.date, c.originalDate!, tx);
     } else
       await tx

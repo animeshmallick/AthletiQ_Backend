@@ -14,7 +14,7 @@ import { AppError } from '../../lib/errors.js';
 import { created, noContent, ok } from '../../lib/http.js';
 import { parse, zId, zIdParam, zIsoDate } from '../../lib/validation.js';
 import { currentUser } from '../../middleware/auth.js';
-import { assertBatchAccess, getBatchOrThrow } from '../access/access.js';
+import { assertBatchAccess } from '../access/access.js';
 import { audit, auditCtx } from '../audit/audit.service.js';
 import { noticeSessionCancelled } from '../push/coach-notices.js';
 import { notifyAdmins, notifyInBackground } from '../push/push.service.js';
@@ -115,8 +115,10 @@ cancellationsRouter.post('/:id/cancellations', async (req, res) => {
   }
 
   const row = await db.transaction(async (tx) => {
-    // Serialised with check-ins and attendance of this batch, so both can't be recorded.
-    await tx.select({ id: batches.id }).from(batches).where(eq(batches.id, id)).for('update');
+    // Serialised with check-ins, attendance and moves of this batch, so both can't be recorded.
+    const [locked] = await tx.select().from(batches).where(eq(batches.id, id)).for('update');
+    // It may have been moved away meanwhile.
+    await requireSession(locked!, body.date, tx);
     const [marks, checkIns] = await Promise.all([
       tx.$count(
         studentAttendance,
@@ -169,13 +171,17 @@ cancellationsRouter.delete('/:id/cancellations/:date', async (req, res) => {
   const { id, date } = parse(z.object({ id: zId, date: zIsoDate }), req.params);
   const user = currentUser(req);
   await assertBatchAccess(user, id, { on: date });
-  // Rescheduled: undo that first, or the batch would run twice for one session.
-  if (!(await sessionOn(await getBatchOrThrow(id), date)))
-    throw AppError.conflict('This session was rescheduled. Undo the reschedule first.');
-  const [row] = await db
-    .delete(sessionCancellations)
-    .where(and(eq(sessionCancellations.batchId, id), eq(sessionCancellations.date, date)))
-    .returning();
+  const row = await db.transaction(async (tx) => {
+    const [batch] = await tx.select().from(batches).where(eq(batches.id, id)).for('update');
+    // Rescheduled: undo that first, or the batch would run twice for one session.
+    if (!(await sessionOn(batch!, date, tx)))
+      throw AppError.conflict('This session was rescheduled. Undo the reschedule first.');
+    const [gone] = await tx
+      .delete(sessionCancellations)
+      .where(and(eq(sessionCancellations.batchId, id), eq(sessionCancellations.date, date)))
+      .returning();
+    return gone;
+  });
   if (!row) throw AppError.notFound('Cancellation');
   await audit({
     ...auditCtx(req),

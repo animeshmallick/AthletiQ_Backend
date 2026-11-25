@@ -187,7 +187,7 @@ studentsRouter.get('/', async (req, res) => {
       >`json_agg(json_build_object('id', ${batches.id}, 'name', ${batches.name}, 'coachId', ${batches.coachId}, 'coachName', ${users.name}, 'planName', ${feePlans.name}, 'fee', ${fee}) order by ${enrollments.effectiveFrom})`.as(
         'batches',
       ),
-      monthlyFee: sql<number>`sum(${fee})::int`.as('monthly_fee'),
+      monthlyFee: sql<number>`sum(${fee})::float8`.as('monthly_fee'),
     })
     .from(enrollments)
     .innerJoin(batches, eq(batches.id, enrollments.batchId))

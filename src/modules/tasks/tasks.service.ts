@@ -2,7 +2,7 @@
  * "What needs my attention right now?" — one answer used by the header bell, the tab badges and
  * the scheduled alerts. Coaches get their own sessions; admins get academy-wide items.
  */
-import { and, count, eq, isNull, lt, or } from 'drizzle-orm';
+import { and, count, eq, isNull, lt } from 'drizzle-orm';
 import { APP_TIMEZONE } from '../../config/constants.js';
 import { db } from '../../db/client.js';
 import {
@@ -228,12 +228,7 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
       db
         .select({ n: count() })
         .from(coachSessions)
-        .where(
-          and(
-            or(eq(coachSessions.checkInWithinFence, false), eq(coachSessions.outsideTime, true)),
-            isNull(coachSessions.reviewedAt),
-          ),
-        ),
+        .where(and(eq(coachSessions.checkInWithinFence, false), isNull(coachSessions.reviewedAt))),
       db
         .select({ n: count() })
         .from(invoices)
@@ -289,7 +284,7 @@ export async function tasksFor(user: AuthUser, now: Date = new Date()) {
         kind: 'flagged-check-ins',
         severity: 'warning',
         title: `${flags!.n} flagged check-in${flags!.n === 1 ? '' : 's'}`,
-        detail: 'Coaches checked in away from the venue or outside session time',
+        detail: 'Coaches checked in away from the venue',
         link: '/coach-sessions',
         screen: '/coach-sessions',
         count: flags!.n,
