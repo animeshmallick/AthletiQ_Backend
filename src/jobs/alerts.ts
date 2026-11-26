@@ -39,15 +39,22 @@ const SYSTEM: AuthUser = {
 };
 
 /**
- * Minutes of the day (IST) when a session alert can be due: 15 min before each session to 2 hours
- * after its end. Kept in memory for 3 hours; any change made through the API empties it.
+ * Minutes of the day (IST) when a session alert can become due: 15 min before a session (reminder),
+ * 30 min after its start (no check-in) and 30 min after its end (wrap-up), each tried again 5 min
+ * later in case the server was restarting. Every other minute skips the database, so it can pause.
+ * Kept in memory for 12 hours; any change made through the API empties it.
  */
-function alertWindows(today: string) {
-  return cached(`alert-windows:${today}`, 3 * 60 * 60_000, async () => {
+function alertMinutes(today: string) {
+  return cached(`alert-minutes:${today}`, 12 * 60 * 60_000, async () => {
     const { sessions } = await dayOverview(SYSTEM, today);
-    return sessions
-      .filter((s) => !s.cancelled)
-      .map((s) => [toMinutes(s.batch.startTime) - 15, toMinutes(s.batch.endTime) + 120] as const);
+    const due = new Set<number>();
+    for (const s of sessions) {
+      if (s.cancelled) continue;
+      const start = toMinutes(s.batch.startTime);
+      const end = toMinutes(s.batch.endTime);
+      for (const t of [start - 15, start + 30, end + 30]) due.add(t).add(t + 5);
+    }
+    return [...due];
   });
 }
 
@@ -62,8 +69,7 @@ export async function runSessionAlerts(now: Date = new Date()) {
   const today = todayInAppTz(now);
   const mins = istMinutes(now);
   // Most minutes nothing can be due: skip the database, so it can pause when nobody uses the app.
-  if (!(await alertWindows(today)).some(([from, to]) => mins >= from && mins < to))
-    return { sent: 0 };
+  if (!(await alertMinutes(today)).includes(mins)) return { sent: 0 };
   const { sessions } = await dayOverview(SYSTEM, today);
   const admins = await activeAdminIds();
   let sent = 0;

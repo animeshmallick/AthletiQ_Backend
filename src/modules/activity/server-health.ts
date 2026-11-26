@@ -8,9 +8,9 @@
  *  - memory / swap / disk: the machine's. app memory: the API container's, against its limit.
  *  - event loop: how long the API waits for its turn. Database: one trip, and waiting requests.
  *
- * The database is checked, and the readings saved, once an hour (sooner when an admin looks).
- * Neon pauses an idle database after 5 minutes and bills the time it runs: a trip every minute
- * kept it running all day and used up the month's allowance.
+ * The database is checked, and the readings saved, only while it is awake anyway (someone is using
+ * the app) or every 6 hours. Neon pauses an idle database after 5 minutes and bills the time it
+ * runs: a trip every minute kept it running all day and used up the month's allowance.
  */
 import { readFile, statfs } from 'node:fs/promises';
 import os from 'node:os';
@@ -23,7 +23,10 @@ import { logger } from '../../lib/logger.js';
 import { activeAdminIds, notifyOnce } from '../push/push.service.js';
 
 const EVERY_MS = 60_000;
-const DB_EVERY_MS = 60 * 60_000;
+/** While others are using the database: it is awake, so a check costs nothing. */
+const AWAKE_EVERY_MS = 5 * 60_000;
+/** Nobody around: wake it this rarely. */
+const IDLE_EVERY_MS = 6 * 60 * 60_000;
 /** After a failed check, sooner: the database is down anyway. */
 const DB_RETRY_MS = 5 * 60_000;
 /** A day of readings waits in memory if the database can't take them. */
@@ -127,10 +130,25 @@ async function disk() {
   }
 }
 
+/** When something other than this monitor last used the database. */
+let othersAt = 0;
+let own = 0;
+const noteOthers = () => {
+  if (!own) othersAt = Date.now();
+};
+async function mine<T>(f: () => Promise<T>): Promise<T> {
+  own++;
+  try {
+    return await f();
+  } finally {
+    own--;
+  }
+}
+
 async function databaseMs(): Promise<number | null> {
   const started = performance.now();
   try {
-    await pool.query('select 1');
+    await mine(() => pool.query('select 1'));
     return Math.round(performance.now() - started);
   } catch {
     return null;
@@ -284,7 +302,7 @@ export async function flushHealth() {
   if (!unsaved.length) return;
   const rows = unsaved.splice(0);
   try {
-    await db.insert(serverHealth).values(rows);
+    await mine(() => db.insert(serverHealth).values(rows));
   } catch (err) {
     unsaved.unshift(...rows.slice(-(MAX_UNSAVED - unsaved.length)));
     throw err;
@@ -296,7 +314,9 @@ export async function flushHealth() {
 }
 
 export async function sampleHealth() {
-  const due = !lastDb || Date.now() - lastDb.at >= (lastDb.ms === null ? DB_RETRY_MS : DB_EVERY_MS);
+  const since = lastDb ? Date.now() - lastDb.at : Infinity;
+  const awake = Date.now() - othersAt < 3 * 60_000;
+  const due = since >= (lastDb?.ms === null ? DB_RETRY_MS : awake ? AWAKE_EVERY_MS : IDLE_EVERY_MS);
   const r = await readHealth(due);
   recent.push(r);
   if (recent.length > 60) recent.shift();
@@ -325,6 +345,7 @@ export async function sampleHealth() {
 let timer: NodeJS.Timeout | null = null;
 export function startHealthMonitor() {
   delay.enable();
+  pool.on('acquire', noteOthers);
   void cpuTimes().then((t) => (last = t));
   timer = setInterval(() => {
     sampleHealth().catch((err: unknown) => logger.warn({ err }, 'Server health was not saved'));
@@ -333,5 +354,6 @@ export function startHealthMonitor() {
 }
 export function stopHealthMonitor() {
   if (timer) clearInterval(timer);
+  pool.off('acquire', noteOthers);
   timer = null;
 }
