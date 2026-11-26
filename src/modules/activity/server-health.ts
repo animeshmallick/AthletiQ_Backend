@@ -7,6 +7,10 @@
  *    instance out of CPU credits).
  *  - memory / swap / disk: the machine's. app memory: the API container's, against its limit.
  *  - event loop: how long the API waits for its turn. Database: one trip, and waiting requests.
+ *
+ * The database is checked, and the readings saved, once an hour (sooner when an admin looks).
+ * Neon pauses an idle database after 5 minutes and bills the time it runs: a trip every minute
+ * kept it running all day and used up the month's allowance.
  */
 import { readFile, statfs } from 'node:fs/promises';
 import os from 'node:os';
@@ -19,6 +23,11 @@ import { logger } from '../../lib/logger.js';
 import { activeAdminIds, notifyOnce } from '../push/push.service.js';
 
 const EVERY_MS = 60_000;
+const DB_EVERY_MS = 60 * 60_000;
+/** After a failed check, sooner: the database is down anyway. */
+const DB_RETRY_MS = 5 * 60_000;
+/** A day of readings waits in memory if the database can't take them. */
+const MAX_UNSAVED = 24 * 60;
 const KEEP_DAYS = 30;
 const MB = 1024 * 1024;
 
@@ -131,17 +140,24 @@ async function databaseMs(): Promise<number | null> {
 const delay = monitorEventLoopDelay({ resolution: 20 });
 let last: CpuTimes | null = null;
 
-/** One reading now. CPU covers the time since the previous reading. */
-export async function readHealth() {
+let lastDb: { at: number; ms: number | null } | null = null;
+
+/**
+ * One reading now. CPU covers the time since the previous reading. Without `checkDb` the database
+ * time is the last one measured.
+ */
+export async function readHealth(checkDb = true) {
   const before = last;
+  const measure = checkDb || !lastDb;
   const [times, mem, app, space, dbMs] = await Promise.all([
     cpuTimes(),
     memory(),
     appMemory(),
     disk(),
-    databaseMs(),
+    measure ? databaseMs() : Promise.resolve(lastDb!.ms),
   ]);
   last = times;
+  if (measure) lastDb = { at: Date.now(), ms: dbMs };
   const cpu = before ? cpuBetween(before, times) : null;
   const lag = delay.percentile(99) / 1e6;
   delay.reset();
@@ -259,19 +275,41 @@ export function healthScore(
 const recent: HealthReading[] = [];
 export const recentReadings = () => recent;
 
-export async function sampleHealth() {
-  const r = await readHealth();
-  recent.push(r);
-  if (recent.length > 60) recent.shift();
-  const { cores: _c, uptime: _u, ...row } = r;
-  await db.insert(serverHealth).values(row);
-  if (Math.random() < 0.001)
+const unsaved: (typeof serverHealth.$inferInsert)[] = [];
+/** Already told today (saves asking the database every minute while a problem lasts). */
+const told = new Set<string>();
+
+/** Saves the readings waiting in memory, in one trip. */
+export async function flushHealth() {
+  if (!unsaved.length) return;
+  const rows = unsaved.splice(0);
+  try {
+    await db.insert(serverHealth).values(rows);
+  } catch (err) {
+    unsaved.unshift(...rows.slice(-(MAX_UNSAVED - unsaved.length)));
+    throw err;
+  }
+  if (Math.random() < 0.05)
     await db
       .delete(serverHealth)
       .where(lt(serverHealth.at, sql`now() - make_interval(days => ${KEEP_DAYS})`));
-  for (const p of healthProblems(recent))
+}
+
+export async function sampleHealth() {
+  const due = !lastDb || Date.now() - lastDb.at >= (lastDb.ms === null ? DB_RETRY_MS : DB_EVERY_MS);
+  const r = await readHealth(due);
+  recent.push(r);
+  if (recent.length > 60) recent.shift();
+  const { cores: _c, uptime: _u, ...row } = r;
+  unsaved.push(row);
+  if (unsaved.length > MAX_UNSAVED) unsaved.shift();
+  // The database was just woken for the check: save the hour with it.
+  if (due) await flushHealth();
+  for (const p of healthProblems(recent)) {
     // Once a day for each problem.
-    await notifyOnce(`server:${p.key}:${todayInAppTz()}`, await activeAdminIds(), {
+    const key = `server:${p.key}:${todayInAppTz()}`;
+    if (told.has(key)) continue;
+    await notifyOnce(key, await activeAdminIds(), {
       category: 'approvals',
       icon: p.level === 'critical' ? '🔴' : '🟠',
       title: p.title,
@@ -279,6 +317,8 @@ export async function sampleHealth() {
       link: '/audit-log?tab=server',
       tag: `server-${p.key}`,
     });
+    told.add(key);
+  }
   return r;
 }
 

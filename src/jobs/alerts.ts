@@ -17,6 +17,7 @@ import {
 } from '../db/schema/index.js';
 import { addDays, startOfIsoWeek, todayInAppTz } from '../lib/dates.js';
 import { logger } from '../lib/logger.js';
+import { cached } from '../lib/memory-cache.js';
 import { formatInr } from '../lib/money.js';
 import { dayOverview } from '../modules/attendance/attendance.routes.js';
 import type { AuthUser } from '../modules/auth/auth.types.js';
@@ -38,6 +39,19 @@ const SYSTEM: AuthUser = {
 };
 
 /**
+ * Minutes of the day (IST) when a session alert can be due: 15 min before each session to 2 hours
+ * after its end. Kept in memory for 3 hours; any change made through the API empties it.
+ */
+function alertWindows(today: string) {
+  return cached(`alert-windows:${today}`, 3 * 60 * 60_000, async () => {
+    const { sessions } = await dayOverview(SYSTEM, today);
+    return sessions
+      .filter((s) => !s.cancelled)
+      .map((s) => [toMinutes(s.batch.startTime) - 15, toMinutes(s.batch.endTime) + 120] as const);
+  });
+}
+
+/**
  * Every minute:
  *  - 15 min before a session → coach reminder,
  *  - 30 min after start with no check-in → coach + admins,
@@ -47,6 +61,9 @@ export async function runSessionAlerts(now: Date = new Date()) {
   if (!pushEnabled()) return { sent: 0 };
   const today = todayInAppTz(now);
   const mins = istMinutes(now);
+  // Most minutes nothing can be due: skip the database, so it can pause when nobody uses the app.
+  if (!(await alertWindows(today)).some(([from, to]) => mins >= from && mins < to))
+    return { sent: 0 };
   const { sessions } = await dayOverview(SYSTEM, today);
   const admins = await activeAdminIds();
   let sent = 0;

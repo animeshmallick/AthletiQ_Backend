@@ -7,6 +7,7 @@ import {
   healthScore,
   parseCpu,
   parseMemory,
+  flushHealth,
   readHealth,
   sampleHealth,
 } from '../../src/modules/activity/server-health';
@@ -60,6 +61,11 @@ describe('server health', () => {
   it('keeps readings and shows admins the server over a period', async () => {
     await sampleHealth();
     await sampleHealth();
+    // The database was checked a moment ago: readings wait in memory, then go in one trip.
+    expect(await db.$count(serverHealth)).toBe(0);
+    await flushHealth();
+    expect(await db.$count(serverHealth)).toBe(2);
+    await flushHealth();
     expect(await db.$count(serverHealth)).toBe(2);
     const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
     const url = `/api/v1/activity/server?from=${day}&to=${day}`;

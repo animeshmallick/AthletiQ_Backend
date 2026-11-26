@@ -9,7 +9,13 @@ import { addDays, diffDays } from '../../lib/dates.js';
 import { ok } from '../../lib/http.js';
 import { parse, zIsoDate } from '../../lib/validation.js';
 import { requireAdmin } from '../../middleware/auth.js';
-import { healthProblems, healthScore, readHealth, recentReadings } from './server-health.js';
+import {
+  flushHealth,
+  healthProblems,
+  healthScore,
+  readHealth,
+  recentReadings,
+} from './server-health.js';
 
 export const serverHealthRouter = Router();
 
@@ -37,6 +43,8 @@ serverHealthRouter.get('/', requireAdmin, async (req, res) => {
   // Readings are kept 30 days.
   const start = new Date(Math.max(from.getTime(), Date.now() - 30 * 864e5));
   const every = step(start, end);
+  // Readings still waiting in memory belong in the charts.
+  await flushHealth();
   const where = and(gte(serverHealth.at, start), lt(serverHealth.at, startOf(addDays(r.to, 1))));
   const slot = sql<number>`(floor(extract(epoch from ${serverHealth.at}) / ${sql.raw(String(every * 60))}) * ${sql.raw(String(every * 60))})::float8`;
   const [[sum], series, [dayAgo], hours, gaps, now] = await Promise.all([

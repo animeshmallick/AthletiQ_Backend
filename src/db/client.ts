@@ -10,12 +10,13 @@ pg.types.setTypeParser(pg.types.builtins.DATE, (v) => v);
 
 /**
  * Long-lived pool against Neon's pooled endpoint. The database is far away, so opening a connection
- * costs several round trips: idle ones are kept for a few minutes rather than reopened.
+ * costs several round trips: idle ones are kept for two minutes rather than reopened (not longer:
+ * open connections can keep Neon from pausing an idle database).
  */
 export const pool = new pg.Pool({
   connectionString: env.DATABASE_URL,
   max: env.DB_POOL_MAX,
-  idleTimeoutMillis: 5 * 60_000,
+  idleTimeoutMillis: 2 * 60_000,
   keepAlive: true,
   connectionTimeoutMillis: 10_000,
   // A stuck query must not hold a request (and a pooled connection) forever. Client-side, so it

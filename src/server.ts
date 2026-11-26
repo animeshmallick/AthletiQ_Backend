@@ -4,7 +4,11 @@ import { env } from './config/env.js';
 import { closeDatabase } from './db/client.js';
 import { startScheduler, stopScheduler } from './jobs/scheduler.js';
 import { logger } from './lib/logger.js';
-import { startHealthMonitor, stopHealthMonitor } from './modules/activity/server-health.js';
+import {
+  flushHealth,
+  startHealthMonitor,
+  stopHealthMonitor,
+} from './modules/activity/server-health.js';
 import { flushPerf } from './modules/activity/perf-log.js';
 import { flushRequestLog } from './modules/activity/request-log.js';
 
@@ -42,6 +46,7 @@ async function shutdown(signal: string) {
     // Save the request log still waiting in memory before the database goes away.
     await flushRequestLog();
     await flushPerf();
+    await flushHealth().catch(() => undefined);
     await closeDatabase();
     logger.info('Shutdown complete');
     process.exit(0);
