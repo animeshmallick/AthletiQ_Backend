@@ -122,6 +122,35 @@ describe('admin review of registrations', () => {
     });
 
     await api.post(`/api/v1/registrations/${id}/approve`, {}).expect(409);
+
+    // The same child sent again: flagged as already a student, and approving is refused.
+    const send = (extra: object = {}) =>
+      request(getApp())
+        .post('/api/v1/public/register/student')
+        .send({ ...studentForm, fullName: '  diya   KAPOOR ', ...extra })
+        .expect(201);
+    const again = (await send()).body.data.id as string;
+    // Sent twice more while waiting: still one request, with the latest details.
+    expect((await send({ message: 'Corrected' })).body.data.id).toBe(again);
+    const waiting = (await api.get('/api/v1/registrations').expect(200)).body;
+    expect(waiting.meta.pending.pendingStudents).toBe(1);
+    expect(waiting.data[0]).toMatchObject({
+      id: again,
+      message: 'Corrected',
+      alreadyStudent: { id: approved.body.data.student.id, left: false },
+    });
+    await api
+      .post(`/api/v1/registrations/${again}/approve`, {
+        joiningDate: '2026-03-10',
+        batches: [{ batchId: otherBatch.id }],
+      })
+      .expect(409);
+    // A sibling on the same phone is a new request and not flagged.
+    const sibling = (await send({ fullName: 'Aarav Kapoor' })).body.data.id as string;
+    expect(sibling).not.toBe(again);
+    const both = (await api.get('/api/v1/registrations').expect(200)).body.data;
+    expect(both.find((r: { id: string }) => r.id === sibling).alreadyStudent).toBeNull();
+
     const done = await api.get('/api/v1/registrations?status=approved').expect(200);
     expect(done.body.data[0]).toMatchObject({
       status: 'approved',

@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { z } from 'zod';
@@ -8,6 +8,7 @@ import {
   batches,
   locations,
   registrationRequests,
+  students,
   users,
   type CoachRegistrationDetails,
   type StudentRegistrationDetails,
@@ -60,6 +61,8 @@ const registrationLimiter = rateLimit({
 
 /** Honeypot: real users never see or fill the `website` field; bots usually do. */
 const Honeypot = { website: z.string().max(0, 'Invalid submission').optional() };
+
+const normalName = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
 
 /** Data for the public registration page: academy name and the batches students can pick from. */
 publicRegistrationRouter.get('/options', async (_req, res) => {
@@ -130,33 +133,59 @@ publicRegistrationRouter.post('/student', registrationLimiter, async (req, res) 
     medicalNotes: body.medicalNotes,
     preferredBatchIds: picked,
   };
-  const [row] = await db
-    .insert(registrationRequests)
-    .values({
-      type: 'student',
-      fullName: body.fullName,
-      email: body.email ?? null,
-      phone: body.phone,
-      message: body.message,
-      details,
-      preferredBatchId: picked[0] ?? null,
-      preferredLocationId,
-      preferredDays: body.preferredDays ?? null,
-      ipAddress: req.ip ?? null,
-    })
-    .returning({ id: registrationRequests.id });
+  const values = {
+    fullName: body.fullName,
+    email: body.email ?? null,
+    phone: body.phone,
+    message: body.message,
+    details,
+    preferredBatchId: picked[0] ?? null,
+    preferredLocationId,
+    preferredDays: body.preferredDays ?? null,
+    ipAddress: req.ip ?? null,
+  };
+  // Sent again (a double tap, or a parent correcting a detail): the waiting request is updated
+  // rather than a second one added.
+  const { row, again } = await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${'registration:' + body.phone}))`);
+    const [waiting] = await tx
+      .select({ id: registrationRequests.id })
+      .from(registrationRequests)
+      .where(
+        and(
+          eq(registrationRequests.type, 'student'),
+          eq(registrationRequests.status, 'pending'),
+          eq(registrationRequests.phone, body.phone),
+          sql`lower(regexp_replace(trim(${registrationRequests.fullName}), '[[:space:]]+', ' ', 'g')) = ${normalName(body.fullName)}`,
+        ),
+      )
+      .limit(1);
+    if (waiting) {
+      await tx
+        .update(registrationRequests)
+        .set(values)
+        .where(eq(registrationRequests.id, waiting.id));
+      return { row: waiting, again: true };
+    }
+    const [inserted] = await tx
+      .insert(registrationRequests)
+      .values({ type: 'student', ...values })
+      .returning({ id: registrationRequests.id });
+    return { row: inserted, again: false };
+  });
 
-  notifyInBackground(() =>
-    notifyAdmins({
-      category: 'approvals',
-      icon: '🙋',
-      actions: [{ label: 'Review', link: '/registrations' }],
-      title: 'New student sign-up',
-      body: `${body.fullName} wants to join. Review and pick a batch.`,
-      link: '/registrations',
-      tag: 'registrations',
-    }),
-  );
+  if (!again)
+    notifyInBackground(() =>
+      notifyAdmins({
+        category: 'approvals',
+        icon: '🙋',
+        actions: [{ label: 'Review', link: '/registrations' }],
+        title: 'New student sign-up',
+        body: `${body.fullName} wants to join. Review and pick a batch.`,
+        link: '/registrations',
+        tag: 'registrations',
+      }),
+    );
   created(res, {
     id: row!.id,
     message:
@@ -289,7 +318,38 @@ registrationsRouter.get('/', async (req, res) => {
       .from(registrationRequests)
       .where(eq(registrationRequests.status, 'pending')),
   ]);
-  ok(res, rows, { ...pageMeta(q.page, q.pageSize, total), pending: counts });
+  // Someone already a student (same name and phone) can't be approved again: say so up front.
+  const phones = [...new Set(rows.filter((r) => r.type === 'student').map((r) => r.phone))];
+  const known = phones.length
+    ? await db
+        .select({
+          id: students.id,
+          code: students.code,
+          fullName: students.fullName,
+          phone: students.phone,
+          status: students.status,
+        })
+        .from(students)
+        .where(inArray(students.phone, phones))
+    : [];
+  ok(
+    res,
+    rows.map((r) => {
+      const same =
+        r.type === 'student'
+          ? known.find(
+              (s) => s.phone === r.phone && normalName(s.fullName) === normalName(r.fullName),
+            )
+          : undefined;
+      return {
+        ...r,
+        alreadyStudent: same
+          ? { id: same.id, code: same.code, fullName: same.fullName, left: same.status === 'left' }
+          : null,
+      };
+    }),
+    { ...pageMeta(q.page, q.pageSize, total), pending: counts },
+  );
 });
 
 registrationsRouter.get('/:id', async (req, res) => {

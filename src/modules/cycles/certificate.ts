@@ -246,6 +246,16 @@ export function renderCertificatePdf(
       doc.rect(bx + i * bw + 5, top + 18, bw - 10, 44).fill(C.brandSoft);
       doc.rect(bx + i * bw + 5, top + 62 - h, bw - 10, h).fill(C.brand);
       line(MONTH[Number(t.month.slice(5)) - 1]!, bx + i * bw, top + 66, bw, 7.5, C.muted);
+      if (t.conducted)
+        line(
+          `${Math.round((t.attended * 100) / t.conducted)}%`,
+          bx + i * bw,
+          top + 76,
+          bw,
+          7.5,
+          C.body,
+          true,
+        );
     });
     if (!trend.length) line('No sessions recorded', left, top + 36, 300, 9, C.muted);
     const sx = W - left - 300;
