@@ -26,7 +26,10 @@ export const zIdParam = z.object({ id: zId });
 
 export const zIsoDate = z
   .string()
-  .refine(isIsoDate, { message: 'Must be a valid date (YYYY-MM-DD)' });
+  // Sensible years only: the database and date arithmetic don't reach every year.
+  .refine((v) => isIsoDate(v) && v >= '1900-01-01' && v <= '2199-12-31', {
+    message: 'Must be a valid date (YYYY-MM-DD)',
+  });
 
 export const zTime = z
   .string()

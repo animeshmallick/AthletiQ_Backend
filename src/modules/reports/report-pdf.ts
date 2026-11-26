@@ -51,7 +51,8 @@ function ensure(doc: Doc, space: number) {
 }
 
 function section(doc: Doc, title: string, subtitle?: string) {
-  ensure(doc, 60);
+  // Room for the heading, a table's header and a row: never a heading alone at the page's end.
+  ensure(doc, 110);
   doc.moveDown(0.6);
   const y = doc.y;
   doc.rect(M, y + 2, 3, 12).fill(C.brand);

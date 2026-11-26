@@ -157,6 +157,11 @@ export function streaks(marks: { date: string; status: string }[]) {
   return { current: run, longest };
 }
 
+/** "student.batch_left" → "Batch left". */
+const plain = (action: string) => {
+  const text = (action.split('.')[1] ?? action).replace(/_/g, ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
 const ACTION_LABEL: Record<string, string> = {
   'student.created': 'Enrolled at the academy',
   'student.transferred': 'Moved to another batch',
@@ -168,6 +173,10 @@ const ACTION_LABEL: Record<string, string> = {
   'student.makeup_approved': 'Makeup approved',
   'student.makeup_rejected': 'Makeup not approved',
   'student.makeup_cancelled': 'Makeup cancelled',
+  'student.makeup_not_needed': 'Makeup not needed',
+  'student.makeup_needed': 'Makeup needed after all',
+  'student.batch_left': 'Left a batch',
+  'student.batch_joined': 'Joined another batch',
   'student.updated': 'Profile updated',
 };
 const KIND: Record<string, TimelineEvent['kind']> = {
@@ -459,14 +468,18 @@ export async function loadStudentReports(
       });
     });
     for (const h of historyBy.get(s.id) ?? []) {
-      if (['student.created', 'student.transferred', 'student.updated'].includes(h.action))
+      if (
+        ['student.created', 'student.transferred', 'student.updated'].includes(h.action) ||
+        // Downloading or sharing a report isn't part of the student's story.
+        h.action.startsWith('report')
+      )
         continue; // covered by joining/enrolment rows, or too noisy
       const meta = h.metadata ?? {};
       const reason = typeof meta.reason === 'string' ? meta.reason : undefined;
       timeline.push({
         date: h.createdAt.toISOString(),
         kind: KIND[h.action] ?? 'note',
-        title: ACTION_LABEL[h.action] ?? h.action.replace(/[._]/g, ' '),
+        title: ACTION_LABEL[h.action] ?? plain(h.action),
         detail: [h.actor ? `by ${h.actor}` : null, reason].filter(Boolean).join(' · ') || undefined,
       });
     }

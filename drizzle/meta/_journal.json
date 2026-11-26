@@ -211,6 +211,13 @@
       "when": 1795635956047,
       "tag": "0029_api_perf",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1795636843684,
+      "tag": "0030_server_health",
+      "breakpoints": true
     }
   ]
 }

@@ -9,6 +9,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  real,
   text,
   uuid,
 } from 'drizzle-orm/pg-core';
@@ -101,6 +102,32 @@ export const apiRequests = pgTable(
     index('api_requests_status_idx').on(t.status, t.createdAt),
     index('api_requests_user_idx').on(t.userId, t.createdAt),
   ],
+);
+
+/** One reading a minute of the machine and the API (sizes in MB); see activity/server-health. */
+export const serverHealth = pgTable(
+  'server_health',
+  {
+    at: tz().notNull(),
+    cpu: real().notNull(),
+    steal: real().notNull(),
+    load: real().notNull(),
+    memTotal: integer().notNull(),
+    memUsed: integer().notNull(),
+    swapTotal: integer().notNull(),
+    swapUsed: integer().notNull(),
+    diskTotal: integer().notNull(),
+    diskUsed: integer().notNull(),
+    diskFree: integer().notNull(),
+    appMem: integer().notNull(),
+    appLimit: integer(),
+    lagMs: integer().notNull(),
+    /** Null: the database couldn't be reached. */
+    dbMs: integer(),
+    dbConnections: integer().notNull(),
+    dbWaiting: integer().notNull(),
+  },
+  (t) => [index('server_health_at_idx').on(t.at)],
 );
 
 /**

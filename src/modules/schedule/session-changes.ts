@@ -570,17 +570,21 @@ export async function smartDates(
     startTime: norm(time.startTime ?? current.startTime),
     endTime: norm(time.endTime ?? current.endTime),
   };
-  const days = [];
-  for (const date of from <= to ? eachDay(from, to) : []) {
-    const blocked = await slotBlocker(batch, { date, ...slot }, current, false, now, db);
+  // All days at once: each needs a few database trips.
+  const dates = from <= to ? eachDay(from, to) : [];
+  const blockers = await Promise.all(
+    dates.map((date) => slotBlocker(batch, { date, ...slot }, current, false, now, db)),
+  );
+  const days = dates.map((date, i) => {
+    const blocked = blockers[i]!;
     const outside = affected.filter((s) => date > s.until).map((s) => s.fullName);
-    days.push({
+    return {
       date,
       blocked,
       outside,
       smart: !blocked && !outside.length && affected.length > 0,
-    });
-  }
+    };
+  });
   const smart = days.filter((d) => d.smart).length;
   return {
     sessionDate,

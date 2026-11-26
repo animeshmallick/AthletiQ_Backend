@@ -4,6 +4,7 @@ import { env } from './config/env.js';
 import { closeDatabase } from './db/client.js';
 import { startScheduler, stopScheduler } from './jobs/scheduler.js';
 import { logger } from './lib/logger.js';
+import { startHealthMonitor, stopHealthMonitor } from './modules/activity/server-health.js';
 import { flushPerf } from './modules/activity/perf-log.js';
 import { flushRequestLog } from './modules/activity/request-log.js';
 
@@ -17,6 +18,8 @@ server.keepAliveTimeout = 65_000;
 server.headersTimeout = 66_000;
 
 startScheduler();
+// The live server only: a developer's machine may share its database.
+if (env.NODE_ENV === 'production') startHealthMonitor();
 
 let shuttingDown = false;
 async function shutdown(signal: string) {
@@ -32,6 +35,7 @@ async function shutdown(signal: string) {
 
   try {
     stopScheduler();
+    stopHealthMonitor();
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
     );

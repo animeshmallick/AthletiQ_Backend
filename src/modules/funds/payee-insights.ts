@@ -251,7 +251,7 @@ export async function payeeInsights(payeeId: string, period: Period) {
   const opening = period.from ? sum(live.filter((i) => i.date < period.from!)) : 0;
 
   // Oldest share not yet covered by payouts (first-in, first-out): how long they've waited.
-  const paidTotal = -sum(livePayouts);
+  const paidTotal = -sum(livePayouts) || 0;
   let covered = 0;
   let unpaidSince: IsoDate | null = null;
   for (const s of liveShares) {
@@ -268,7 +268,7 @@ export async function payeeInsights(payeeId: string, period: Period) {
   const monthly = range.map((month) => ({
     month,
     earned: sum(periodShares.filter((i) => monthOf(i.date) === month)),
-    paid: -sum(periodPayouts.filter((i) => monthOf(i.date) === month)),
+    paid: -sum(periodPayouts.filter((i) => monthOf(i.date) === month)) || 0,
   }));
 
   // Where the money came from in the period.
@@ -315,7 +315,8 @@ export async function payeeInsights(payeeId: string, period: Period) {
         ? Math.round((Date.parse(today) - Date.parse(unpaidSince)) / 86_400_000)
         : 0,
       earned,
-      paid: -sum(periodPayouts),
+      // Never -0.
+      paid: -sum(periodPayouts) || 0,
       opening,
       closing: opening + sum(periodShares) + sum(periodPayouts),
       avgMonthly: Math.round(earned / activeMonths),

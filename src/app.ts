@@ -12,6 +12,7 @@ import { pushStatus } from './modules/push/push.service.js';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { apiLimiter } from './middleware/rate-limit.js';
+import { AppError } from './lib/errors.js';
 import { clearOnWrite } from './middleware/cache.js';
 import { perfLog } from './modules/activity/perf-log.js';
 import { requestLog } from './modules/activity/request-log.js';
@@ -75,7 +76,19 @@ export function createApp(): Express {
     }),
   );
   app.use(compression());
-  app.use(express.json({ limit: '1mb' }));
+  // Invisible NUL characters (e.g. from a bad paste) can't be stored: dropped from what is sent…
+  app.use(
+    express.json({
+      limit: '1mb',
+      reviver: (_key, value: unknown) =>
+        typeof value === 'string' ? value.replaceAll('\u0000', '') : value,
+    }),
+  );
+  // …and refused in addresses.
+  app.use((req, _res, next) => {
+    if (/%00/.test(req.originalUrl)) throw AppError.badRequest('Invalid address');
+    next();
+  });
   app.use(cookieParser());
 
   // Liveness: process is up. Readiness: dependencies reachable (use for load balancer checks),
